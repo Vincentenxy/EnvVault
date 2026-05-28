@@ -1,0 +1,23 @@
+# 本地开发配置。生产环境请使用 ENVVAULT_CONFIG_PATH 指向独立配置文件，
+# 或通过 ENVVAULT_DATABASE_PASSWORD 等环境变量覆盖敏感值。
+http:
+  addr: ":8080"
+
+auth:
+  jwt_secret: "dev-only-change-me"
+
+security:
+  # base64("0123456789abcdef0123456789abcdef")，仅用于本地开发。
+  encryption_key: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
+database:
+  host: "127.0.0.1"
+  port: 5432
+  user: "admin"
+  password: "123456"
+  name: "envvault"
+  ssl_mode: "disable"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: "30m"
+  connect_timeout: "5s"

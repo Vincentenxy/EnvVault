@@ -1,0 +1,7 @@
+.DS_Store
+.env
+*.local.yaml
+bin/
+tmp/
+pgdata/
+redisdata/

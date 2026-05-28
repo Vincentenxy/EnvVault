@@ -50,6 +50,7 @@ database:
 
 func TestLoadFromPathAllowsEnvironmentOverride(t *testing.T) {
 	t.Setenv("ENVVAULT_DATABASE_HOST", "db.internal")
+	t.Setenv("ENVVAULT_REDIS_ADDRS", "redis-1:6379,redis-2:6379")
 
 	cfg, err := LoadFromPath("")
 	if err != nil {
@@ -58,5 +59,8 @@ func TestLoadFromPathAllowsEnvironmentOverride(t *testing.T) {
 
 	if cfg.Database.Host != "db.internal" {
 		t.Fatalf("Database.Host = %q, want db.internal", cfg.Database.Host)
+	}
+	if len(cfg.Redis.Addrs) != 2 || cfg.Redis.Addrs[1] != "redis-2:6379" {
+		t.Fatalf("Redis.Addrs = %#v, want two redis addrs", cfg.Redis.Addrs)
 	}
 }

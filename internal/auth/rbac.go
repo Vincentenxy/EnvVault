@@ -3,12 +3,10 @@ package auth
 import "context"
 
 type UserInfo struct {
-	StaffUserID string `json:"staffUserId,omitempty"`
-	GxjId       string `json:"gxjId,omitempty"`
-	StaffNo     string `json:"staffNo,omitempty"`
-	Name        string `json:"name,omitempty"`
-	JWT         string `json:"jwt,omitempty"`
-	Cookie      string `json:"cookie,omitempty"`
+	UserId string `json:"userId,omitempty"`
+	Name   string `json:"name,omitempty"`
+	JWT    string `json:"jwt,omitempty"`
+	Cookie string `json:"cookie,omitempty"`
 }
 
 type Resource struct {

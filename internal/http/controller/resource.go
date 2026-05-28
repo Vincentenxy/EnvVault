@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -8,6 +9,7 @@ import (
 
 	"envVault/internal/auth"
 	"envVault/internal/http/response"
+	"envVault/internal/logging"
 	"envVault/internal/store/postgres"
 )
 
@@ -50,11 +52,13 @@ func (ctrl *Controller) CreateOrganization(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "CreateOrganization", logging.F("name", req.Name))
 	item, err := ctrl.store.CreateOrganization(c.Request.Context(), req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) ListOrganizations(c *gin.Context) {
+	ctrl.log(c, "ListOrganizations")
 	items, err := ctrl.store.ListOrganizations(c.Request.Context())
 	ctrl.write(c, items, err)
 }
@@ -64,6 +68,7 @@ func (ctrl *Controller) GetOrganization(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "GetOrganization", logging.F("id", req.ID))
 	item, err := ctrl.store.GetOrganization(c.Request.Context(), req.ID)
 	ctrl.write(c, item, err)
 }
@@ -73,11 +78,13 @@ func (ctrl *Controller) UpdateOrganization(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "UpdateOrganization", logging.F("id", req.ID), logging.F("name", req.Name))
 	item, err := ctrl.store.UpdateOrganization(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) DeleteOrganization(c *gin.Context) {
+	ctrl.log(c, "DeleteOrganization")
 	ctrl.delete(c, func(req idRequest) error {
 		return ctrl.store.DeleteOrganization(c.Request.Context(), req.ID, ctrl.actor(c))
 	})
@@ -88,6 +95,7 @@ func (ctrl *Controller) CreateProject(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "CreateProject", logging.F("org_id", req.ParentID), logging.F("name", req.Name))
 	item, err := ctrl.store.CreateProject(c.Request.Context(), req.ParentID, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
@@ -97,6 +105,7 @@ func (ctrl *Controller) ListProjects(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "ListProjects", logging.F("org_id", req.OrgID))
 	items, err := ctrl.store.ListProjects(c.Request.Context(), req.OrgID)
 	ctrl.write(c, items, err)
 }
@@ -106,6 +115,7 @@ func (ctrl *Controller) GetProject(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "GetProject", logging.F("id", req.ID))
 	item, err := ctrl.store.GetProject(c.Request.Context(), req.ID)
 	ctrl.write(c, item, err)
 }
@@ -115,11 +125,13 @@ func (ctrl *Controller) UpdateProject(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "UpdateProject", logging.F("id", req.ID), logging.F("name", req.Name))
 	item, err := ctrl.store.UpdateProject(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) DeleteProject(c *gin.Context) {
+	ctrl.log(c, "DeleteProject")
 	ctrl.delete(c, func(req idRequest) error {
 		return ctrl.store.DeleteProject(c.Request.Context(), req.ID, ctrl.actor(c))
 	})
@@ -130,6 +142,7 @@ func (ctrl *Controller) CreateEnvironment(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "CreateEnvironment", logging.F("project_id", req.ParentID), logging.F("name", req.Name))
 	item, err := ctrl.store.CreateEnvironment(c.Request.Context(), req.ParentID, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
@@ -139,6 +152,7 @@ func (ctrl *Controller) ListEnvironments(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "ListEnvironments", logging.F("project_id", req.ProjectID))
 	items, err := ctrl.store.ListEnvironments(c.Request.Context(), req.ProjectID)
 	ctrl.write(c, items, err)
 }
@@ -148,6 +162,7 @@ func (ctrl *Controller) GetEnvironment(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "GetEnvironment", logging.F("id", req.ID))
 	item, err := ctrl.store.GetEnvironment(c.Request.Context(), req.ID)
 	ctrl.write(c, item, err)
 }
@@ -157,11 +172,13 @@ func (ctrl *Controller) UpdateEnvironment(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "UpdateEnvironment", logging.F("id", req.ID), logging.F("name", req.Name))
 	item, err := ctrl.store.UpdateEnvironment(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) DeleteEnvironment(c *gin.Context) {
+	ctrl.log(c, "DeleteEnvironment")
 	ctrl.delete(c, func(req idRequest) error {
 		return ctrl.store.DeleteEnvironment(c.Request.Context(), req.ID, ctrl.actor(c))
 	})
@@ -172,6 +189,7 @@ func (ctrl *Controller) CreateFolder(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "CreateFolder", logging.F("environment_id", req.ParentID), logging.F("name", req.Name))
 	item, err := ctrl.store.CreateFolder(c.Request.Context(), req.ParentID, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
@@ -181,6 +199,7 @@ func (ctrl *Controller) ListFolders(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "ListFolders", logging.F("environment_id", req.EnvironmentID))
 	items, err := ctrl.store.ListFolders(c.Request.Context(), req.EnvironmentID)
 	ctrl.write(c, items, err)
 }
@@ -190,6 +209,7 @@ func (ctrl *Controller) GetFolder(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "GetFolder", logging.F("id", req.ID))
 	item, err := ctrl.store.GetFolder(c.Request.Context(), req.ID)
 	ctrl.write(c, item, err)
 }
@@ -199,11 +219,13 @@ func (ctrl *Controller) UpdateFolder(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "UpdateFolder", logging.F("id", req.ID), logging.F("name", req.Name))
 	item, err := ctrl.store.UpdateFolder(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) DeleteFolder(c *gin.Context) {
+	ctrl.log(c, "DeleteFolder")
 	ctrl.delete(c, func(req idRequest) error {
 		return ctrl.store.DeleteFolder(c.Request.Context(), req.ID, ctrl.actor(c))
 	})
@@ -214,12 +236,16 @@ func (ctrl *Controller) CreateSecret(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "CreateSecret", logging.F("folder_id", req.FolderID), logging.F("key", req.Key), logging.F("value", req.Value))
 	ciphertext, err := ctrl.encryptSecret(c, req.Value)
 	if err != nil {
 		ctrl.write(c, nil, err)
 		return
 	}
 	item, err := ctrl.store.CreateSecret(c.Request.Context(), req.FolderID, req.Key, req.Comment, ctrl.actor(c), ciphertext)
+	if err == nil {
+		ctrl.cacheSecret(c, item.ID, ciphertext)
+	}
 	ctrl.write(c, item, err)
 }
 
@@ -228,12 +254,16 @@ func (ctrl *Controller) UpdateSecret(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "UpdateSecret", logging.F("id", req.ID), logging.F("key", req.Key), logging.F("value", req.Value))
 	ciphertext, err := ctrl.encryptSecret(c, req.Value)
 	if err != nil {
 		ctrl.write(c, nil, err)
 		return
 	}
 	item, err := ctrl.store.UpdateSecret(c.Request.Context(), req.ID, req.Key, req.Comment, ctrl.actor(c), ciphertext)
+	if err == nil {
+		ctrl.cacheSecret(c, item.ID, ciphertext)
+	}
 	ctrl.write(c, item, err)
 }
 
@@ -242,6 +272,7 @@ func (ctrl *Controller) GetSecret(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "GetSecret", logging.F("id", req.ID))
 	item, err := ctrl.store.GetSecret(c.Request.Context(), req.ID)
 	ctrl.write(c, item, err)
 }
@@ -251,6 +282,7 @@ func (ctrl *Controller) ListSecrets(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "ListSecrets", logging.F("org_id", req.OrgID), logging.F("project_id", req.ProjectID), logging.F("environment_id", req.EnvironmentID), logging.F("folder_id", req.FolderID))
 	items, err := ctrl.store.ListSecrets(c.Request.Context(), postgres.ListFilter{
 		OrgID:         req.OrgID,
 		ProjectID:     req.ProjectID,
@@ -265,6 +297,22 @@ func (ctrl *Controller) SearchSecrets(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "SearchSecrets", logging.F("org_id", req.OrgID), logging.F("project_id", req.ProjectID), logging.F("environment_id", req.EnvironmentID), logging.F("folder_id", req.FolderID), logging.F("keyword", req.Keyword))
+	filter := postgres.ListFilter{
+		OrgID:         req.OrgID,
+		ProjectID:     req.ProjectID,
+		EnvironmentID: req.EnvironmentID,
+		FolderID:      req.FolderID,
+		Keyword:       req.Keyword,
+	}
+	if ctrl.cache != nil {
+		items, err := ctrl.cache.SearchSecrets(c.Request.Context(), filter)
+		if err == nil {
+			ctrl.write(c, items, nil)
+			return
+		}
+		logging.Warn(c.Request.Context(), "SearchSecrets", "redis search failed, fallback to postgres", logging.F("error", err))
+	}
 	items, err := ctrl.store.ListSecrets(c.Request.Context(), postgres.ListFilter{
 		OrgID:         req.OrgID,
 		ProjectID:     req.ProjectID,
@@ -276,8 +324,15 @@ func (ctrl *Controller) SearchSecrets(c *gin.Context) {
 }
 
 func (ctrl *Controller) DeleteSecret(c *gin.Context) {
+	ctrl.log(c, "DeleteSecret")
 	ctrl.delete(c, func(req idRequest) error {
-		return ctrl.store.DeleteSecret(c.Request.Context(), req.ID, ctrl.actor(c))
+		err := ctrl.store.DeleteSecret(c.Request.Context(), req.ID, ctrl.actor(c))
+		if err == nil && ctrl.cache != nil {
+			if cacheErr := ctrl.cache.DeleteSecret(c.Request.Context(), req.ID); cacheErr != nil {
+				logging.Warn(c.Request.Context(), "DeleteSecret", "redis delete failed", logging.F("error", cacheErr), logging.F("id", req.ID))
+			}
+		}
+		return err
 	})
 }
 
@@ -286,6 +341,7 @@ func (ctrl *Controller) ListAuditRecords(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	ctrl.log(c, "ListAuditRecords", logging.F("resource_type", req.ResourceType), logging.F("resource_id", req.ResourceID))
 	items, err := ctrl.store.ListAuditRecords(c.Request.Context(), req.ResourceType, req.ResourceID)
 	ctrl.write(c, items, err)
 }
@@ -307,6 +363,7 @@ func (ctrl *Controller) write(c *gin.Context, data any, err error) {
 		response.OK(c, data)
 		return
 	}
+	logging.Error(c.Request.Context(), "controller.write", "request failed", logging.F("error", err))
 	if errors.Is(err, postgres.ErrNotFound) {
 		response.Fail(c, http.StatusNotFound, 1404, err.Error())
 		return
@@ -324,10 +381,7 @@ func (ctrl *Controller) delete(c *gin.Context, fn func(idRequest) error) {
 
 func (ctrl *Controller) actor(c *gin.Context) string {
 	user := auth.UserFromContext(c)
-	if user.StaffUserID != "" {
-		return user.StaffUserID
-	}
-	return user.StaffNo
+	return user.UserId
 }
 
 func (ctrl *Controller) encryptSecret(c *gin.Context, value string) (postgres.SecretCiphertext, error) {
@@ -343,4 +397,34 @@ func (ctrl *Controller) encryptSecret(c *gin.Context, value string) (postgres.Se
 		Nonce:     ciphertext.Nonce,
 		Data:      ciphertext.Data,
 	}, nil
+}
+
+func (ctrl *Controller) cacheSecret(c *gin.Context, id string, ciphertext postgres.SecretCiphertext) {
+	if ctrl.cache == nil {
+		return
+	}
+
+	secret, err := ctrl.store.GetSecret(c.Request.Context(), id)
+	if err != nil {
+		logging.Warn(c.Request.Context(), "cacheSecret", "load secret for redis failed", logging.F("error", err), logging.F("id", id))
+		return
+	}
+
+	payload, err := json.Marshal(ciphertext)
+	if err != nil {
+		logging.Warn(c.Request.Context(), "cacheSecret", "marshal ciphertext failed", logging.F("error", err), logging.F("id", id))
+		return
+	}
+
+	err = ctrl.cache.UpsertSecret(c.Request.Context(), postgres.SecretCacheRecord{
+		Secret:          secret,
+		ValueCiphertext: payload,
+	})
+	if err != nil {
+		logging.Warn(c.Request.Context(), "cacheSecret", "redis upsert failed", logging.F("error", err), logging.F("id", id))
+	}
+}
+
+func (ctrl *Controller) log(c *gin.Context, method string, fields ...logging.Field) {
+	logging.Info(c.Request.Context(), method, "handler called", fields...)
 }

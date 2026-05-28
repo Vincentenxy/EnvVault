@@ -45,6 +45,11 @@ type SecretCiphertext struct {
 	Data      []byte `json:"data"`
 }
 
+type SecretCacheRecord struct {
+	Secret          Secret
+	ValueCiphertext json.RawMessage
+}
+
 type AuditRecord struct {
 	ID             string          `json:"id"`
 	Actor          string          `json:"actor"`
@@ -302,6 +307,45 @@ order by s.key asc
 			return nil, err
 		}
 		items = append(items, secret)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) ListSecretCacheRecords(ctx context.Context) ([]SecretCacheRecord, error) {
+	rows, err := r.db.QueryContext(ctx, `
+select s.id, o.id, p.id, e.id, s.folder_id, s.key, s.value_ciphertext, s.comment, s.version, s.created_at, s.updated_at
+from secrets s
+join folders f on f.id = s.folder_id
+join environments e on e.id = f.environment_id
+join projects p on p.id = e.project_id
+join organizations o on o.id = p.org_id
+where s.is_deleted = false
+order by s.key asc
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []SecretCacheRecord
+	for rows.Next() {
+		var record SecretCacheRecord
+		if err := rows.Scan(
+			&record.Secret.ID,
+			&record.Secret.OrgID,
+			&record.Secret.ProjectID,
+			&record.Secret.EnvironmentID,
+			&record.Secret.FolderID,
+			&record.Secret.Key,
+			&record.ValueCiphertext,
+			&record.Secret.Comment,
+			&record.Secret.Version,
+			&record.Secret.CreatedAt,
+			&record.Secret.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, record)
 	}
 	return items, rows.Err()
 }

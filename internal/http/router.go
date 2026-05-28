@@ -9,12 +9,15 @@ import (
 	"envVault/internal/config"
 	secretcrypto "envVault/internal/crypto"
 	"envVault/internal/http/controller"
+	"envVault/internal/logging"
 	"envVault/internal/store/postgres"
+	rediscache "envVault/internal/store/redis"
 )
 
 type Dependencies struct {
 	Config     config.Config
 	Store      *postgres.Repository
+	Cache      *rediscache.Cache
 	Encryptor  secretcrypto.Encryptor
 	Authorizer auth.Authorizer
 	Database   interface {
@@ -24,7 +27,11 @@ type Dependencies struct {
 
 func NewRouter(deps Dependencies) *gin.Engine {
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
+	router.Use(
+		logging.RequestIDMiddleware(deps.Config.HTTP.RequestIDHeader),
+		logging.AccessLogMiddleware(),
+		logging.RecoveryMiddleware(),
+	)
 
 	LoadApiRoutes(router, deps)
 
@@ -36,6 +43,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 		Config:     deps.Config,
 		Database:   deps.Database,
 		Store:      deps.Store,
+		Cache:      deps.Cache,
 		Encryptor:  deps.Encryptor,
 		Authorizer: deps.Authorizer,
 	})

@@ -7,6 +7,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v4"
+
+	"envVault/internal/logging"
 )
 
 const claimsContextKey = "envvault.jwt.claims"
@@ -17,12 +19,10 @@ var (
 )
 
 type Claims struct {
-	StaffUserID string `json:"staffUserId,omitempty"`
-	GxjId       string `json:"gxjId,omitempty"`
-	StaffNo     string `json:"staffNo,omitempty"`
-	Name        string `json:"name,omitempty"`
-	JWT         string `json:"jwt,omitempty"`
-	Cookie      string `json:"cookie,omitempty"`
+	UserId string `json:"userId,omitempty"`
+	Name   string `json:"name,omitempty"`
+	JWT    string `json:"jwt,omitempty"`
+	Cookie string `json:"cookie,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -33,24 +33,24 @@ type JWTConfig struct {
 func UserFromContext(c *gin.Context) UserInfo {
 	claims := ClaimsFromContext(c)
 	return UserInfo{
-		StaffUserID: claims.StaffUserID,
-		GxjId:       claims.GxjId,
-		StaffNo:     claims.StaffNo,
-		Name:        claims.Name,
-		JWT:         claims.JWT,
-		Cookie:      claims.Cookie,
+		UserId: claims.UserId,
+		Name:   claims.Name,
+		JWT:    claims.JWT,
+		Cookie: claims.Cookie,
 	}
 }
 
 func JWTMiddleware(cfg JWTConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if len(cfg.Secret) == 0 {
+			logging.Error(c.Request.Context(), "JWTMiddleware", "jwt secret is not configured")
 			abort(c, http.StatusServiceUnavailable, ErrMissingJWTSecret)
 			return
 		}
 
 		tokenString, err := bearerToken(c.GetHeader("Authorization"))
 		if err != nil {
+			logging.Warn(c.Request.Context(), "JWTMiddleware", "missing bearer token")
 			abort(c, http.StatusUnauthorized, err)
 			return
 		}
@@ -63,10 +63,12 @@ func JWTMiddleware(cfg JWTConfig) gin.HandlerFunc {
 			return cfg.Secret, nil
 		})
 		if err != nil || !token.Valid {
+			logging.Warn(c.Request.Context(), "JWTMiddleware", "invalid jwt token", logging.F("error", err))
 			abort(c, http.StatusUnauthorized, jwt.ErrTokenInvalidClaims)
 			return
 		}
 
+		logging.Info(c.Request.Context(), "JWTMiddleware", "jwt token accepted", logging.F("user_id", claims.UserId))
 		c.Set(claimsContextKey, claims)
 		c.Next()
 	}

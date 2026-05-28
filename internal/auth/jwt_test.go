@@ -14,7 +14,7 @@ func TestJWTMiddlewareAcceptsValidToken(t *testing.T) {
 
 	secret := []byte("test-secret")
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
-		StaffUserID: "staff-user-1",
+		UserId: "user-1",
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject: "user-1",
 		},
@@ -29,8 +29,8 @@ func TestJWTMiddlewareAcceptsValidToken(t *testing.T) {
 	router.GET("/me", func(c *gin.Context) {
 		claims := ClaimsFromContext(c)
 		c.JSON(http.StatusOK, gin.H{
-			"subject":     claims.Subject,
-			"staffUserId": claims.StaffUserID,
+			"subject": claims.Subject,
+			"userId":  claims.UserId,
 		})
 	})
 

@@ -10,7 +10,9 @@ import (
 	"envVault/internal/config"
 	secretcrypto "envVault/internal/crypto"
 	httpapi "envVault/internal/http"
+	"envVault/internal/logging"
 	"envVault/internal/store/postgres"
+	rediscache "envVault/internal/store/redis"
 )
 
 func Run() error {
@@ -34,10 +36,31 @@ func Run() error {
 	}
 	repository := postgres.NewRepository(db)
 
+	var cache *rediscache.Cache
+	if cfg.Redis.Enabled {
+		cache, err = rediscache.Open(ctx, cfg.Redis)
+		if err != nil {
+			return err
+		}
+		defer cache.Close()
+
+		if cfg.Redis.WarmUpOnStart {
+			records, err := repository.ListSecretCacheRecords(ctx)
+			if err != nil {
+				return err
+			}
+			if err := cache.WarmSecrets(ctx, records); err != nil {
+				return err
+			}
+			logging.Info(ctx, "AppRun", "redis cache warmup completed", logging.F("count", len(records)))
+		}
+	}
+
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Config:     cfg,
 		Database:   db,
 		Store:      repository,
+		Cache:      cache,
 		Encryptor:  encryptor,
 		Authorizer: auth.AllowAllAuthorizer{},
 	})

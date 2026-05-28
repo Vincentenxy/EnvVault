@@ -2,6 +2,7 @@
 # 或通过 ENVVAULT_DATABASE_PASSWORD 等环境变量覆盖敏感值。
 http:
   addr: ":8080"
+  request_id_header: "x-request-id"
 
 auth:
   jwt_secret: "dev-only-change-me"
@@ -21,3 +22,19 @@ database:
   max_idle_conns: 5
   conn_max_lifetime: "30m"
   connect_timeout: "5s"
+
+redis:
+  enabled: true
+  mode: "single" # single 或 cluster
+  addrs:
+    - "127.0.0.1:6379"
+  password: ""
+  db: 0
+  key_prefix: "envvault"
+  warm_up_on_start: true
+  pool_size: 10
+  min_idle_conns: 2
+  max_retries: 3
+  dial_timeout: "5s"
+  read_timeout: "3s"
+  write_timeout: "3s"

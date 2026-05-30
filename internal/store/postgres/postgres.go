@@ -5,15 +5,28 @@ import (
 	"database/sql"
 	"fmt"
 
-	_ "github.com/lib/pq"
+	gormpostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
 
 	"envVault/internal/config"
 )
 
 func Open(ctx context.Context, cfg config.DatabaseConfig) (*sql.DB, error) {
-	db, err := sql.Open("postgres", cfg.DSN())
+	_, db, err := OpenGORM(ctx, cfg)
+	return db, err
+}
+
+func OpenGORM(ctx context.Context, cfg config.DatabaseConfig) (*gorm.DB, *sql.DB, error) {
+	gormDB, err := gorm.Open(gormpostgres.Open(cfg.DSN()), &gorm.Config{
+		SkipDefaultTransaction: true,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("open postgres: %w", err)
+		return nil, nil, fmt.Errorf("open postgres: %w", err)
+	}
+
+	db, err := gormDB.DB()
+	if err != nil {
+		return nil, nil, fmt.Errorf("get postgres db: %w", err)
 	}
 
 	db.SetMaxOpenConns(cfg.MaxOpenConns)
@@ -22,8 +35,8 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*sql.DB, error) {
 
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("ping postgres: %w", err)
+		return nil, nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
-	return db, nil
+	return gormDB, db, nil
 }

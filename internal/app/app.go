@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"time"
 
 	"envVault/internal/auth"
@@ -24,7 +25,7 @@ func Run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Database.ConnectTimeout)
 	defer cancel()
 
-	db, err := postgres.Open(ctx, cfg.Database)
+	gormDB, db, err := postgres.OpenGORM(ctx, cfg.Database)
 	if err != nil {
 		return err
 	}
@@ -35,6 +36,15 @@ func Run() error {
 		return err
 	}
 	repository := postgres.NewRepository(db)
+	rbacStore := postgres.NewRBACStore(db, gormDB)
+	if err := rbacStore.EnsureSystemData(ctx); err != nil {
+		return err
+	}
+	if adminUserID := os.Getenv("ENVVAULT_BOOTSTRAP_ADMIN_USER_ID"); adminUserID != "" {
+		if err := rbacStore.EnsureBootstrapAdmin(ctx, adminUserID, os.Getenv("ENVVAULT_BOOTSTRAP_ADMIN_NAME")); err != nil {
+			return err
+		}
+	}
 
 	var cache *rediscache.Cache
 	if cfg.Redis.Enabled {
@@ -60,9 +70,10 @@ func Run() error {
 		Config:     cfg,
 		Database:   db,
 		Store:      repository,
+		RBAC:       rbacStore,
 		Cache:      cache,
 		Encryptor:  encryptor,
-		Authorizer: auth.AllowAllAuthorizer{},
+		Authorizer: auth.NewRBACAuthorizer(rbacStore),
 	})
 
 	server := &http.Server{

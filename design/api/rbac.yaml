@@ -1,0 +1,933 @@
+openapi: 3.0.3
+info:
+  title: EnvVault RBAC API
+  version: 0.1.0
+  description: EnvVault RBAC interfaces for permissions, roles, users, and role bindings.
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: RBAC Permissions
+  - name: RBAC Roles
+  - name: RBAC Bindings
+  - name: RBAC Users
+paths:
+  /rbac/permission/list:
+    get:
+      tags:
+        - RBAC Permissions
+      summary: List system permissions
+      operationId: listPermissions
+      parameters:
+        - $ref: "#/components/parameters/PaginationPageNum"
+        - $ref: "#/components/parameters/PaginationPageSize"
+      responses:
+        "200":
+          description: Permission list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          permissions:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/Permission"
+                          pageNum:
+                            type: integer
+                            example: 1
+                          pageSize:
+                            type: integer
+                            example: 20
+                          total:
+                            type: integer
+                            format: int64
+                            example: 128
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /rbac/me/permissions:
+    post:
+      tags:
+        - RBAC Permissions
+      summary: Get current user permissions in a scope
+      operationId: getMyPermissions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScopeRequest"
+      responses:
+        "200":
+          description: Effective permissions for current user.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PermissionCodeList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /rbac/role/list:
+    post:
+      tags:
+        - RBAC Roles
+      summary: List roles in a scope
+      operationId: listRoles
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ScopeRequest"
+                - $ref: "#/components/schemas/PaginationRequest"
+      responses:
+        "200":
+          description: Role list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          roles:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/Role"
+                          pageNum:
+                            type: integer
+                            example: 1
+                          pageSize:
+                            type: integer
+                            example: 20
+                          total:
+                            type: integer
+                            format: int64
+                            example: 128
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /rbac/role/info:
+    post:
+      tags:
+        - RBAC Roles
+      summary: Get role detail
+      operationId: getRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleInfoRequest"
+      responses:
+        "200":
+          description: Role detail.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Role"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /rbac/role/create:
+    post:
+      tags:
+        - RBAC Roles
+      summary: Create a custom role
+      operationId: createRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleUpsertRequest"
+      responses:
+        "200":
+          description: Created role.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Role"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /rbac/role/update:
+    post:
+      tags:
+        - RBAC Roles
+      summary: Update a custom role
+      operationId: updateRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - type: object
+                  required:
+                    - id
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                - $ref: "#/components/schemas/RoleUpsertRequest"
+      responses:
+        "200":
+          description: Updated role.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Role"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /rbac/role/delete:
+    post:
+      tags:
+        - RBAC Roles
+      summary: Delete a custom role
+      operationId: deleteRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IDRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Deleted"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /rbac/binding/list:
+    post:
+      tags:
+        - RBAC Bindings
+      summary: List role bindings in a scope
+      operationId: listRoleBindings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ScopeRequest"
+                - $ref: "#/components/schemas/PaginationRequest"
+      responses:
+        "200":
+          description: Role binding list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          bindings:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/RoleBinding"
+                          pageNum:
+                            type: integer
+                            example: 1
+                          pageSize:
+                            type: integer
+                            example: 20
+                          total:
+                            type: integer
+                            format: int64
+                            example: 128
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /rbac/binding/grant:
+    post:
+      tags:
+        - RBAC Bindings
+      summary: Grant a role to a user in a scope
+      operationId: grantRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleGrantRequest"
+      responses:
+        "200":
+          description: Created role binding.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RoleBinding"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /rbac/binding/revoke:
+    post:
+      tags:
+        - RBAC Bindings
+      summary: Revoke a role from a user in a scope
+      operationId: revokeRole
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleRevokeRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Deleted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /rbac/user/me:
+    get:
+      tags:
+        - RBAC Users
+      summary: Get current local user and role summary
+      operationId: getCurrentRBACUser
+      parameters:
+        - $ref: "#/components/parameters/PaginationPageNum"
+        - $ref: "#/components/parameters/PaginationPageSize"
+      responses:
+        "200":
+          description: Current RBAC user.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/UserWithGrantSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /rbac/user/list:
+    post:
+      tags:
+        - RBAC Users
+      summary: List users visible in a scope
+      operationId: listRBACUsers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ScopeRequest"
+                - $ref: "#/components/schemas/PaginationRequest"
+      responses:
+        "200":
+          description: User list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          users:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/User"
+                          pageNum:
+                            type: integer
+                            example: 1
+                          pageSize:
+                            type: integer
+                            example: 20
+                          total:
+                            type: integer
+                            format: int64
+                            example: 128
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /rbac/user/grants:
+    post:
+      tags:
+        - RBAC Users
+      summary: List direct grants for a user
+      operationId: listUserGrants
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/UserLookupRequest"
+                - $ref: "#/components/schemas/PaginationRequest"
+      responses:
+        "200":
+          description: Direct grants for the user.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          grants:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/RoleBinding"
+                          pageNum:
+                            type: integer
+                            example: 1
+                          pageSize:
+                            type: integer
+                            example: 20
+                          total:
+                            type: integer
+                            format: int64
+                            example: 128
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /rbac/user/permissions:
+    post:
+      tags:
+        - RBAC Users
+      summary: Get user permissions in a scope
+      operationId: getUserPermissions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/UserLookupRequest"
+                - $ref: "#/components/schemas/ScopeRequest"
+      responses:
+        "200":
+          description: Effective permissions and source grants.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/EffectivePermissionResult"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PaginationPageNum:
+      name: pageNum
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      description: pageNum starts from 1.
+    PaginationPageSize:
+      name: pageSize
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: pageSize is capped at 100.
+
+  responses:
+    BadRequest:
+      description: Bad request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: 1002
+            msg: invalid request
+            data: null
+    Unauthorized:
+      description: Missing or invalid JWT.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: 1401
+            msg: missing bearer token
+            data: null
+    Forbidden:
+      description: Permission denied.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: 1403
+            msg: permission denied
+            data: null
+    NotFound:
+      description: Record not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: 1404
+            msg: record not found
+            data: null
+    Conflict:
+      description: Business conflict.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: 1409
+            msg: conflict
+            data: null
+    Deleted:
+      description: Deleted successfully.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Response"
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      deleted:
+                        type: boolean
+                        example: true
+
+  schemas:
+    Response:
+      type: object
+      required:
+        - code
+        - msg
+        - data
+      properties:
+        code:
+          type: integer
+          example: 0
+        msg:
+          type: string
+          example: success
+        data:
+          nullable: true
+
+    ErrorResponse:
+      allOf:
+        - $ref: "#/components/schemas/Response"
+
+    IDRequest:
+      type: object
+      required:
+        - id
+      properties:
+        id:
+          type: string
+          format: uuid
+
+    ScopeType:
+      type: string
+      enum:
+        - global
+        - organization
+        - project
+        - environment
+        - folder
+
+    ScopeRequest:
+      type: object
+      required:
+        - scope_type
+      properties:
+        scope_type:
+          $ref: "#/components/schemas/ScopeType"
+        scope_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Required when scope_type is not global.
+
+    UserLookupRequest:
+      type: object
+      required:
+        - external_user_id
+      properties:
+        external_user_id:
+          type: string
+          example: user-123
+
+    PaginationRequest:
+      type: object
+      properties:
+        pageNum:
+          type: integer
+          minimum: 1
+          default: 1
+          example: 1
+        pageSize:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+          example: 20
+
+    Permission:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          example: secret:update
+        resource_type:
+          type: string
+          example: secret
+        action:
+          type: string
+          example: update
+        description:
+          type: string
+        is_system:
+          type: boolean
+
+    PermissionCodeList:
+      type: object
+      properties:
+        permissions:
+          type: array
+          items:
+            type: string
+          example:
+            - project:read
+            - secret:list
+            - secret:read
+
+    Role:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          example: project_admin
+        name:
+          type: string
+          example: Project Admin
+        description:
+          type: string
+        scope_type:
+          $ref: "#/components/schemas/ScopeType"
+        org_id:
+          type: string
+          format: uuid
+          nullable: true
+        project_id:
+          type: string
+          format: uuid
+          nullable: true
+        is_system:
+          type: boolean
+        permissions:
+          type: array
+          items:
+            type: string
+          example:
+            - project:read
+            - project:update
+            - secret:create
+            - secret:update
+
+    RoleInfoRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          example: project_admin
+      anyOf:
+        - required:
+            - id
+        - required:
+            - code
+
+    RoleUpsertRequest:
+      type: object
+      required:
+        - scope_type
+        - code
+        - name
+        - permissions
+      properties:
+        scope_type:
+          $ref: "#/components/schemas/ScopeType"
+        scope_id:
+          type: string
+          format: uuid
+          nullable: true
+        code:
+          type: string
+          example: release_operator
+        name:
+          type: string
+          example: Release Operator
+        description:
+          type: string
+          example: Release deployment operator.
+        permissions:
+          type: array
+          items:
+            type: string
+          example:
+            - secret:list
+            - secret:read
+            - secret:reveal
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        external_user_id:
+          type: string
+          example: user-123
+        name:
+          type: string
+          example: Alice
+        email:
+          type: string
+          example: alice@example.com
+        source:
+          type: string
+          example: jwt
+        is_disabled:
+          type: boolean
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    UserWithGrantSummary:
+      type: object
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoleBinding"
+        pageNum:
+          type: integer
+          example: 1
+        pageSize:
+          type: integer
+          example: 20
+        total:
+          type: integer
+          format: int64
+          example: 2
+
+    RoleBinding:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user:
+          $ref: "#/components/schemas/User"
+        role_code:
+          type: string
+          example: project_developer
+        role_id:
+          type: string
+          format: uuid
+        scope_type:
+          $ref: "#/components/schemas/ScopeType"
+        scope_id:
+          type: string
+          format: uuid
+          nullable: true
+        granted_by:
+          type: string
+          example: admin-user
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    RoleGrantRequest:
+      type: object
+      required:
+        - external_user_id
+        - role_code
+        - scope_type
+      properties:
+        external_user_id:
+          type: string
+          example: user-123
+        name:
+          type: string
+          example: Alice
+        email:
+          type: string
+          example: alice@example.com
+        role_code:
+          type: string
+          example: project_developer
+        scope_type:
+          $ref: "#/components/schemas/ScopeType"
+        scope_id:
+          type: string
+          format: uuid
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    RoleRevokeRequest:
+      type: object
+      required:
+        - external_user_id
+        - role_code
+        - scope_type
+      properties:
+        external_user_id:
+          type: string
+          example: user-123
+        role_code:
+          type: string
+          example: project_developer
+        scope_type:
+          $ref: "#/components/schemas/ScopeType"
+        scope_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    EffectivePermissionResult:
+      type: object
+      properties:
+        permissions:
+          type: array
+          items:
+            type: string
+          example:
+            - project:read
+            - project:update
+            - secret:list
+            - secret:read
+            - secret:reveal
+        source_grants:
+          type: array
+          items:
+            type: object
+            properties:
+              role_code:
+                type: string
+                example: org_admin
+              scope_type:
+                $ref: "#/components/schemas/ScopeType"
+              scope_id:
+                type: string
+                format: uuid
+                nullable: true

@@ -72,7 +72,10 @@ Common environment variables:
 - `ENVVAULT_CONFIG_PATH`
 - `ENVVAULT_HTTP_ADDR`
 - `ENVVAULT_HTTP_REQUEST_ID_HEADER`
+- `ENVVAULT_AUTH_ENABLED`
 - `ENVVAULT_AUTH_JWT_SECRET`
+- `ENVVAULT_AUTH_DEV_USER_ID`
+- `ENVVAULT_AUTH_DEV_USER_NAME`
 - `ENVVAULT_SECURITY_ENCRYPTION_KEY`
 - `ENVVAULT_DATABASE_HOST`
 - `ENVVAULT_DATABASE_PORT`
@@ -106,7 +109,7 @@ All business responses follow this format:
 }
 ```
 
-See [DESIGN.md](DESIGN.md) for the current detailed design and API definitions.
+See [design/DESIGN.md](design/DESIGN.md) for the current detailed design and API definitions.
 
 ## Development
 

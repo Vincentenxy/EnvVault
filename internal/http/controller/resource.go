@@ -364,6 +364,10 @@ func (ctrl *Controller) write(c *gin.Context, data any, err error) {
 		return
 	}
 	logging.Error(c.Request.Context(), "controller.write", "request failed", logging.F("error", err))
+	if errors.Is(err, auth.ErrPermissionDenied) {
+		response.Fail(c, http.StatusForbidden, 1403, err.Error())
+		return
+	}
 	if errors.Is(err, postgres.ErrNotFound) {
 		response.Fail(c, http.StatusNotFound, 1404, err.Error())
 		return

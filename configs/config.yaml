@@ -1,18 +1,22 @@
 # 本地开发配置。生产环境请使用 ENVVAULT_CONFIG_PATH 指向独立配置文件，
 # 或通过 ENVVAULT_DATABASE_PASSWORD 等环境变量覆盖敏感值。
 http:
-  addr: ":8080"
+  addr: ":8880"
   request_id_header: "x-request-id"
 
 auth:
+  # 本地测试可改为 false。关闭后会跳过 JWT 校验，并注入下面的开发用户。
+  enabled: false
   jwt_secret: "dev-only-change-me"
+  dev_user_id: "dev-user"
+  dev_user_name: "Dev User"
 
 security:
   # base64("0123456789abcdef0123456789abcdef")，仅用于本地开发。
   encryption_key: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
 database:
-  host: "127.0.0.1"
+  host: "192.168.1.110"  #"127.0.0.1"
   port: 5432
   user: "admin"
   password: "123456"
@@ -25,10 +29,10 @@ database:
 
 redis:
   enabled: true
-  mode: "single" # single 或 cluster
+  mode: "single"
   addrs:
-    - "127.0.0.1:6379"
-  password: ""
+    - "192.168.1.110:6379"
+  password: "123456"
   db: 0
   key_prefix: "envvault"
   warm_up_on_start: true

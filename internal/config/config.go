@@ -27,7 +27,10 @@ type HTTPConfig struct {
 }
 
 type AuthConfig struct {
-	JWTSecret string `mapstructure:"jwt_secret"`
+	Enabled     bool   `mapstructure:"enabled"`
+	JWTSecret   string `mapstructure:"jwt_secret"`
+	DevUserID   string `mapstructure:"dev_user_id"`
+	DevUserName string `mapstructure:"dev_user_name"`
 }
 
 type SecurityConfig struct {
@@ -172,6 +175,9 @@ func applyComplexEnv(v *viper.Viper) {
 func setDefaults(v *viper.Viper) {
 	v.SetDefault("http.addr", ":8080")
 	v.SetDefault("http.request_id_header", "x-request-id")
+	v.SetDefault("auth.enabled", true)
+	v.SetDefault("auth.dev_user_id", "dev-user")
+	v.SetDefault("auth.dev_user_name", "Dev User")
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)
 	v.SetDefault("database.user", "admin")

@@ -17,6 +17,7 @@ import (
 type Dependencies struct {
 	Config     config.Config
 	Store      *postgres.Repository
+	RBAC       *postgres.RBACStore
 	Cache      *rediscache.Cache
 	Encryptor  secretcrypto.Encryptor
 	Authorizer auth.Authorizer
@@ -43,6 +44,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 		Config:     deps.Config,
 		Database:   deps.Database,
 		Store:      deps.Store,
+		RBAC:       deps.RBAC,
 		Cache:      deps.Cache,
 		Encryptor:  deps.Encryptor,
 		Authorizer: deps.Authorizer,
@@ -61,9 +63,16 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 
 			protected := v1.Group("")
 			{
-				protected.Use(auth.JWTMiddleware(auth.JWTConfig{
-					Secret: []byte(deps.Config.Auth.JWTSecret),
-				}))
+				if deps.Config.Auth.Enabled {
+					protected.Use(auth.JWTMiddleware(auth.JWTConfig{
+						Secret: []byte(deps.Config.Auth.JWTSecret),
+					}))
+				} else {
+					protected.Use(auth.StaticUserMiddleware(auth.UserInfo{
+						UserId: deps.Config.Auth.DevUserID,
+						Name:   deps.Config.Auth.DevUserName,
+					}))
+				}
 				protected.GET("/me", ctrl.Me)
 
 				org := protected.Group("/org")
@@ -115,6 +124,43 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 				audit := protected.Group("/audit")
 				{
 					audit.POST("/list", ctrl.ListAuditRecords)
+				}
+
+				rbac := protected.Group("/rbac")
+				{
+					permission := rbac.Group("/permission")
+					{
+						permission.GET("/list", ctrl.ListPermissions)
+					}
+
+					me := rbac.Group("/me")
+					{
+						me.POST("/permissions", ctrl.GetMyPermissions)
+					}
+
+					role := rbac.Group("/role")
+					{
+						role.POST("/list", ctrl.ListRoles)
+						role.POST("/info", ctrl.GetRole)
+						role.POST("/create", ctrl.CreateRole)
+						role.POST("/update", ctrl.UpdateRole)
+						role.POST("/delete", ctrl.DeleteRole)
+					}
+
+					binding := rbac.Group("/binding")
+					{
+						binding.POST("/list", ctrl.ListRoleBindings)
+						binding.POST("/grant", ctrl.GrantRole)
+						binding.POST("/revoke", ctrl.RevokeRole)
+					}
+
+					user := rbac.Group("/user")
+					{
+						user.GET("/me", ctrl.GetCurrentRBACUser)
+						user.POST("/list", ctrl.ListRBACUsers)
+						user.POST("/grants", ctrl.ListUserGrants)
+						user.POST("/permissions", ctrl.GetUserEffectivePermissions)
+					}
 				}
 			}
 		}

@@ -13,6 +13,7 @@ import (
 type Dependencies struct {
 	Config     config.Config
 	Store      *postgres.Repository
+	RBAC       *postgres.RBACStore
 	Cache      *rediscache.Cache
 	Encryptor  secretcrypto.Encryptor
 	Authorizer auth.Authorizer
@@ -24,6 +25,7 @@ type Dependencies struct {
 type Controller struct {
 	config     config.Config
 	store      *postgres.Repository
+	rbac       *postgres.RBACStore
 	cache      *rediscache.Cache
 	encryptor  secretcrypto.Encryptor
 	authorizer auth.Authorizer
@@ -36,6 +38,7 @@ func New(deps Dependencies) *Controller {
 	return &Controller{
 		config:     deps.Config,
 		store:      deps.Store,
+		rbac:       deps.RBAC,
 		cache:      deps.Cache,
 		encryptor:  deps.Encryptor,
 		authorizer: deps.Authorizer,

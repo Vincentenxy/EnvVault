@@ -74,6 +74,17 @@ func JWTMiddleware(cfg JWTConfig) gin.HandlerFunc {
 	}
 }
 
+func StaticUserMiddleware(user UserInfo) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		claims := &Claims{
+			UserId: user.UserId,
+			Name:   user.Name,
+		}
+		c.Set(claimsContextKey, claims)
+		c.Next()
+	}
+}
+
 func ClaimsFromContext(c *gin.Context) *Claims {
 	value, ok := c.Get(claimsContextKey)
 	if !ok {

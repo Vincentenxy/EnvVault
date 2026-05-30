@@ -1,0 +1,164 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: envvault
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: envvault-postgres-secret
+  namespace: envvault
+type: Opaque
+stringData:
+  POSTGRES_USER: admin
+  POSTGRES_PASSWORD: "123456"
+  POSTGRES_DB: envvault
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: envvault-postgres-data
+  labels:
+    app.kubernetes.io/name: envvault-postgres
+    app.kubernetes.io/component: database
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: envvault-local
+  hostPath:
+    path: /data/envvault/postgres
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - k8s-worker1
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: envvault-postgres-data
+  namespace: envvault
+spec:
+  storageClassName: envvault-local
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envvault-postgres
+  namespace: envvault
+  labels:
+    app.kubernetes.io/name: envvault-postgres
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+  selector:
+    app.kubernetes.io/name: envvault-postgres
+    app.kubernetes.io/component: database
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envvault-postgres-nodeport
+  namespace: envvault
+  labels:
+    app.kubernetes.io/name: envvault-postgres
+    app.kubernetes.io/component: database
+spec:
+  type: NodePort
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      nodePort: 30432
+  selector:
+    app.kubernetes.io/name: envvault-postgres
+    app.kubernetes.io/component: database
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: envvault-postgres
+  namespace: envvault
+  labels:
+    app.kubernetes.io/name: envvault-postgres
+    app.kubernetes.io/component: database
+spec:
+  serviceName: envvault-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: envvault-postgres
+      app.kubernetes.io/component: database
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: envvault-postgres
+        app.kubernetes.io/component: database
+    spec:
+      containers:
+        - name: postgres
+          image: 192.168.1.110/infra/postgres:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: envvault-postgres-secret
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - admin
+                - -d
+                - envvault
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - admin
+                - -d
+                - envvault
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: envvault-postgres-data

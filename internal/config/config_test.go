@@ -40,11 +40,31 @@ database:
 	if cfg.HTTP.Addr != ":9090" {
 		t.Fatalf("HTTP.Addr = %q, want :9090", cfg.HTTP.Addr)
 	}
+	if !cfg.Auth.Enabled {
+		t.Fatal("Auth.Enabled = false, want true")
+	}
 	if cfg.Database.Name != "envvault" {
 		t.Fatalf("Database.Name = %q, want envvault", cfg.Database.Name)
 	}
 	if !strings.Contains(cfg.Database.DSN(), "sslmode=disable") {
 		t.Fatalf("DSN() = %q, want sslmode", cfg.Database.DSN())
+	}
+}
+
+func TestLoadFromPathAllowsAuthDisabled(t *testing.T) {
+	t.Setenv("ENVVAULT_AUTH_ENABLED", "false")
+	t.Setenv("ENVVAULT_AUTH_DEV_USER_ID", "local-user")
+
+	cfg, err := LoadFromPath("")
+	if err != nil {
+		t.Fatalf("LoadFromPath() error = %v", err)
+	}
+
+	if cfg.Auth.Enabled {
+		t.Fatal("Auth.Enabled = true, want false")
+	}
+	if cfg.Auth.DevUserID != "local-user" {
+		t.Fatalf("Auth.DevUserID = %q, want local-user", cfg.Auth.DevUserID)
 	}
 }
 

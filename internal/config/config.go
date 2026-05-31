@@ -27,10 +27,12 @@ type HTTPConfig struct {
 }
 
 type AuthConfig struct {
-	Enabled     bool   `mapstructure:"enabled"`
-	JWTSecret   string `mapstructure:"jwt_secret"`
-	DevUserID   string `mapstructure:"dev_user_id"`
-	DevUserName string `mapstructure:"dev_user_name"`
+	Enabled         bool   `mapstructure:"enabled"`
+	PublicKey       string `mapstructure:"public_key"`
+	DevTokenEnabled bool   `mapstructure:"dev_token_enabled"`
+	DevPrivateKey   string `mapstructure:"dev_private_key"`
+	DevUserID       string `mapstructure:"dev_user_id"`
+	DevUserName     string `mapstructure:"dev_user_name"`
 }
 
 type SecurityConfig struct {
@@ -176,6 +178,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("http.addr", ":8080")
 	v.SetDefault("http.request_id_header", "x-request-id")
 	v.SetDefault("auth.enabled", true)
+	v.SetDefault("auth.dev_token_enabled", false)
 	v.SetDefault("auth.dev_user_id", "dev-user")
 	v.SetDefault("auth.dev_user_name", "Dev User")
 	v.SetDefault("database.host", "127.0.0.1")

@@ -1,0 +1,878 @@
+openapi: 3.0.3
+info:
+  title: EnvVault Core API
+  version: 0.1.0
+  description: Core EnvVault APIs for organization, project, environment, folder, secret key/value, audit, and development token testing.
+servers:
+  - url: http://localhost:8880
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+  - name: Auth Dev
+  - name: Current User
+  - name: Organizations
+  - name: Projects
+  - name: Environments
+  - name: Folders
+  - name: Secrets
+  - name: Audit
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+
+  /api/v1/readyz:
+    get:
+      tags: [Health]
+      summary: Readiness check
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+
+  /api/v1/auth/dev/token:
+    post:
+      tags: [Auth Dev]
+      summary: Create a development JWT
+      description: Only available when auth.dev_token_enabled is true. Do not enable in production.
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DevTokenRequest"
+      responses:
+        "200":
+          description: Development JWT.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/DevToken"
+
+  /api/v1/me:
+    get:
+      tags: [Current User]
+      summary: Current authenticated user
+      responses:
+        "200":
+          description: Current user.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/UserInfo"
+
+  /api/v1/org/list:
+    get:
+      tags: [Organizations]
+      summary: List organizations
+      parameters:
+        - $ref: "#/components/parameters/PageNum"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          $ref: "#/components/responses/OrganizationList"
+
+  /api/v1/org/create:
+    post:
+      tags: [Organizations]
+      summary: Create organization
+      requestBody:
+        $ref: "#/components/requestBodies/CreateEntity"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/org/info:
+    post:
+      tags: [Organizations]
+      summary: Get organization
+      requestBody:
+        $ref: "#/components/requestBodies/ID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/org/update:
+    post:
+      tags: [Organizations]
+      summary: Update organization
+      requestBody:
+        $ref: "#/components/requestBodies/UpdateEntity"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/org/delete:
+    post:
+      tags: [Organizations]
+      summary: Delete organization
+      requestBody:
+        $ref: "#/components/requestBodies/ID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Deleted"
+
+  /api/v1/project/list:
+    post:
+      tags: [Projects]
+      summary: List projects
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/PaginationRequest"
+                - type: object
+                  properties:
+                    org_id:
+                      type: string
+                      format: uuid
+      responses:
+        "200":
+          $ref: "#/components/responses/ProjectList"
+
+  /api/v1/project/create:
+    post:
+      tags: [Projects]
+      summary: Create project
+      description: Creates default environments and default folders automatically.
+      requestBody:
+        $ref: "#/components/requestBodies/CreateChildEntity"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/project/info:
+    post:
+      tags: [Projects]
+      summary: Get project
+      requestBody:
+        $ref: "#/components/requestBodies/ID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/project/update:
+    post:
+      tags: [Projects]
+      summary: Update project
+      requestBody:
+        $ref: "#/components/requestBodies/UpdateEntity"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/project/delete:
+    post:
+      tags: [Projects]
+      summary: Delete project
+      requestBody:
+        $ref: "#/components/requestBodies/ID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Deleted"
+
+  /api/v1/env/list:
+    post:
+      tags: [Environments]
+      summary: List environments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/PaginationRequest"
+                - type: object
+                  properties:
+                    project_id:
+                      type: string
+                      format: uuid
+      responses:
+        "200":
+          $ref: "#/components/responses/EnvironmentList"
+
+  /api/v1/env/create:
+    post:
+      tags: [Environments]
+      summary: Create environment
+      description: Creates default folders automatically.
+      requestBody:
+        $ref: "#/components/requestBodies/CreateChildEntity"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/env/info:
+    post:
+      tags: [Environments]
+      summary: Get environment
+      requestBody:
+        $ref: "#/components/requestBodies/ID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/env/update:
+    post:
+      tags: [Environments]
+      summary: Update environment
+      requestBody:
+        $ref: "#/components/requestBodies/UpdateEntity"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/env/delete:
+    post:
+      tags: [Environments]
+      summary: Delete environment
+      requestBody:
+        $ref: "#/components/requestBodies/ID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Deleted"
+
+  /api/v1/folder/list:
+    post:
+      tags: [Folders]
+      summary: List folders
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/PaginationRequest"
+                - type: object
+                  properties:
+                    environment_id:
+                      type: string
+                      format: uuid
+      responses:
+        "200":
+          $ref: "#/components/responses/FolderList"
+
+  /api/v1/folder/create:
+    post:
+      tags: [Folders]
+      summary: Create folder
+      requestBody:
+        $ref: "#/components/requestBodies/CreateChildEntity"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/folder/info:
+    post:
+      tags: [Folders]
+      summary: Get folder
+      requestBody:
+        $ref: "#/components/requestBodies/ID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/folder/update:
+    post:
+      tags: [Folders]
+      summary: Update folder
+      requestBody:
+        $ref: "#/components/requestBodies/UpdateEntity"
+      responses:
+        "200":
+          $ref: "#/components/responses/Entity"
+
+  /api/v1/folder/delete:
+    post:
+      tags: [Folders]
+      summary: Delete folder
+      requestBody:
+        $ref: "#/components/requestBodies/ID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Deleted"
+
+  /api/v1/secret/list:
+    post:
+      tags: [Secrets]
+      summary: List secrets without plaintext values
+      requestBody:
+        $ref: "#/components/requestBodies/SecretList"
+      responses:
+        "200":
+          $ref: "#/components/responses/SecretList"
+
+  /api/v1/secret/search:
+    post:
+      tags: [Secrets]
+      summary: Search secrets by key without plaintext values
+      requestBody:
+        $ref: "#/components/requestBodies/SecretSearch"
+      responses:
+        "200":
+          $ref: "#/components/responses/SecretList"
+
+  /api/v1/secret/create:
+    post:
+      tags: [Secrets]
+      summary: Create secret key/value
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretUpsertRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Secret"
+
+  /api/v1/secret/info:
+    post:
+      tags: [Secrets]
+      summary: Get secret metadata without plaintext value
+      requestBody:
+        $ref: "#/components/requestBodies/ID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Secret"
+
+  /api/v1/secret/reveal:
+    post:
+      tags: [Secrets]
+      summary: Reveal secret plaintext value
+      requestBody:
+        $ref: "#/components/requestBodies/ID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Secret"
+
+  /api/v1/secret/update:
+    post:
+      tags: [Secrets]
+      summary: Update secret key/value
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/IDRequest"
+                - $ref: "#/components/schemas/SecretUpsertRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Secret"
+
+  /api/v1/secret/delete:
+    post:
+      tags: [Secrets]
+      summary: Delete secret
+      requestBody:
+        $ref: "#/components/requestBodies/ID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Deleted"
+
+  /api/v1/audit/list:
+    post:
+      tags: [Audit]
+      summary: List audit records
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/PaginationRequest"
+                - type: object
+                  properties:
+                    resource_type:
+                      type: string
+                    resource_id:
+                      type: string
+                      format: uuid
+      responses:
+        "200":
+          $ref: "#/components/responses/AuditList"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PageNum:
+      name: pageNum
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: pageSize
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  requestBodies:
+    ID:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/IDRequest"
+    CreateEntity:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CreateEntityRequest"
+    CreateChildEntity:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CreateChildEntityRequest"
+    UpdateEntity:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UpdateEntityRequest"
+    SecretList:
+      required: true
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/PaginationRequest"
+              - $ref: "#/components/schemas/SecretFilter"
+    SecretSearch:
+      required: true
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/PaginationRequest"
+              - $ref: "#/components/schemas/SecretFilter"
+              - type: object
+                properties:
+                  keyword:
+                    type: string
+                    example: DATABASE
+
+  responses:
+    Success:
+      description: Success.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Response"
+    Entity:
+      description: Entity response.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Response"
+              - type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Entity"
+    Deleted:
+      description: Deleted response.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Response"
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      deleted:
+                        type: boolean
+                        example: true
+    OrganizationList:
+      description: Organization list.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OrganizationListResponse"
+    ProjectList:
+      description: Project list.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProjectListResponse"
+    EnvironmentList:
+      description: Environment list.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/EnvironmentListResponse"
+    FolderList:
+      description: Folder list.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/FolderListResponse"
+    Secret:
+      description: Secret response.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Response"
+              - type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Secret"
+    SecretList:
+      description: Secret list.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SecretListResponse"
+    AuditList:
+      description: Audit record list.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuditListResponse"
+
+  schemas:
+    Response:
+      type: object
+      properties:
+        code:
+          type: integer
+          example: 0
+        msg:
+          type: string
+          example: success
+        data:
+          nullable: true
+
+    IDRequest:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          format: uuid
+
+    PaginationRequest:
+      type: object
+      properties:
+        pageNum:
+          type: integer
+          minimum: 1
+          default: 1
+          example: 1
+        pageSize:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+          example: 20
+
+    PaginationFields:
+      type: object
+      properties:
+        pageNum:
+          type: integer
+          example: 1
+        pageSize:
+          type: integer
+          example: 20
+        total:
+          type: integer
+          format: int64
+          example: 1
+
+    CreateEntityRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: org-a
+        comment:
+          type: string
+          example: description
+
+    CreateChildEntityRequest:
+      allOf:
+        - $ref: "#/components/schemas/CreateEntityRequest"
+        - type: object
+          required: [parent_id]
+          properties:
+            parent_id:
+              type: string
+              format: uuid
+
+    UpdateEntityRequest:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        comment:
+          type: string
+
+    Entity:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        comment:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    UserInfo:
+      type: object
+      properties:
+        userId:
+          type: string
+        name:
+          type: string
+
+    DevTokenRequest:
+      type: object
+      properties:
+        userId:
+          type: string
+          example: dev-user
+        name:
+          type: string
+          example: Dev User
+        expiresInSeconds:
+          type: integer
+          example: 3600
+
+    DevToken:
+      type: object
+      properties:
+        tokenType:
+          type: string
+          example: Bearer
+        token:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+
+    SecretFilter:
+      type: object
+      properties:
+        org_id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        environment_id:
+          type: string
+          format: uuid
+        folder_id:
+          type: string
+          format: uuid
+
+    SecretUpsertRequest:
+      type: object
+      required: [folder_id, key, value]
+      properties:
+        folder_id:
+          type: string
+          format: uuid
+        key:
+          type: string
+          example: DATABASE_URL
+        value:
+          type: string
+          example: postgres://user:password@host:5432/db
+        comment:
+          type: string
+
+    Secret:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        org_id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        environment_id:
+          type: string
+          format: uuid
+        folder_id:
+          type: string
+          format: uuid
+        key:
+          type: string
+        value:
+          type: string
+          description: Only returned by /api/v1/secret/reveal.
+        comment:
+          type: string
+        version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AuditRecord:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        actor:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+          format: uuid
+        action:
+          type: string
+        encrypted_value:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+
+    OrganizationListResponse:
+      allOf:
+        - $ref: "#/components/schemas/Response"
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: "#/components/schemas/PaginationFields"
+                - type: object
+                  properties:
+                    organizations:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/Entity"
+
+    ProjectListResponse:
+      allOf:
+        - $ref: "#/components/schemas/Response"
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: "#/components/schemas/PaginationFields"
+                - type: object
+                  properties:
+                    projects:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/Entity"
+
+    EnvironmentListResponse:
+      allOf:
+        - $ref: "#/components/schemas/Response"
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: "#/components/schemas/PaginationFields"
+                - type: object
+                  properties:
+                    environments:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/Entity"
+
+    FolderListResponse:
+      allOf:
+        - $ref: "#/components/schemas/Response"
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: "#/components/schemas/PaginationFields"
+                - type: object
+                  properties:
+                    folders:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/Entity"
+
+    SecretListResponse:
+      allOf:
+        - $ref: "#/components/schemas/Response"
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: "#/components/schemas/PaginationFields"
+                - type: object
+                  properties:
+                    secrets:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/Secret"
+
+    AuditListResponse:
+      allOf:
+        - $ref: "#/components/schemas/Response"
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: "#/components/schemas/PaginationFields"
+                - type: object
+                  properties:
+                    audit_records:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/AuditRecord"

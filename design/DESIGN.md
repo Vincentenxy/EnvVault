@@ -69,6 +69,7 @@ design/api
 
 当前接口文档：
 
+- Core OpenAPI：[api/core.yaml](api/core.yaml)
 - RBAC OpenAPI：[api/rbac.yaml](api/rbac.yaml)
 
 ## 配置管理
@@ -98,7 +99,9 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 - `ENVVAULT_HTTP_ADDR`：HTTP 服务监听地址，默认 `:8080`。
 - `ENVVAULT_HTTP_REQUEST_ID_HEADER`：请求 ID 请求头名称，默认 `x-request-id`。
 - `ENVVAULT_AUTH_ENABLED`：是否启用 JWT 认证，默认 `true`。
-- `ENVVAULT_AUTH_JWT_SECRET`：JWT HMAC 校验密钥。
+- `ENVVAULT_AUTH_PUBLIC_KEY`：JWT 验签公钥，支持 PEM 格式 RSA/ECDSA/Ed25519 public key。
+- `ENVVAULT_AUTH_DEV_TOKEN_ENABLED`：是否开启本地测试 JWT 签发接口，默认 `false`，生产环境不要开启。
+- `ENVVAULT_AUTH_DEV_PRIVATE_KEY`：本地测试 JWT 签发私钥，支持 PEM 格式 RSA/ECDSA/Ed25519 private key。
 - `ENVVAULT_AUTH_DEV_USER_ID`：关闭认证时注入的开发用户 ID，默认 `dev-user`。
 - `ENVVAULT_AUTH_DEV_USER_NAME`：关闭认证时注入的开发用户名，默认 `Dev User`。
 - `ENVVAULT_SECURITY_ENCRYPTION_KEY`：AES-256-GCM 主密钥，要求 base64 编码后的 32 字节密钥。
@@ -794,6 +797,31 @@ x-request-id
 | --- | --- | --- | --- |
 | GET | `/healthz` | 否 | 存活检查 |
 | GET | `/api/v1/readyz` | 否 | 就绪检查，包含数据库状态 |
+| POST | `/api/v1/auth/dev/token` | 否 | 本地测试 JWT 签发接口，仅在 `auth.dev_token_enabled=true` 时注册 |
+
+测试 JWT 签发请求：
+
+```json
+{
+  "userId": "dev-user",
+  "name": "Dev User",
+  "expiresInSeconds": 3600
+}
+```
+
+响应：
+
+```json
+{
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "tokenType": "Bearer",
+    "token": "jwt token",
+    "expiresAt": "2026-05-31T12:00:00Z"
+  }
+}
+```
 
 ### 当前用户接口
 
@@ -934,9 +962,9 @@ Folder 列表：
 | POST | `/api/v1/secret/search` | Secret 搜索，不返回明文 value |
 | POST | `/api/v1/secret/create` | 创建 Secret |
 | POST | `/api/v1/secret/info` | Secret 详情，不返回明文 value |
+| POST | `/api/v1/secret/reveal` | 查看 Secret 明文 value，并记录 reveal 审计 |
 | POST | `/api/v1/secret/update` | 更新 Secret |
 | POST | `/api/v1/secret/delete` | 删除 Secret |
-| POST | `/api/v1/secret/reveal` | 查看 Secret 明文 value，后续新增 |
 
 Secret 列表：
 
@@ -995,7 +1023,6 @@ Secret 列表：
 
 - `/secret/info` 和 `/secret/list` 默认不返回明文 value。
 - `/secret/reveal` 需要单独权限 `secret:reveal`，并记录审计。
-- 当前代码尚未实现 `/secret/reveal`。
 
 ### 审计接口
 
@@ -1105,6 +1132,5 @@ curl http://localhost:8080/api/v1/readyz
 - 当前删除上级资源时未定义是否级联删除子资源，需要补业务规则。
 - 当前 `audit_records` 只保存基础字段，后续建议补充 request id、metadata 和 diff。
 - 当前 `secret_versions` 尚未实现。
-- 当前 `/secret/reveal` 尚未实现。
 - 当前 RBAC 尚未正式启用，仍是 `AllowAllAuthorizer`。
 - 当前 value 搜索尚未实现，详见 [search.md](search.md)。

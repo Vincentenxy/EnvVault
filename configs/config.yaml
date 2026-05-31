@@ -7,7 +7,50 @@ http:
 auth:
   # 本地测试可改为 false。关闭后会跳过 JWT 校验，并注入下面的开发用户。
   enabled: false
-  jwt_secret: "dev-only-change-me"
+  # JWT 验签公钥，支持 PEM 格式 RSA/ECDSA/Ed25519 public key。
+  # 如果通过环境变量传入，可以使用 \n 表示换行。
+  public_key: |-
+    -----BEGIN PUBLIC KEY-----
+    MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtNEtLpF84e3n3tGMbsJV
+    70UxYvvmAIovOocHkjOSWrRd2J0lhgA1O6oPB1BOhxZC0AUI2Fko0B95wKq2DPwp
+    bCl0ZYPiN1DH+LJMKj6lMgc/gstHOM2I4Pu0S+Kn6Yqe1L14wgtzN70NLJu5FHTP
+    RXP9iLghjQpRPC7xXFK6uyE8eaMu4s7Qr2Jh9g15qBiBz1dZ86Yh3HiZWxes6exk
+    YdA89SIIWaUneJ8xj31g/xHzUbUCBEo6/CY1Mef1mNzIDtzt8bYLrvsgjrkQm8wS
+    S/uEGa+TTTBeOSf70FUP3obo9oV3S1Ff+tYWfQZm/Oer4gMl6ql3+RJiAm7SpQE2
+    jwIDAQAB
+    -----END PUBLIC KEY-----
+  # 仅用于本地测试。开启后会注册 POST /api/v1/auth/dev/token，用下面的私钥签发测试 JWT。
+  dev_token_enabled: true
+  dev_private_key: |-
+    -----BEGIN PRIVATE KEY-----
+    MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC00S0ukXzh7efe
+    0YxuwlXvRTFi++YAii86hweSM5JatF3YnSWGADU7qg8HUE6HFkLQBQjYWSjQH3nA
+    qrYM/ClsKXRlg+I3UMf4skwqPqUyBz+Cy0c4zYjg+7RL4qfpip7UvXjCC3M3vQ0s
+    m7kUdM9Fc/2IuCGNClE8LvFcUrq7ITx5oy7iztCvYmH2DXmoGIHPV1nzpiHceJlb
+    F6zp7GRh0Dz1IghZpSd4nzGPfWD/EfNRtQIESjr8JjUx5/WY3MgO3O3xtguu+yCO
+    uRCbzBJL+4QZr5NNMF45J/vQVQ/ehuj2hXdLUV/61hZ9Bmb856viAyXqqXf5EmIC
+    btKlATaPAgMBAAECggEARWzHJ0kvJOQekhvtCp3NNvhfNP04214zMgqkaosol3EH
+    U2NLA/9ScR0jdhBshkuSzaIROlhJZleffM1O5v9uvBvSmCOiGNEIZsG2osW40dOc
+    nBCGwRWRh6i9GiHljLLvtwkks4SH8Y/B3i3QSz1qU+VsJDFmmGussynm/Ca7kZtU
+    +p23b5XXnBjhmSMZpHr2VfUX4RlzHYnlIGouLFQ37+cAYmlYVDQrvXdd4wfhMYTq
+    a3O27JzGNezGyvookJVDzKk2kEx5Z/MrRXSDfv1oS3jLq+NkXlyqrQvH/fSai0KL
+    C8mEoJSGMoY4ia/s6VKV66VZdEOljzxf/rwzZyrtMQKBgQDQURGfkmIJoRkCo6sq
+    Am8s1FKysikY61ATFxzLFdypgVQfBS0hwFhAN1d4mPQgG18kpfJHLhX6kRy+6UNk
+    yhnEOmYEkQ5bLY6duAGRiW1b8ElE/lHi71Atk38tdrnRBN0TSn6pl0p9UGDuoHx+
+    M+acBW7cEwsihDfSyiCPh9Km5wKBgQDeNLBDb5WCzSEjeuioGeuDdwATrLSSH7aA
+    XJZEzYQK9niDNkUFY5F0PtEqSJGdK7TiI7zDpNBjgplsHNNJrQ7i42tu9njaWHV2
+    L7+tLxIkdXcbA5GxsRiSdaz8rv+Fs3h4ClSrJwdLbHHjqxcIR8NTXyprlQKtsaHE
+    h2I2GR6GGQKBgQDJZmd0cDDqgF7Ox2/XWK0lmU0uyMKk/fPX0ROcYNGK66dpqjZ9
+    GBn6U8b0qGP1mqD8rJe1K6BCNQOmq5zll+MbbR5usdNAYaYtY9XYYBZjuccMthhz
+    H83TknN1gACcTWhzmyUkT0nMJ+bfLjfOR91f4HzStnKgd1YFLDgYrEcD5wKBgQCI
+    KSMlf5fPWiGHW0Z7075EhcQvSjIwJGyxxYpzSLgz+4onZTbwMW4tHF0RmvxXojOq
+    Kxn9jN4BTEL1Q8iZKgmoMJFhoni122TG8kVzOxfT7YL5s7swdoPHI4LIJ/f+Ftao
+    QDRX2IeYyTAUwX9QnKDtUrBs0hedFe85vXgKDGRu6QKBgE64J7OnciDCzOpgCyif
+    Vux8IA2cUwr4FJFXPnSkfkGahNgogM4waUuiKAG5p8FWSA2ZfW2qN/ZzBrqSnLOS
+    ryCtJJ435GWsBdlMO8HNSdBpUlEo9LWdFgzKJltDJDu835l4KkpwJrQEQhkgMUWa
+    52JHSWzN3fIrUpG3/SxM+ybM
+    -----END PRIVATE KEY-----
+
   dev_user_id: "dev-user"
   dev_user_name: "Dev User"
 

@@ -76,8 +76,8 @@ func (r *Repository) CreateOrganization(ctx context.Context, name, comment, acto
 	return r.createEntity(ctx, "organizations", "", "", name, comment, actor, "organization")
 }
 
-func (r *Repository) ListOrganizations(ctx context.Context) ([]Entity, error) {
-	return r.listEntities(ctx, "organizations", "")
+func (r *Repository) ListOrganizations(ctx context.Context, pagination Pagination) (PaginatedResult[Entity], error) {
+	return r.listEntities(ctx, "organizations", "", pagination)
 }
 
 func (r *Repository) GetOrganization(ctx context.Context, id string) (Entity, error) {
@@ -120,8 +120,8 @@ func (r *Repository) CreateProject(ctx context.Context, orgID, name, comment, ac
 	return project, tx.Commit()
 }
 
-func (r *Repository) ListProjects(ctx context.Context, orgID string) ([]Entity, error) {
-	return r.listEntities(ctx, "projects", orgID)
+func (r *Repository) ListProjects(ctx context.Context, orgID string, pagination Pagination) (PaginatedResult[Entity], error) {
+	return r.listEntities(ctx, "projects", orgID, pagination)
 }
 
 func (r *Repository) GetProject(ctx context.Context, id string) (Entity, error) {
@@ -158,8 +158,8 @@ func (r *Repository) CreateEnvironment(ctx context.Context, projectID, name, com
 	return env, tx.Commit()
 }
 
-func (r *Repository) ListEnvironments(ctx context.Context, projectID string) ([]Entity, error) {
-	return r.listEntities(ctx, "environments", projectID)
+func (r *Repository) ListEnvironments(ctx context.Context, projectID string, pagination Pagination) (PaginatedResult[Entity], error) {
+	return r.listEntities(ctx, "environments", projectID, pagination)
 }
 
 func (r *Repository) GetEnvironment(ctx context.Context, id string) (Entity, error) {
@@ -178,8 +178,8 @@ func (r *Repository) CreateFolder(ctx context.Context, environmentID, name, comm
 	return r.createEntity(ctx, "folders", "environment_id", environmentID, name, comment, actor, "folder")
 }
 
-func (r *Repository) ListFolders(ctx context.Context, environmentID string) ([]Entity, error) {
-	return r.listEntities(ctx, "folders", environmentID)
+func (r *Repository) ListFolders(ctx context.Context, environmentID string, pagination Pagination) (PaginatedResult[Entity], error) {
+	return r.listEntities(ctx, "folders", environmentID, pagination)
 }
 
 func (r *Repository) GetFolder(ctx context.Context, id string) (Entity, error) {
@@ -279,7 +279,53 @@ where s.id = $1 and s.is_deleted = false
 	return secret, err
 }
 
-func (r *Repository) ListSecrets(ctx context.Context, filter ListFilter) ([]Secret, error) {
+func (r *Repository) GetSecretCiphertext(ctx context.Context, id string) (Secret, SecretCiphertext, error) {
+	var secret Secret
+	var payload []byte
+	err := r.db.QueryRowContext(ctx, `
+select s.id, o.id, p.id, e.id, s.folder_id, s.key, s.value_ciphertext, s.comment, s.version, s.created_at, s.updated_at
+from secrets s
+join folders f on f.id = s.folder_id
+join environments e on e.id = f.environment_id
+join projects p on p.id = e.project_id
+join organizations o on o.id = p.org_id
+where s.id = $1 and s.is_deleted = false
+`, id).Scan(
+		&secret.ID, &secret.OrgID, &secret.ProjectID, &secret.EnvironmentID, &secret.FolderID, &secret.Key, &payload, &secret.Comment, &secret.Version, &secret.CreatedAt, &secret.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Secret{}, SecretCiphertext{}, ErrNotFound
+	}
+	if err != nil {
+		return Secret{}, SecretCiphertext{}, err
+	}
+	var ciphertext SecretCiphertext
+	if err := json.Unmarshal(payload, &ciphertext); err != nil {
+		return Secret{}, SecretCiphertext{}, err
+	}
+	return secret, ciphertext, nil
+}
+
+func (r *Repository) ListSecrets(ctx context.Context, filter ListFilter, pagination Pagination) (PaginatedResult[Secret], error) {
+	var total int64
+	err := r.db.QueryRowContext(ctx, `
+select count(*)
+from secrets s
+join folders f on f.id = s.folder_id
+join environments e on e.id = f.environment_id
+join projects p on p.id = e.project_id
+join organizations o on o.id = p.org_id
+where s.is_deleted = false
+  and ($1 = '' or o.id = $1::uuid)
+  and ($2 = '' or p.id = $2::uuid)
+  and ($3 = '' or e.id = $3::uuid)
+  and ($4 = '' or s.folder_id = $4::uuid)
+  and ($5 = '' or s.key ilike '%' || $5 || '%')
+`, filter.OrgID, filter.ProjectID, filter.EnvironmentID, filter.FolderID, filter.Keyword).Scan(&total)
+	if err != nil {
+		return PaginatedResult[Secret]{}, err
+	}
+
 	rows, err := r.db.QueryContext(ctx, `
 select s.id, o.id, p.id, e.id, s.folder_id, s.key, s.comment, s.version, s.created_at, s.updated_at
 from secrets s
@@ -294,9 +340,10 @@ where s.is_deleted = false
   and ($4 = '' or s.folder_id = $4::uuid)
   and ($5 = '' or s.key ilike '%' || $5 || '%')
 order by s.key asc
-`, filter.OrgID, filter.ProjectID, filter.EnvironmentID, filter.FolderID, filter.Keyword)
+limit $6 offset $7
+`, filter.OrgID, filter.ProjectID, filter.EnvironmentID, filter.FolderID, filter.Keyword, pagination.Limit(), pagination.Offset())
 	if err != nil {
-		return nil, err
+		return PaginatedResult[Secret]{}, err
 	}
 	defer rows.Close()
 
@@ -304,11 +351,14 @@ order by s.key asc
 	for rows.Next() {
 		var secret Secret
 		if err := rows.Scan(&secret.ID, &secret.OrgID, &secret.ProjectID, &secret.EnvironmentID, &secret.FolderID, &secret.Key, &secret.Comment, &secret.Version, &secret.CreatedAt, &secret.UpdatedAt); err != nil {
-			return nil, err
+			return PaginatedResult[Secret]{}, err
 		}
 		items = append(items, secret)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return PaginatedResult[Secret]{}, err
+	}
+	return PaginatedResult[Secret]{Items: items, Total: total}, nil
 }
 
 func (r *Repository) ListSecretCacheRecords(ctx context.Context) ([]SecretCacheRecord, error) {
@@ -354,16 +404,28 @@ func (r *Repository) DeleteSecret(ctx context.Context, id, actor string) error {
 	return r.deleteEntity(ctx, "secrets", id, actor, "secret")
 }
 
-func (r *Repository) ListAuditRecords(ctx context.Context, resourceType, resourceID string) ([]AuditRecord, error) {
+func (r *Repository) ListAuditRecords(ctx context.Context, resourceType, resourceID string, pagination Pagination) (PaginatedResult[AuditRecord], error) {
+	var total int64
+	err := r.db.QueryRowContext(ctx, `
+select count(*)
+from audit_records
+where ($1 = '' or resource_type = $1)
+  and ($2 = '' or resource_id = $2::uuid)
+`, resourceType, resourceID).Scan(&total)
+	if err != nil {
+		return PaginatedResult[AuditRecord]{}, err
+	}
+
 	rows, err := r.db.QueryContext(ctx, `
 select id, actor, resource_type, resource_id, action, coalesce(encrypted_value, 'null'::jsonb), created_at
 from audit_records
 where ($1 = '' or resource_type = $1)
   and ($2 = '' or resource_id = $2::uuid)
 order by created_at desc
-`, resourceType, resourceID)
+limit $3 offset $4
+`, resourceType, resourceID, pagination.Limit(), pagination.Offset())
 	if err != nil {
-		return nil, err
+		return PaginatedResult[AuditRecord]{}, err
 	}
 	defer rows.Close()
 
@@ -371,11 +433,26 @@ order by created_at desc
 	for rows.Next() {
 		var item AuditRecord
 		if err := rows.Scan(&item.ID, &item.Actor, &item.ResourceType, &item.ResourceID, &item.Action, &item.EncryptedValue, &item.CreatedAt); err != nil {
-			return nil, err
+			return PaginatedResult[AuditRecord]{}, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return PaginatedResult[AuditRecord]{}, err
+	}
+	return PaginatedResult[AuditRecord]{Items: items, Total: total}, nil
+}
+
+func (r *Repository) RecordAudit(ctx context.Context, actor, resourceType, resourceID, action string) error {
+	auditID, err := uuidgen.NewUUID()
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `
+insert into audit_records (id, actor, resource_type, resource_id, action)
+values ($1, $2, $3, $4, $5)
+`, auditID, actor, resourceType, resourceID, action)
+	return err
 }
 
 func (r *Repository) createEntity(ctx context.Context, table, parentColumn, parentID, name, comment, actor, resourceType string) (Entity, error) {
@@ -395,18 +472,26 @@ func (r *Repository) createEntity(ctx context.Context, table, parentColumn, pare
 	return entity, tx.Commit()
 }
 
-func (r *Repository) listEntities(ctx context.Context, table, parentID string) ([]Entity, error) {
+func (r *Repository) listEntities(ctx context.Context, table, parentID string, pagination Pagination) (PaginatedResult[Entity], error) {
+	countQuery := fmt.Sprintf("select count(*) from %s where is_deleted = false", table)
 	query := fmt.Sprintf("select id, name, comment, created_at, updated_at from %s where is_deleted = false", table)
 	args := []any{}
 	if parentID != "" {
+		countQuery += fmt.Sprintf(" and %s = $1::uuid", parentColumn(table))
 		query += fmt.Sprintf(" and %s = $1::uuid", parentColumn(table))
 		args = append(args, parentID)
 	}
-	query += " order by name asc"
+	var total int64
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return PaginatedResult[Entity]{}, err
+	}
+
+	args = append(args, pagination.Limit(), pagination.Offset())
+	query += fmt.Sprintf(" order by name asc limit $%d offset $%d", len(args)-1, len(args))
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return PaginatedResult[Entity]{}, err
 	}
 	defer rows.Close()
 
@@ -414,11 +499,14 @@ func (r *Repository) listEntities(ctx context.Context, table, parentID string) (
 	for rows.Next() {
 		var entity Entity
 		if err := rows.Scan(&entity.ID, &entity.Name, &entity.Comment, &entity.CreatedAt, &entity.UpdatedAt); err != nil {
-			return nil, err
+			return PaginatedResult[Entity]{}, err
 		}
 		items = append(items, entity)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return PaginatedResult[Entity]{}, err
+	}
+	return PaginatedResult[Entity]{Items: items, Total: total}, nil
 }
 
 func (r *Repository) getEntity(ctx context.Context, table, id string) (Entity, error) {

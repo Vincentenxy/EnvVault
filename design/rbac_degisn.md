@@ -224,7 +224,7 @@ user-1 -> org_viewer -> organization:O2
 说明：
 
 - `secret:read` 和 `secret:reveal` 必须拆开。列表、搜索和普通详情默认不返回明文。
-- 当前代码的 `/secret/info` 只返回元数据，后续如果提供明文查看，应新增 `/secret/reveal`，并单独检查 `secret:reveal`。
+- 当前代码的 `/secret/info` 只返回元数据，明文查看走 `/secret/reveal`，并单独检查 `secret:reveal`。
 
 ### 审计与权限管理权限
 

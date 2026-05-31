@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"envVault/internal/auth"
+	secretcrypto "envVault/internal/crypto"
 	"envVault/internal/http/response"
 	"envVault/internal/logging"
 	"envVault/internal/store/postgres"
@@ -37,6 +38,8 @@ type listRequest struct {
 	ResourceType  string `json:"resource_type,omitempty"`
 	ResourceID    string `json:"resource_id,omitempty"`
 	Keyword       string `json:"keyword,omitempty"`
+	PageNum       int    `json:"pageNum"`
+	PageSize      int    `json:"pageSize"`
 }
 
 type secretRequest struct {
@@ -59,8 +62,9 @@ func (ctrl *Controller) CreateOrganization(c *gin.Context) {
 
 func (ctrl *Controller) ListOrganizations(c *gin.Context) {
 	ctrl.log(c, "ListOrganizations")
-	items, err := ctrl.store.ListOrganizations(c.Request.Context())
-	ctrl.write(c, items, err)
+	pagination := paginationFromQuery(c)
+	result, err := ctrl.store.ListOrganizations(c.Request.Context(), pagination)
+	ctrl.write(c, paginatedData("organizations", result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetOrganization(c *gin.Context) {
@@ -106,8 +110,9 @@ func (ctrl *Controller) ListProjects(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "ListProjects", logging.F("org_id", req.OrgID))
-	items, err := ctrl.store.ListProjects(c.Request.Context(), req.OrgID)
-	ctrl.write(c, items, err)
+	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	result, err := ctrl.store.ListProjects(c.Request.Context(), req.OrgID, pagination)
+	ctrl.write(c, paginatedData("projects", result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetProject(c *gin.Context) {
@@ -153,8 +158,9 @@ func (ctrl *Controller) ListEnvironments(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "ListEnvironments", logging.F("project_id", req.ProjectID))
-	items, err := ctrl.store.ListEnvironments(c.Request.Context(), req.ProjectID)
-	ctrl.write(c, items, err)
+	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	result, err := ctrl.store.ListEnvironments(c.Request.Context(), req.ProjectID, pagination)
+	ctrl.write(c, paginatedData("environments", result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetEnvironment(c *gin.Context) {
@@ -200,8 +206,9 @@ func (ctrl *Controller) ListFolders(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "ListFolders", logging.F("environment_id", req.EnvironmentID))
-	items, err := ctrl.store.ListFolders(c.Request.Context(), req.EnvironmentID)
-	ctrl.write(c, items, err)
+	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	result, err := ctrl.store.ListFolders(c.Request.Context(), req.EnvironmentID, pagination)
+	ctrl.write(c, paginatedData("folders", result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetFolder(c *gin.Context) {
@@ -267,6 +274,30 @@ func (ctrl *Controller) UpdateSecret(c *gin.Context) {
 	ctrl.write(c, item, err)
 }
 
+func (ctrl *Controller) RevealSecret(c *gin.Context) {
+	var req idRequest
+	if !ctrl.bind(c, &req) {
+		return
+	}
+	ctrl.log(c, "RevealSecret", logging.F("id", req.ID))
+	secret, ciphertext, err := ctrl.store.GetSecretCiphertext(c.Request.Context(), req.ID)
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+	value, err := ctrl.decryptSecret(c, ciphertext)
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+	if err := ctrl.store.RecordAudit(c.Request.Context(), ctrl.actor(c), "secret", secret.ID, "reveal"); err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+	secret.Value = value
+	ctrl.write(c, secret, nil)
+}
+
 func (ctrl *Controller) GetSecret(c *gin.Context) {
 	var req idRequest
 	if !ctrl.bind(c, &req) {
@@ -283,13 +314,14 @@ func (ctrl *Controller) ListSecrets(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "ListSecrets", logging.F("org_id", req.OrgID), logging.F("project_id", req.ProjectID), logging.F("environment_id", req.EnvironmentID), logging.F("folder_id", req.FolderID))
-	items, err := ctrl.store.ListSecrets(c.Request.Context(), postgres.ListFilter{
+	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	result, err := ctrl.store.ListSecrets(c.Request.Context(), postgres.ListFilter{
 		OrgID:         req.OrgID,
 		ProjectID:     req.ProjectID,
 		EnvironmentID: req.EnvironmentID,
 		FolderID:      req.FolderID,
-	})
-	ctrl.write(c, items, err)
+	}, pagination)
+	ctrl.write(c, paginatedData("secrets", result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) SearchSecrets(c *gin.Context) {
@@ -308,19 +340,22 @@ func (ctrl *Controller) SearchSecrets(c *gin.Context) {
 	if ctrl.cache != nil {
 		items, err := ctrl.cache.SearchSecrets(c.Request.Context(), filter)
 		if err == nil {
-			ctrl.write(c, items, nil)
+			pagination := paginationFromRequest(req.PageNum, req.PageSize)
+			pagedItems, total := paginateSecrets(items, pagination)
+			ctrl.write(c, paginatedData("secrets", pagedItems, total, pagination), nil)
 			return
 		}
 		logging.Warn(c.Request.Context(), "SearchSecrets", "redis search failed, fallback to postgres", logging.F("error", err))
 	}
-	items, err := ctrl.store.ListSecrets(c.Request.Context(), postgres.ListFilter{
+	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	result, err := ctrl.store.ListSecrets(c.Request.Context(), postgres.ListFilter{
 		OrgID:         req.OrgID,
 		ProjectID:     req.ProjectID,
 		EnvironmentID: req.EnvironmentID,
 		FolderID:      req.FolderID,
 		Keyword:       req.Keyword,
-	})
-	ctrl.write(c, items, err)
+	}, pagination)
+	ctrl.write(c, paginatedData("secrets", result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) DeleteSecret(c *gin.Context) {
@@ -342,8 +377,9 @@ func (ctrl *Controller) ListAuditRecords(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "ListAuditRecords", logging.F("resource_type", req.ResourceType), logging.F("resource_id", req.ResourceID))
-	items, err := ctrl.store.ListAuditRecords(c.Request.Context(), req.ResourceType, req.ResourceID)
-	ctrl.write(c, items, err)
+	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	result, err := ctrl.store.ListAuditRecords(c.Request.Context(), req.ResourceType, req.ResourceID, pagination)
+	ctrl.write(c, paginatedData("audit_records", result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) bind(c *gin.Context, target any) bool {
@@ -403,6 +439,21 @@ func (ctrl *Controller) encryptSecret(c *gin.Context, value string) (postgres.Se
 	}, nil
 }
 
+func (ctrl *Controller) decryptSecret(c *gin.Context, ciphertext postgres.SecretCiphertext) (string, error) {
+	if ctrl.encryptor == nil {
+		return "", errors.New("encryptor is not configured")
+	}
+	plaintext, err := ctrl.encryptor.Decrypt(c.Request.Context(), secretcrypto.Ciphertext{
+		Algorithm: ciphertext.Algorithm,
+		Nonce:     ciphertext.Nonce,
+		Data:      ciphertext.Data,
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
+}
+
 func (ctrl *Controller) cacheSecret(c *gin.Context, id string, ciphertext postgres.SecretCiphertext) {
 	if ctrl.cache == nil {
 		return
@@ -431,4 +482,18 @@ func (ctrl *Controller) cacheSecret(c *gin.Context, id string, ciphertext postgr
 
 func (ctrl *Controller) log(c *gin.Context, method string, fields ...logging.Field) {
 	logging.Info(c.Request.Context(), method, "handler called", fields...)
+}
+
+func paginateSecrets(items []postgres.Secret, pagination postgres.Pagination) ([]postgres.Secret, int64) {
+	pagination = pagination.Normalize()
+	total := int64(len(items))
+	start := pagination.Offset()
+	if start >= len(items) {
+		return []postgres.Secret{}, total
+	}
+	end := start + pagination.Limit()
+	if end > len(items) {
+		end = len(items)
+	}
+	return items[start:end], total
 }

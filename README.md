@@ -73,7 +73,9 @@ Common environment variables:
 - `ENVVAULT_HTTP_ADDR`
 - `ENVVAULT_HTTP_REQUEST_ID_HEADER`
 - `ENVVAULT_AUTH_ENABLED`
-- `ENVVAULT_AUTH_JWT_SECRET`
+- `ENVVAULT_AUTH_PUBLIC_KEY`
+- `ENVVAULT_AUTH_DEV_TOKEN_ENABLED`
+- `ENVVAULT_AUTH_DEV_PRIVATE_KEY`
 - `ENVVAULT_AUTH_DEV_USER_ID`
 - `ENVVAULT_AUTH_DEV_USER_NAME`
 - `ENVVAULT_SECURITY_ENCRYPTION_KEY`
@@ -109,7 +111,7 @@ All business responses follow this format:
 }
 ```
 
-See [design/DESIGN.md](design/DESIGN.md) for the current detailed design and API definitions.
+See [design/DESIGN.md](design/DESIGN.md) for the current detailed design. OpenAPI files are in [design/api](design/api), including core APIs and RBAC APIs.
 
 ## Development
 

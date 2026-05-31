@@ -60,12 +60,15 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 		v1 := api.Group("/v1")
 		{
 			v1.GET("/readyz", ctrl.Ready)
+			if deps.Config.Auth.DevTokenEnabled {
+				v1.POST("/auth/dev/token", ctrl.CreateDevJWT)
+			}
 
 			protected := v1.Group("")
 			{
 				if deps.Config.Auth.Enabled {
 					protected.Use(auth.JWTMiddleware(auth.JWTConfig{
-						Secret: []byte(deps.Config.Auth.JWTSecret),
+						PublicKey: deps.Config.Auth.PublicKey,
 					}))
 				} else {
 					protected.Use(auth.StaticUserMiddleware(auth.UserInfo{
@@ -117,6 +120,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 					secret.POST("/search", ctrl.SearchSecrets)
 					secret.POST("/create", ctrl.CreateSecret)
 					secret.POST("/info", ctrl.GetSecret)
+					secret.POST("/reveal", ctrl.RevealSecret)
 					secret.POST("/update", ctrl.UpdateSecret)
 					secret.POST("/delete", ctrl.DeleteSecret)
 				}

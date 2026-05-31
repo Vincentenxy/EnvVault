@@ -24,7 +24,7 @@ func (ctrl *Controller) Ready(c *gin.Context) {
 	responseBody := gin.H{
 		"status":                  "ok",
 		"database":                databaseStatus,
-		"jwt_configured":          ctrl.config.Auth.JWTSecret != "",
+		"jwt_configured":          ctrl.config.Auth.PublicKey != "",
 		"encryption_configured":   ctrl.config.Security.EncryptionKey != "",
 		"default_environment_set": []string{"dev", "test", "sim", "prod"},
 	}

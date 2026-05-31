@@ -13,7 +13,7 @@ func TestLoadFromPath(t *testing.T) {
 http:
   addr: ":9090"
 auth:
-  jwt_secret: "test-secret"
+  public_key: "test-public-key"
 security:
   encryption_key: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 database:

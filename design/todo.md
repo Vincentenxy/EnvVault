@@ -1,5 +1,7 @@
 # EnvVault 后续设计待办
 
+状态：本文件中的业务路径 `code` 设计已按清库重建方式落地到 `configs/schema.sql`、核心 CRUD 接口、Redis Secret 缓存和 `design/api/core.yaml`。后续如果已有生产数据，需要另写迁移脚本，本次不包含历史数据迁移。
+
 ## 业务路径 code 设计
 
 目标是在保留 UUID 内部主键的前提下，为组织、项目、环境、Folder、Secret 提供稳定、可读、可拼接的业务路径。

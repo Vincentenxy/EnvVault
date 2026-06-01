@@ -217,8 +217,17 @@ func signingMethodForPrivateKey(privateKey any) (jwt.SigningMethod, error) {
 }
 
 func abort(c *gin.Context, status int, err error) {
+	code := -1
+	switch status {
+	case http.StatusUnauthorized:
+		code = 1401
+	case http.StatusForbidden:
+		code = 1403
+	case http.StatusServiceUnavailable:
+		code = 1503
+	}
 	c.AbortWithStatusJSON(status, gin.H{
-		"code": status,
+		"code": code,
 		"msg":  err.Error(),
 		"data": nil,
 	})

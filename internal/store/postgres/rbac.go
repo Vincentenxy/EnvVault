@@ -22,10 +22,10 @@ type RBACStore struct {
 type Permission struct {
 	ID           string `json:"id"`
 	Code         string `json:"code"`
-	ResourceType string `json:"resource_type"`
+	ResourceType string `json:"resourceType"`
 	Action       string `json:"action"`
 	Description  string `json:"description"`
-	IsSystem     bool   `json:"is_system"`
+	IsSystem     bool   `json:"isSystem"`
 }
 
 type Role struct {
@@ -33,10 +33,10 @@ type Role struct {
 	Code        string   `json:"code"`
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
-	ScopeType   string   `json:"scope_type"`
-	OrgID       string   `json:"org_id,omitempty"`
-	ProjectID   string   `json:"project_id,omitempty"`
-	IsSystem    bool     `json:"is_system"`
+	ScopeType   string   `json:"scopeType"`
+	OrgID       string   `json:"orgId,omitempty"`
+	ProjectID   string   `json:"projectId,omitempty"`
+	IsSystem    bool     `json:"isSystem"`
 	Permissions []string `json:"permissions,omitempty" gorm:"-"`
 }
 
@@ -53,24 +53,24 @@ type RoleInput struct {
 
 type User struct {
 	ID             string     `json:"id"`
-	ExternalUserID string     `json:"external_user_id"`
+	ExternalUserID string     `json:"externalUserId"`
 	Name           string     `json:"name"`
 	Email          string     `json:"email"`
 	Source         string     `json:"source"`
-	IsDisabled     bool       `json:"is_disabled"`
-	LastSeenAt     *time.Time `json:"last_seen_at,omitempty"`
+	IsDisabled     bool       `json:"isDisabled"`
+	LastSeenAt     *time.Time `json:"lastSeenAt,omitempty"`
 }
 
 type RoleBinding struct {
 	ID        string     `json:"id"`
 	User      User       `json:"user" gorm:"-"`
-	RoleID    string     `json:"role_id"`
-	RoleCode  string     `json:"role_code"`
-	ScopeType string     `json:"scope_type"`
-	ScopeID   string     `json:"scope_id,omitempty"`
-	GrantedBy string     `json:"granted_by"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	RoleID    string     `json:"roleId"`
+	RoleCode  string     `json:"roleCode"`
+	ScopeType string     `json:"scopeType"`
+	ScopeID   string     `json:"scopeId,omitempty"`
+	GrantedBy string     `json:"grantedBy"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
 }
 
 type GrantInput struct {
@@ -86,7 +86,7 @@ type GrantInput struct {
 
 type EffectivePermissions struct {
 	Permissions  []string      `json:"permissions"`
-	SourceGrants []RoleBinding `json:"source_grants"`
+	SourceGrants []RoleBinding `json:"sourceGrants"`
 }
 
 type systemPermission struct {

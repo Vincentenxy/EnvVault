@@ -61,6 +61,9 @@ func (c *Cache) WarmSecrets(ctx context.Context, records []postgres.SecretCacheR
 	if err := c.client.Del(ctx, c.idsKey()).Err(); err != nil {
 		return err
 	}
+	if err := c.deletePathKeys(ctx); err != nil {
+		return err
+	}
 	for _, record := range records {
 		if err := c.UpsertSecret(ctx, record); err != nil {
 			return err
@@ -77,13 +80,27 @@ func (c *Cache) UpsertSecret(ctx context.Context, record postgres.SecretCacheRec
 
 	secret := record.Secret
 	key := c.secretKey(secret.ID)
+	oldPath, err := c.client.HGet(ctx, key, "path").Result()
+	if err != nil && err != goredis.Nil {
+		return err
+	}
+	if oldPath != "" && oldPath != secret.Path {
+		if err := c.client.Del(ctx, c.pathKey(oldPath)).Err(); err != nil {
+			return err
+		}
+	}
 	values := map[string]any{
 		"id":               secret.ID,
 		"org_id":           secret.OrgID,
+		"org_code":         secret.OrgCode,
 		"project_id":       secret.ProjectID,
+		"project_code":     secret.ProjectCode,
 		"environment_id":   secret.EnvironmentID,
+		"environment_code": secret.EnvironmentCode,
 		"folder_id":        secret.FolderID,
+		"folder_code":      secret.FolderCode,
 		"key":              secret.Key,
+		"path":             secret.Path,
 		"value_ciphertext": base64.StdEncoding.EncodeToString(record.ValueCiphertext),
 		"comment":          secret.Comment,
 		"version":          secret.Version,
@@ -97,6 +114,11 @@ func (c *Cache) UpsertSecret(ctx context.Context, record postgres.SecretCacheRec
 	if err := c.client.HSet(ctx, key, values).Err(); err != nil {
 		return err
 	}
+	if secret.Path != "" {
+		if err := c.client.Set(ctx, c.pathKey(secret.Path), secret.ID, 0).Err(); err != nil {
+			return err
+		}
+	}
 	return c.client.SAdd(ctx, c.idsKey(), secret.ID).Err()
 }
 
@@ -104,7 +126,16 @@ func (c *Cache) DeleteSecret(ctx context.Context, id string) error {
 	if c == nil {
 		return nil
 	}
-	if err := c.client.Del(ctx, c.secretKey(id)).Err(); err != nil {
+	secretKey := c.secretKey(id)
+	path, err := c.client.HGet(ctx, secretKey, "path").Result()
+	if err != nil && err != goredis.Nil {
+		return err
+	}
+	keys := []string{secretKey}
+	if path != "" {
+		keys = append(keys, c.pathKey(path))
+	}
+	if err := c.client.Del(ctx, keys...).Err(); err != nil {
 		return err
 	}
 	return c.client.SRem(ctx, c.idsKey(), id).Err()
@@ -131,20 +162,25 @@ func (c *Cache) SearchSecrets(ctx context.Context, filter postgres.ListFilter) (
 			continue
 		}
 		items = append(items, postgres.Secret{
-			ID:             values["id"],
-			OrgID:          values["org_id"],
-			ProjectID:      values["project_id"],
-			EnvironmentID:  values["environment_id"],
-			FolderID:       values["folder_id"],
-			Key:            values["key"],
-			Comment:        values["comment"],
-			Version:        atoi(values["version"]),
-			CreatedBy:      values["created_by"],
-			CreatedByLabel: labelOrID(values["created_by_label"], values["created_by"]),
-			UpdatedBy:      values["updated_by"],
-			UpdatedByLabel: labelOrID(values["updated_by_label"], values["updated_by"]),
-			CreatedAt:      parseTime(values["created_at"]),
-			UpdatedAt:      parseTime(values["updated_at"]),
+			ID:              values["id"],
+			OrgID:           values["org_id"],
+			OrgCode:         values["org_code"],
+			ProjectID:       values["project_id"],
+			ProjectCode:     values["project_code"],
+			EnvironmentID:   values["environment_id"],
+			EnvironmentCode: values["environment_code"],
+			FolderID:        values["folder_id"],
+			FolderCode:      values["folder_code"],
+			Key:             values["key"],
+			Path:            values["path"],
+			Comment:         values["comment"],
+			Version:         atoi(values["version"]),
+			CreatedBy:       values["created_by"],
+			CreatedByLabel:  labelOrID(values["created_by_label"], values["created_by"]),
+			UpdatedBy:       values["updated_by"],
+			UpdatedByLabel:  labelOrID(values["updated_by_label"], values["updated_by"]),
+			CreatedAt:       parseTime(values["created_at"]),
+			UpdatedAt:       parseTime(values["updated_at"]),
 		})
 	}
 	return items, nil
@@ -156,6 +192,29 @@ func (c *Cache) idsKey() string {
 
 func (c *Cache) secretKey(id string) string {
 	return c.prefix + ":secret:" + id
+}
+
+func (c *Cache) pathKey(path string) string {
+	return c.prefix + ":secret:path:" + path
+}
+
+func (c *Cache) deletePathKeys(ctx context.Context) error {
+	var cursor uint64
+	for {
+		keys, nextCursor, err := c.client.Scan(ctx, cursor, c.pathKey("*"), 100).Result()
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			if err := c.client.Del(ctx, keys...).Err(); err != nil {
+				return err
+			}
+		}
+		if nextCursor == 0 {
+			return nil
+		}
+		cursor = nextCursor
+	}
 }
 
 func matches(values map[string]string, filter postgres.ListFilter, keyword string) bool {
@@ -171,7 +230,7 @@ func matches(values map[string]string, filter postgres.ListFilter, keyword strin
 	if filter.FolderID != "" && values["folder_id"] != filter.FolderID {
 		return false
 	}
-	if keyword != "" && !strings.Contains(strings.ToLower(values["key"]), keyword) {
+	if keyword != "" && !strings.Contains(strings.ToLower(values["key"]), keyword) && !strings.Contains(strings.ToLower(values["path"]), keyword) {
 		return false
 	}
 	return true

@@ -508,8 +508,8 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 - `pageSize`：每页数量，默认 `20`，最大 `100`。
 - 列表接口将 `pageNum`、`pageSize` 放在 JSON body 中。
 - 分页请求统一复用 `PageRequest`。
-- 分页响应统一复用 `PageResp`，格式为 `{ "total": 总条数, "list": 数据列表 }`。
-- 分页响应不返回 `pageNum`、`pageSize`，调用方以请求参数作为当前分页上下文。
+- 分页响应统一复用 `PageResp`，格式为 `{ "pageNum": 页码, "pageSize": 每页数量, "total": 总条数, "list": 数据列表 }`。
+- 分页响应必须返回 `pageNum`、`pageSize`，便于调用方确认服务端归一化后的分页上下文。
 
 ### 权限查询
 
@@ -522,8 +522,8 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 ```json
 {
-  "scope_type": "project",
-  "scope_id": "uuid"
+  "scopeType": "project",
+  "scopeId": "uuid"
 }
 ```
 
@@ -557,8 +557,8 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 ```json
 {
-  "scope_type": "organization",
-  "scope_id": "uuid",
+  "scopeType": "organization",
+  "scopeId": "uuid",
   "pageNum": 1,
   "pageSize": 20
 }
@@ -568,8 +568,8 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 ```json
 {
-  "scope_type": "organization",
-  "scope_id": "uuid",
+  "scopeType": "organization",
+  "scopeId": "uuid",
   "code": "release_operator",
   "name": "Release Operator",
   "description": "发布人员",
@@ -598,8 +598,8 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 ```json
 {
-  "scope_type": "project",
-  "scope_id": "uuid",
+  "scopeType": "project",
+  "scopeId": "uuid",
   "pageNum": 1,
   "pageSize": 20
 }
@@ -609,12 +609,12 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 ```json
 {
-  "external_user_id": "user-123",
+  "externalUserId": "user-123",
   "name": "Alice",
-  "role_code": "project_developer",
-  "scope_type": "project",
-  "scope_id": "uuid",
-  "expires_at": ""
+  "roleCode": "project_developer",
+  "scopeType": "project",
+  "scopeId": "uuid",
+  "expiresAt": ""
 }
 ```
 
@@ -622,10 +622,10 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 ```json
 {
-  "external_user_id": "user-123",
-  "role_code": "project_developer",
-  "scope_type": "project",
-  "scope_id": "uuid"
+  "externalUserId": "user-123",
+  "roleCode": "project_developer",
+  "scopeType": "project",
+  "scopeId": "uuid"
 }
 ```
 
@@ -649,8 +649,8 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 ```json
 {
-  "scope_type": "organization",
-  "scope_id": "uuid",
+  "scopeType": "organization",
+  "scopeId": "uuid",
   "pageNum": 1,
   "pageSize": 20
 }
@@ -660,7 +660,7 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 ```json
 {
-  "external_user_id": "user-123",
+  "externalUserId": "user-123",
   "pageNum": 1,
   "pageSize": 20
 }
@@ -673,21 +673,23 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
   "code": 0,
   "msg": "success",
   "data": {
+    "pageNum": 1,
+    "pageSize": 20,
     "total": 2,
     "list": [
       {
-        "role_code": "project_admin",
-        "scope_type": "project",
-        "scope_id": "project uuid",
-        "granted_by": "admin-user",
-        "expires_at": ""
+        "roleCode": "project_admin",
+        "scopeType": "project",
+        "scopeId": "project uuid",
+        "grantedBy": "admin-user",
+        "expiresAt": ""
       },
       {
-        "role_code": "org_viewer",
-        "scope_type": "organization",
-        "scope_id": "organization uuid",
-        "granted_by": "admin-user",
-        "expires_at": ""
+        "roleCode": "org_viewer",
+        "scopeType": "organization",
+        "scopeId": "organization uuid",
+        "grantedBy": "admin-user",
+        "expiresAt": ""
       }
     ]
   }
@@ -698,9 +700,9 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 ```json
 {
-  "external_user_id": "user-123",
-  "scope_type": "project",
-  "scope_id": "project uuid"
+  "externalUserId": "user-123",
+  "scopeType": "project",
+  "scopeId": "project uuid"
 }
 ```
 
@@ -724,16 +726,16 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
       "secret:update",
       "secret:delete"
     ],
-    "source_grants": [
+    "sourceGrants": [
       {
-        "role_code": "org_admin",
-        "scope_type": "organization",
-        "scope_id": "organization uuid"
+        "roleCode": "org_admin",
+        "scopeType": "organization",
+        "scopeId": "organization uuid"
       },
       {
-        "role_code": "project_admin",
-        "scope_type": "project",
-        "scope_id": "project uuid"
+        "roleCode": "project_admin",
+        "scopeType": "project",
+        "scopeId": "project uuid"
       }
     ]
   }
@@ -777,11 +779,15 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 | HTTP 状态码 | code | 场景 |
 | --- | --- | --- |
+| 200 | -1 | 通用业务失败，无法明确归类时使用 |
 | 401 | 1401 | 未认证或 JWT 无效 |
 | 403 | 1403 | 已认证但无权限 |
 | 404 | 1404 | 资源不存在，或不希望泄露存在性时可对无权限资源返回 404 |
 | 409 | 1409 | 角色绑定冲突、删除最后一个 owner |
 | 500 | 1500 | 未预期错误 |
+| 503 | 1503 | 依赖服务不可用或服务未配置 |
+
+响应体中的 `code` 是业务状态码，不允许直接复用 HTTP 状态码。通用成功使用 `0`，通用失败使用 `-1`，特殊错误使用 `1000` 以上错误码。
 
 对 Secret、审计记录这类敏感资源，如果资源存在但用户无权限，可以按场景返回 403 或 404。对外部用户不应通过错误信息推断其他组织或项目的资源存在。
 

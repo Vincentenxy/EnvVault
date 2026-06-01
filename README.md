@@ -5,10 +5,11 @@ EnvVault is a lightweight, self-hostable secret management platform inspired by 
 ## Features
 
 - Organization, project, environment, folder, and secret hierarchy.
+- Readable business paths using `org_code.project_code.env_code.folder_code.KEY`.
 - Built-in default environments: `dev`, `test`, `sim`, and `prod`.
 - Custom environments, such as `poc`, are supported.
 - One-level folder structure with default folders: `globals` and `groups-secrets`.
-- Secret entries contain `key`, `value`, and `comment`.
+- Secret entries contain `.env` style `key`, encrypted `value`, and `comment`.
 - JWT authentication for externally issued tokens.
 - RBAC authorization extension points.
 - PostgreSQL persistence.
@@ -35,6 +36,16 @@ docker compose up -d postgres redis
 ```
 
 Initialize the database schema:
+
+Connect to the default `postgres` database first, then create the EnvVault database:
+
+```sql
+create database envvault
+    with owner admin
+    encoding 'UTF8';
+```
+
+Then connect to `envvault` and initialize tables:
 
 ```bash
 psql "postgres://admin:123456@127.0.0.1:5432/envvault?sslmode=disable" -f configs/schema.sql
@@ -101,7 +112,9 @@ EnvVault uses action-style HTTP APIs:
 - `GET` does not carry a request body or business query parameters by default.
 - Requests with data, including pagination, filters, IDs, and search keywords, use `POST` with a JSON body.
 - Special link-style flows may use `GET` with query parameters.
-- Paginated responses use `data.total` and `data.list`.
+- API request and response fields use camelCase, such as `parentId`, `folderId`, `scopeType`, and `externalUserId`.
+- Paginated requests use `pageNum` and `pageSize`; paginated responses use `data.pageNum`, `data.pageSize`, `data.total`, and `data.list`.
+- HTTP status codes describe transport-level status. The response body `code` is the business code: `0` means success, `-1` means generic failure, and special failures use codes greater than or equal to `1000`.
 
 All business responses follow this format:
 

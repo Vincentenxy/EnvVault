@@ -145,7 +145,7 @@ paths:
                 - $ref: "#/components/schemas/PageRequest"
                 - type: object
                   properties:
-                    org_id:
+                    orgId:
                       type: string
                       format: uuid
       responses:
@@ -206,7 +206,7 @@ paths:
                 - $ref: "#/components/schemas/PageRequest"
                 - type: object
                   properties:
-                    project_id:
+                    projectId:
                       type: string
                       format: uuid
       responses:
@@ -267,7 +267,7 @@ paths:
                 - $ref: "#/components/schemas/PageRequest"
                 - type: object
                   properties:
-                    environment_id:
+                    environmentId:
                       type: string
                       format: uuid
       responses:
@@ -407,9 +407,9 @@ paths:
                 - $ref: "#/components/schemas/PageRequest"
                 - type: object
                   properties:
-                    resource_type:
+                    resourceType:
                       type: string
-                    resource_id:
+                    resourceId:
                       type: string
                       format: uuid
       responses:
@@ -589,8 +589,14 @@ components:
 
     PageResp:
       type: object
-      required: [total, list]
+      required: [pageNum, pageSize, total, list]
       properties:
+        pageNum:
+          type: integer
+          example: 1
+        pageSize:
+          type: integer
+          example: 20
         total:
           type: integer
           format: int64
@@ -601,11 +607,15 @@ components:
 
     CreateEntityRequest:
       type: object
-      required: [name]
+      required: [code, name]
       properties:
+        code:
+          type: string
+          pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+          example: org-a
         name:
           type: string
-          example: org-a
+          example: Organization A
         comment:
           type: string
           example: description
@@ -614,9 +624,9 @@ components:
       allOf:
         - $ref: "#/components/schemas/CreateEntityRequest"
         - type: object
-          required: [parent_id]
+          required: [parentId]
           properties:
-            parent_id:
+            parentId:
               type: string
               format: uuid
 
@@ -627,6 +637,9 @@ components:
         id:
           type: string
           format: uuid
+        code:
+          type: string
+          example: org-a
         name:
           type: string
         comment:
@@ -642,22 +655,22 @@ components:
           type: string
         comment:
           type: string
-        created_by:
+        createdBy:
           type: string
           example: dev-user
-        created_by_label:
+        createdByLabel:
           type: string
           example: Dev User
-        updated_by:
+        updatedBy:
           type: string
           example: dev-user
-        updated_by_label:
+        updatedByLabel:
           type: string
           example: Dev User
-        created_at:
+        createdAt:
           type: string
           format: date-time
-        updated_at:
+        updatedAt:
           type: string
           format: date-time
 
@@ -697,28 +710,29 @@ components:
     SecretFilter:
       type: object
       properties:
-        org_id:
+        orgId:
           type: string
           format: uuid
-        project_id:
+        projectId:
           type: string
           format: uuid
-        environment_id:
+        environmentId:
           type: string
           format: uuid
-        folder_id:
+        folderId:
           type: string
           format: uuid
 
     SecretUpsertRequest:
       type: object
-      required: [folder_id, key, value]
+      required: [folderId, key, value]
       properties:
-        folder_id:
+        folderId:
           type: string
           format: uuid
         key:
           type: string
+          pattern: "^[A-Z][A-Z0-9_]*$"
           example: DATABASE_URL
         value:
           type: string
@@ -732,43 +746,54 @@ components:
         id:
           type: string
           format: uuid
-        org_id:
+        orgId:
           type: string
           format: uuid
-        project_id:
+        orgCode:
+          type: string
+        projectId:
           type: string
           format: uuid
-        environment_id:
+        projectCode:
+          type: string
+        environmentId:
           type: string
           format: uuid
-        folder_id:
+        environmentCode:
+          type: string
+        folderId:
           type: string
           format: uuid
+        folderCode:
+          type: string
         key:
           type: string
+        path:
+          type: string
+          example: org-a.project-a.dev.globals.DATABASE_URL
         value:
           type: string
           description: Only returned by /api/v1/secret/reveal.
         comment:
           type: string
-        created_by:
+        createdBy:
           type: string
           example: dev-user
-        created_by_label:
+        createdByLabel:
           type: string
           example: Dev User
-        updated_by:
+        updatedBy:
           type: string
           example: dev-user
-        updated_by_label:
+        updatedByLabel:
           type: string
           example: Dev User
         version:
           type: integer
-        created_at:
+        createdAt:
           type: string
           format: date-time
-        updated_at:
+        updatedAt:
           type: string
           format: date-time
 
@@ -780,16 +805,16 @@ components:
           format: uuid
         actor:
           type: string
-        resource_type:
+        resourceType:
           type: string
-        resource_id:
+        resourceId:
           type: string
           format: uuid
         action:
           type: string
-        encrypted_value:
+        encryptedValue:
           type: object
-        created_at:
+        createdAt:
           type: string
           format: date-time
 

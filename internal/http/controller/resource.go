@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,7 +16,8 @@ import (
 )
 
 type createEntityRequest struct {
-	ParentID string `json:"parent_id,omitempty"`
+	ParentID string `json:"parentId,omitempty"`
+	Code     string `json:"code"`
 	Name     string `json:"name"`
 	Comment  string `json:"comment"`
 }
@@ -32,12 +34,12 @@ type updateEntityRequest struct {
 
 type listRequest struct {
 	PageRequest
-	OrgID         string `json:"org_id,omitempty"`
-	ProjectID     string `json:"project_id,omitempty"`
-	EnvironmentID string `json:"environment_id,omitempty"`
-	FolderID      string `json:"folder_id,omitempty"`
-	ResourceType  string `json:"resource_type,omitempty"`
-	ResourceID    string `json:"resource_id,omitempty"`
+	OrgID         string `json:"orgId,omitempty"`
+	ProjectID     string `json:"projectId,omitempty"`
+	EnvironmentID string `json:"environmentId,omitempty"`
+	FolderID      string `json:"folderId,omitempty"`
+	ResourceType  string `json:"resourceType,omitempty"`
+	ResourceID    string `json:"resourceId,omitempty"`
 	Keyword       string `json:"keyword,omitempty"`
 }
 
@@ -47,25 +49,35 @@ type PageRequest struct {
 }
 
 type PageResp struct {
-	Total int64 `json:"total"`
-	List  any   `json:"list"`
+	PageNum  int   `json:"pageNum"`
+	PageSize int   `json:"pageSize"`
+	Total    int64 `json:"total"`
+	List     any   `json:"list"`
 }
 
 type secretRequest struct {
 	ID       string `json:"id,omitempty"`
-	FolderID string `json:"folder_id,omitempty"`
+	FolderID string `json:"folderId,omitempty"`
 	Key      string `json:"key"`
 	Value    string `json:"value"`
 	Comment  string `json:"comment"`
 }
+
+var (
+	codePattern      = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+	secretKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+)
 
 func (ctrl *Controller) CreateOrganization(c *gin.Context) {
 	var req createEntityRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "CreateOrganization", logging.F("name", req.Name))
-	item, err := ctrl.store.CreateOrganization(c.Request.Context(), req.Name, req.Comment, ctrl.actor(c))
+	if !validateCode(c, req.Code) {
+		return
+	}
+	ctrl.log(c, "CreateOrganization", logging.F("code", req.Code), logging.F("name", req.Name))
+	item, err := ctrl.store.CreateOrganization(c.Request.Context(), req.Code, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
@@ -77,7 +89,7 @@ func (ctrl *Controller) ListOrganizations(c *gin.Context) {
 	ctrl.log(c, "ListOrganizations")
 	pagination := paginationFromRequest(req)
 	result, err := ctrl.store.ListOrganizations(c.Request.Context(), pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetOrganization(c *gin.Context) {
@@ -112,8 +124,11 @@ func (ctrl *Controller) CreateProject(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "CreateProject", logging.F("org_id", req.ParentID), logging.F("name", req.Name))
-	item, err := ctrl.store.CreateProject(c.Request.Context(), req.ParentID, req.Name, req.Comment, ctrl.actor(c))
+	if !validateCode(c, req.Code) {
+		return
+	}
+	ctrl.log(c, "CreateProject", logging.F("org_id", req.ParentID), logging.F("code", req.Code), logging.F("name", req.Name))
+	item, err := ctrl.store.CreateProject(c.Request.Context(), req.ParentID, req.Code, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
@@ -125,7 +140,7 @@ func (ctrl *Controller) ListProjects(c *gin.Context) {
 	ctrl.log(c, "ListProjects", logging.F("org_id", req.OrgID))
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListProjects(c.Request.Context(), req.OrgID, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetProject(c *gin.Context) {
@@ -160,8 +175,11 @@ func (ctrl *Controller) CreateEnvironment(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "CreateEnvironment", logging.F("project_id", req.ParentID), logging.F("name", req.Name))
-	item, err := ctrl.store.CreateEnvironment(c.Request.Context(), req.ParentID, req.Name, req.Comment, ctrl.actor(c))
+	if !validateCode(c, req.Code) {
+		return
+	}
+	ctrl.log(c, "CreateEnvironment", logging.F("project_id", req.ParentID), logging.F("code", req.Code), logging.F("name", req.Name))
+	item, err := ctrl.store.CreateEnvironment(c.Request.Context(), req.ParentID, req.Code, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
@@ -173,7 +191,7 @@ func (ctrl *Controller) ListEnvironments(c *gin.Context) {
 	ctrl.log(c, "ListEnvironments", logging.F("project_id", req.ProjectID))
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListEnvironments(c.Request.Context(), req.ProjectID, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetEnvironment(c *gin.Context) {
@@ -208,8 +226,11 @@ func (ctrl *Controller) CreateFolder(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "CreateFolder", logging.F("environment_id", req.ParentID), logging.F("name", req.Name))
-	item, err := ctrl.store.CreateFolder(c.Request.Context(), req.ParentID, req.Name, req.Comment, ctrl.actor(c))
+	if !validateCode(c, req.Code) {
+		return
+	}
+	ctrl.log(c, "CreateFolder", logging.F("environment_id", req.ParentID), logging.F("code", req.Code), logging.F("name", req.Name))
+	item, err := ctrl.store.CreateFolder(c.Request.Context(), req.ParentID, req.Code, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
@@ -221,7 +242,7 @@ func (ctrl *Controller) ListFolders(c *gin.Context) {
 	ctrl.log(c, "ListFolders", logging.F("environment_id", req.EnvironmentID))
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListFolders(c.Request.Context(), req.EnvironmentID, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetFolder(c *gin.Context) {
@@ -256,6 +277,9 @@ func (ctrl *Controller) CreateSecret(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	if !validateSecretKey(c, req.Key) {
+		return
+	}
 	ctrl.log(c, "CreateSecret", logging.F("folder_id", req.FolderID), logging.F("key", req.Key), logging.F("value", req.Value))
 	ciphertext, err := ctrl.encryptSecret(c, req.Value)
 	if err != nil {
@@ -272,6 +296,9 @@ func (ctrl *Controller) CreateSecret(c *gin.Context) {
 func (ctrl *Controller) UpdateSecret(c *gin.Context) {
 	var req secretRequest
 	if !ctrl.bind(c, &req) {
+		return
+	}
+	if !validateSecretKey(c, req.Key) {
 		return
 	}
 	ctrl.log(c, "UpdateSecret", logging.F("id", req.ID), logging.F("key", req.Key), logging.F("value", req.Value))
@@ -334,7 +361,7 @@ func (ctrl *Controller) ListSecrets(c *gin.Context) {
 		EnvironmentID: req.EnvironmentID,
 		FolderID:      req.FolderID,
 	}, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) SearchSecrets(c *gin.Context) {
@@ -355,7 +382,7 @@ func (ctrl *Controller) SearchSecrets(c *gin.Context) {
 		if err == nil {
 			pagination := paginationFromRequest(req.PageRequest)
 			pagedItems, total := paginateSecrets(items, pagination)
-			ctrl.write(c, pageData(pagedItems, total), nil)
+			ctrl.write(c, pageData(pagedItems, total, pagination), nil)
 			return
 		}
 		logging.Warn(c.Request.Context(), "SearchSecrets", "redis search failed, fallback to postgres", logging.F("error", err))
@@ -368,7 +395,7 @@ func (ctrl *Controller) SearchSecrets(c *gin.Context) {
 		FolderID:      req.FolderID,
 		Keyword:       req.Keyword,
 	}, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) DeleteSecret(c *gin.Context) {
@@ -392,16 +419,16 @@ func (ctrl *Controller) ListAuditRecords(c *gin.Context) {
 	ctrl.log(c, "ListAuditRecords", logging.F("resource_type", req.ResourceType), logging.F("resource_id", req.ResourceID))
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListAuditRecords(c.Request.Context(), req.ResourceType, req.ResourceID, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) bind(c *gin.Context, target any) bool {
 	if ctrl.store == nil {
-		response.Fail(c, http.StatusServiceUnavailable, 1001, "store is not configured")
+		response.Fail(c, http.StatusServiceUnavailable, response.CodeStoreUnavailable, "store is not configured")
 		return false
 	}
 	if err := c.ShouldBindJSON(target); err != nil {
-		response.Fail(c, http.StatusBadRequest, 1002, err.Error())
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, err.Error())
 		return false
 	}
 	return true
@@ -414,14 +441,14 @@ func (ctrl *Controller) write(c *gin.Context, data any, err error) {
 	}
 	logging.Error(c.Request.Context(), "controller.write", "request failed", logging.F("error", err))
 	if errors.Is(err, auth.ErrPermissionDenied) {
-		response.Fail(c, http.StatusForbidden, 1403, err.Error())
+		response.Fail(c, http.StatusForbidden, response.CodeForbidden, err.Error())
 		return
 	}
 	if errors.Is(err, postgres.ErrNotFound) {
-		response.Fail(c, http.StatusNotFound, 1404, err.Error())
+		response.Fail(c, http.StatusNotFound, response.CodeNotFound, err.Error())
 		return
 	}
-	response.Fail(c, http.StatusInternalServerError, 1500, err.Error())
+	response.FailWithMsg(c, err.Error())
 }
 
 func (ctrl *Controller) delete(c *gin.Context, fn func(idRequest) error) {
@@ -498,6 +525,22 @@ func (ctrl *Controller) cacheSecret(c *gin.Context, id string, ciphertext postgr
 
 func (ctrl *Controller) log(c *gin.Context, method string, fields ...logging.Field) {
 	logging.Info(c.Request.Context(), method, "handler called", fields...)
+}
+
+func validateCode(c *gin.Context, code string) bool {
+	if !codePattern.MatchString(code) {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "code must match ^[a-z0-9]+(-[a-z0-9]+)*$")
+		return false
+	}
+	return true
+}
+
+func validateSecretKey(c *gin.Context, key string) bool {
+	if !secretKeyPattern.MatchString(key) {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "key must match ^[A-Z][A-Z0-9_]*$")
+		return false
+	}
+	return true
 }
 
 func paginateSecrets(items []postgres.Secret, pagination postgres.Pagination) ([]postgres.Secret, int64) {

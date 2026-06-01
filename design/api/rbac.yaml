@@ -581,22 +581,22 @@ components:
     ScopeRequest:
       type: object
       required:
-        - scope_type
+        - scopeType
       properties:
-        scope_type:
+        scopeType:
           $ref: "#/components/schemas/ScopeType"
-        scope_id:
+        scopeId:
           type: string
           format: uuid
           nullable: true
-          description: Required when scope_type is not global.
+          description: Required when scopeType is not global.
 
     UserLookupRequest:
       type: object
       required:
-        - external_user_id
+        - externalUserId
       properties:
-        external_user_id:
+        externalUserId:
           type: string
           example: user-123
 
@@ -618,9 +618,17 @@ components:
     PageResp:
       type: object
       required:
+        - pageNum
+        - pageSize
         - total
         - list
       properties:
+        pageNum:
+          type: integer
+          example: 1
+        pageSize:
+          type: integer
+          example: 20
         total:
           type: integer
           format: int64
@@ -638,7 +646,7 @@ components:
         code:
           type: string
           example: secret:update
-        resource_type:
+        resourceType:
           type: string
           example: secret
         action:
@@ -646,7 +654,7 @@ components:
           example: update
         description:
           type: string
-        is_system:
+        isSystem:
           type: boolean
 
     PermissionCodeList:
@@ -675,17 +683,17 @@ components:
           example: Project Admin
         description:
           type: string
-        scope_type:
+        scopeType:
           $ref: "#/components/schemas/ScopeType"
-        org_id:
+        orgId:
           type: string
           format: uuid
           nullable: true
-        project_id:
+        projectId:
           type: string
           format: uuid
           nullable: true
-        is_system:
+        isSystem:
           type: boolean
         permissions:
           type: array
@@ -715,14 +723,14 @@ components:
     RoleUpsertRequest:
       type: object
       required:
-        - scope_type
+        - scopeType
         - code
         - name
         - permissions
       properties:
-        scope_type:
+        scopeType:
           $ref: "#/components/schemas/ScopeType"
-        scope_id:
+        scopeId:
           type: string
           format: uuid
           nullable: true
@@ -750,7 +758,7 @@ components:
         id:
           type: string
           format: uuid
-        external_user_id:
+        externalUserId:
           type: string
           example: user-123
         name:
@@ -762,9 +770,9 @@ components:
         source:
           type: string
           example: jwt
-        is_disabled:
+        isDisabled:
           type: boolean
-        last_seen_at:
+        lastSeenAt:
           type: string
           format: date-time
           nullable: true
@@ -777,37 +785,37 @@ components:
           format: uuid
         user:
           $ref: "#/components/schemas/User"
-        role_code:
+        roleCode:
           type: string
           example: project_developer
-        role_id:
+        roleId:
           type: string
           format: uuid
-        scope_type:
+        scopeType:
           $ref: "#/components/schemas/ScopeType"
-        scope_id:
+        scopeId:
           type: string
           format: uuid
           nullable: true
-        granted_by:
+        grantedBy:
           type: string
           example: admin-user
-        expires_at:
+        expiresAt:
           type: string
           format: date-time
           nullable: true
-        created_at:
+        createdAt:
           type: string
           format: date-time
 
     RoleGrantRequest:
       type: object
       required:
-        - external_user_id
-        - role_code
-        - scope_type
+        - externalUserId
+        - roleCode
+        - scopeType
       properties:
-        external_user_id:
+        externalUserId:
           type: string
           example: user-123
         name:
@@ -816,16 +824,16 @@ components:
         email:
           type: string
           example: alice@example.com
-        role_code:
+        roleCode:
           type: string
           example: project_developer
-        scope_type:
+        scopeType:
           $ref: "#/components/schemas/ScopeType"
-        scope_id:
+        scopeId:
           type: string
           format: uuid
           nullable: true
-        expires_at:
+        expiresAt:
           type: string
           format: date-time
           nullable: true
@@ -833,19 +841,19 @@ components:
     RoleRevokeRequest:
       type: object
       required:
-        - external_user_id
-        - role_code
-        - scope_type
+        - externalUserId
+        - roleCode
+        - scopeType
       properties:
-        external_user_id:
+        externalUserId:
           type: string
           example: user-123
-        role_code:
+        roleCode:
           type: string
           example: project_developer
-        scope_type:
+        scopeType:
           $ref: "#/components/schemas/ScopeType"
-        scope_id:
+        scopeId:
           type: string
           format: uuid
           nullable: true
@@ -863,17 +871,17 @@ components:
             - secret:list
             - secret:read
             - secret:reveal
-        source_grants:
+        sourceGrants:
           type: array
           items:
             type: object
             properties:
-              role_code:
+              roleCode:
                 type: string
                 example: org_admin
-              scope_type:
+              scopeType:
                 $ref: "#/components/schemas/ScopeType"
-              scope_id:
+              scopeId:
                 type: string
                 format: uuid
                 nullable: true

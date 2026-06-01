@@ -130,6 +130,7 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 核心字段：
 
 - `id`
+- `code`
 - `name`
 - `comment`
 - 删除元数据
@@ -137,7 +138,9 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 约束：
 
-- 未删除组织的 `name` 全局唯一。
+- 未删除组织的 `code` 全局唯一。
+- `code` 创建时必填，创建后不可修改，只允许小写字母、数字、中横线，格式为 `^[a-z0-9]+(-[a-z0-9]+)*$`。
+- `name` 是展示名称，不参与唯一约束。
 
 ### Project
 
@@ -147,6 +150,7 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 - `id`
 - `org_id`
+- `code`
 - `name`
 - `comment`
 - 删除元数据
@@ -154,7 +158,8 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 约束：
 
-- 同一个组织下未删除项目的 `name` 唯一。
+- 同一个组织下未删除项目的 `code` 唯一。
+- `name` 是展示名称，不参与唯一约束。
 
 ### Environment
 
@@ -164,6 +169,7 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 - `id`
 - `project_id`
+- `code`
 - `name`
 - `comment`
 - 删除元数据
@@ -171,7 +177,8 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 约束：
 
-- 同一个项目下未删除环境的 `name` 唯一。
+- 同一个项目下未删除环境的 `code` 唯一。
+- `name` 是展示名称，不参与唯一约束。
 
 ### Folder
 
@@ -181,6 +188,7 @@ Folder 属于一个环境，当前只支持一级目录。默认 Folder 为 `glo
 
 - `id`
 - `environment_id`
+- `code`
 - `name`
 - `comment`
 - 删除元数据
@@ -188,7 +196,8 @@ Folder 属于一个环境，当前只支持一级目录。默认 Folder 为 `glo
 
 约束：
 
-- 同一个环境下未删除 Folder 的 `name` 唯一。
+- 同一个环境下未删除 Folder 的 `code` 唯一。
+- `name` 是展示名称，不参与唯一约束。
 
 ### Secret
 
@@ -208,6 +217,8 @@ Secret 属于一个 Folder。Secret value 必须加密后存储。
 约束：
 
 - 同一个 Folder 下未删除 Secret 的 `key` 唯一。
+- `key` 必须符合 `.env` key 风格：`^[A-Z][A-Z0-9_]*$`。
+- Secret 完整业务路径为 `org_code.project_code.env_code.folder_code.KEY`。
 - `value_ciphertext` 存储加密后的 JSON 结构。
 - `version` 创建时为 1，每次更新递增。
 
@@ -361,6 +372,16 @@ GORM v2 可以降低这类样板代码，提高开发效率和可维护性。项
 
 当前基础表由 `configs/schema.sql` 初始化。后续如果引入迁移工具，应保持本节与迁移文件一致。
 
+首次初始化时，需要先连接 PostgreSQL 默认库，例如 `postgres`，创建 EnvVault 业务库：
+
+```sql
+create database envvault
+    with owner admin
+    encoding 'UTF8';
+```
+
+PostgreSQL 没有 MySQL 的 `use database` 语法。数据库创建完成后，需要在客户端里切换连接到 `envvault`，或者使用连接串直接连到 `envvault`。
+
 本地测试如果需要重建全量库表，可以先手动执行：
 
 ```bash
@@ -383,6 +404,7 @@ create extension if not exists pg_trgm;
 ```sql
 create table if not exists organizations (
     id uuid primary key,
+    code text not null,
     name text not null,
     comment text not null default '',
     is_deleted boolean not null default false,
@@ -394,8 +416,8 @@ create table if not exists organizations (
     updated_at timestamptz not null default now()
 );
 
-create unique index if not exists organizations_name_active_uidx
-    on organizations (name)
+create unique index if not exists organizations_code_active_uidx
+    on organizations (code)
     where is_deleted = false;
 ```
 
@@ -405,6 +427,7 @@ create unique index if not exists organizations_name_active_uidx
 create table if not exists projects (
     id uuid primary key,
     org_id uuid not null references organizations(id),
+    code text not null,
     name text not null,
     comment text not null default '',
     is_deleted boolean not null default false,
@@ -416,8 +439,8 @@ create table if not exists projects (
     updated_at timestamptz not null default now()
 );
 
-create unique index if not exists projects_org_name_active_uidx
-    on projects (org_id, name)
+create unique index if not exists projects_org_code_active_uidx
+    on projects (org_id, code)
     where is_deleted = false;
 ```
 
@@ -427,6 +450,7 @@ create unique index if not exists projects_org_name_active_uidx
 create table if not exists environments (
     id uuid primary key,
     project_id uuid not null references projects(id),
+    code text not null,
     name text not null,
     comment text not null default '',
     is_deleted boolean not null default false,
@@ -438,8 +462,8 @@ create table if not exists environments (
     updated_at timestamptz not null default now()
 );
 
-create unique index if not exists environments_project_name_active_uidx
-    on environments (project_id, name)
+create unique index if not exists environments_project_code_active_uidx
+    on environments (project_id, code)
     where is_deleted = false;
 ```
 
@@ -449,6 +473,7 @@ create unique index if not exists environments_project_name_active_uidx
 create table if not exists folders (
     id uuid primary key,
     environment_id uuid not null references environments(id),
+    code text not null,
     name text not null,
     comment text not null default '',
     is_deleted boolean not null default false,
@@ -460,8 +485,8 @@ create table if not exists folders (
     updated_at timestamptz not null default now()
 );
 
-create unique index if not exists folders_environment_name_active_uidx
-    on folders (environment_id, name)
+create unique index if not exists folders_environment_code_active_uidx
+    on folders (environment_id, code)
     where is_deleted = false;
 ```
 
@@ -509,10 +534,10 @@ create index if not exists secrets_key_search_idx
 
 这些字段表示资源当前状态的责任人，便于列表页、详情页和排障场景直接展示。完整历史行为仍以 `audit_records` 为准。
 
-查询返回给前端时，除了用户 ID，还需要返回 label 字段。label 不在资源查询 SQL 中连表计算，而是在 Go 服务内维护用户基础信息内存缓存，通过 `created_by` / `updated_by` 到缓存中查找展示名：
+查询返回给前端时，除了用户 ID，还需要返回 label 字段。label 不在资源查询 SQL 中连表计算，而是在 Go 服务内维护用户基础信息内存缓存，通过数据库字段 `created_by` / `updated_by` 到缓存中查找展示名，HTTP 响应字段使用 camelCase：
 
-- `created_by_label`：创建人展示名，优先取用户缓存中的姓名，如果缓存没有记录或姓名为空，则回退为 `created_by`。
-- `updated_by_label`：最后更新人展示名，优先取用户缓存中的姓名，如果缓存没有记录或姓名为空，则回退为 `updated_by`。
+- `createdByLabel`：创建人展示名，优先取用户缓存中的姓名，如果缓存没有记录或姓名为空，则回退为 `createdBy`。
+- `updatedByLabel`：最后更新人展示名，优先取用户缓存中的姓名，如果缓存没有记录或姓名为空，则回退为 `updatedBy`。
 - 用户缓存启动时从 `users` 表加载；JWT 用户同步、授权导入用户、bootstrap 管理员创建时同步刷新缓存；普通请求读取当前用户信息时，也可以用 JWT 中的 `userId` 和 `name` 刷新当前进程缓存。
 - 资源列表、详情、Secret Redis 预热等查询禁止为了 label 额外 `join users`，避免核心资源查询和用户展示信息强耦合。
 
@@ -522,12 +547,12 @@ create index if not exists secrets_key_search_idx
 {
   "id": "uuid",
   "name": "default-org",
-  "created_by": "dev-user",
-  "created_by_label": "Dev User",
-  "updated_by": "dev-user",
-  "updated_by_label": "Dev User",
-  "created_at": "2026-06-01T10:00:00Z",
-  "updated_at": "2026-06-01T10:00:00Z"
+  "createdBy": "dev-user",
+  "createdByLabel": "Dev User",
+  "updatedBy": "dev-user",
+  "updatedByLabel": "Dev User",
+  "createdAt": "2026-06-01T10:00:00Z",
+  "updatedAt": "2026-06-01T10:00:00Z"
 }
 ```
 
@@ -811,6 +836,8 @@ x-request-id
 - 只有分享链接、跳转链接等天然需要 URL 表达的场景，允许使用 `GET + query params`。
 - 请求体使用 JSON。
 - 响应体使用统一结构。
+- HTTP API 的请求字段和响应字段统一使用 camelCase，例如 `parentId`、`folderId`、`scopeType`、`externalUserId`。
+- 数据库表字段、SQL 列名、索引名继续使用 snake_case，不受 HTTP API 字段命名约束影响。
 
 统一响应：
 
@@ -844,6 +871,8 @@ x-request-id
   "code": 0,
   "msg": "success",
   "data": {
+    "pageNum": 1,
+    "pageSize": 20,
     "total": 100,
     "list": []
   }
@@ -854,7 +883,7 @@ x-request-id
 
 - `total`：符合查询条件的总条数。
 - `list`：当前页数据列表。
-- 分页响应不返回 `pageNum`、`pageSize`，调用方以请求参数作为当前分页上下文。
+- 分页响应必须返回 `pageNum`、`pageSize`，便于调用方确认服务端归一化后的分页上下文。
 - 不允许再使用 `organizations`、`projects`、`secrets` 等按资源类型命名的列表字段，所有分页列表统一使用 `list`。
 
 错误响应：
@@ -871,12 +900,16 @@ x-request-id
 
 | HTTP 状态码 | code | 场景 |
 | --- | --- | --- |
+| 200 | -1 | 通用业务失败，无法明确归类时使用 |
 | 400 | 1002 | 请求参数错误 |
 | 401 | 1401 | 未认证或 JWT 无效 |
 | 403 | 1403 | 无权限 |
 | 404 | 1404 | 资源不存在 |
 | 409 | 1409 | 唯一约束或业务冲突 |
 | 500 | 1500 | 服务端错误 |
+| 503 | 1503 | 依赖服务不可用或服务未配置 |
+
+响应体中的 `code` 是业务状态码，不允许直接复用 HTTP 状态码。通用成功使用 `0`，通用失败使用 `-1`，特殊错误使用 `1000` 以上错误码。代码中成功响应优先使用 `response.OK`，需要自定义成功消息时使用 `response.OkWithMsg`；通用失败优先使用 `response.FailWithMsg`，特殊错误使用 `response.Fail` 并传入明确业务码。
 
 ## HTTP API 路径设计
 
@@ -941,7 +974,8 @@ x-request-id
 
 ```json
 {
-  "name": "default-org",
+  "code": "default-org",
+  "name": "默认组织",
   "comment": "默认组织"
 }
 ```
@@ -978,7 +1012,9 @@ x-request-id
 
 ```json
 {
-  "org_id": "uuid"
+  "orgId": "uuid",
+  "pageNum": 1,
+  "pageSize": 20
 }
 ```
 
@@ -986,8 +1022,9 @@ x-request-id
 
 ```json
 {
-  "parent_id": "org uuid",
-  "name": "project-a",
+  "parentId": "org uuid",
+  "code": "project-a",
+  "name": "项目 A",
   "comment": "项目说明"
 }
 ```
@@ -1008,7 +1045,9 @@ x-request-id
 
 ```json
 {
-  "project_id": "uuid"
+  "projectId": "uuid",
+  "pageNum": 1,
+  "pageSize": 20
 }
 ```
 
@@ -1016,7 +1055,8 @@ x-request-id
 
 ```json
 {
-  "parent_id": "project uuid",
+  "parentId": "project uuid",
+  "code": "poc",
   "name": "poc",
   "comment": "自定义环境"
 }
@@ -1038,7 +1078,9 @@ Folder 列表：
 
 ```json
 {
-  "environment_id": "uuid"
+  "environmentId": "uuid",
+  "pageNum": 1,
+  "pageSize": 20
 }
 ```
 
@@ -1046,8 +1088,9 @@ Folder 列表：
 
 ```json
 {
-  "parent_id": "environment uuid",
-  "name": "custom-folder",
+  "parentId": "environment uuid",
+  "code": "custom-folder",
+  "name": "自定义目录",
   "comment": "一级目录"
 }
 ```
@@ -1068,10 +1111,10 @@ Secret 列表：
 
 ```json
 {
-  "org_id": "uuid",
-  "project_id": "uuid",
-  "environment_id": "uuid",
-  "folder_id": "uuid"
+  "orgId": "uuid",
+  "projectId": "uuid",
+  "environmentId": "uuid",
+  "folderId": "uuid"
 }
 ```
 
@@ -1079,7 +1122,7 @@ Secret 列表：
 
 ```json
 {
-  "folder_id": "uuid",
+  "folderId": "uuid",
   "key": "DATABASE_URL",
   "value": "postgres://...",
   "comment": "数据库连接串"
@@ -1101,10 +1144,10 @@ Secret 列表：
 
 ```json
 {
-  "org_id": "uuid",
-  "project_id": "uuid",
-  "environment_id": "uuid",
-  "folder_id": "uuid",
+  "orgId": "uuid",
+  "projectId": "uuid",
+  "environmentId": "uuid",
+  "folderId": "uuid",
   "keyword": "DATABASE"
 }
 ```
@@ -1132,14 +1175,14 @@ Secret 列表：
 
 ```json
 {
-  "resource_type": "secret",
-  "resource_id": "uuid"
+  "resourceType": "secret",
+  "resourceId": "uuid"
 }
 ```
 
 说明：
 
-- `resource_type` 和 `resource_id` 可以为空。
+- `resourceType` 和 `resourceId` 可以为空。
 - 接入 RBAC 后，空条件查询必须按用户权限范围过滤。
 
 ### 历史数据接口建议
@@ -1159,8 +1202,8 @@ Secret 列表：
 
 ```json
 {
-  "resource_type": "secret",
-  "resource_id": "uuid"
+  "resourceType": "secret",
+  "resourceId": "uuid"
 }
 ```
 
@@ -1168,7 +1211,7 @@ Secret 版本列表：
 
 ```json
 {
-  "secret_id": "uuid"
+  "secretId": "uuid"
 }
 ```
 
@@ -1176,7 +1219,7 @@ Secret 版本回滚：
 
 ```json
 {
-  "secret_id": "uuid",
+  "secretId": "uuid",
   "version": 3
 }
 ```

@@ -14,14 +14,14 @@ import (
 )
 
 type scopeRequest struct {
-	ScopeType string `json:"scope_type"`
-	ScopeID   string `json:"scope_id"`
+	ScopeType string `json:"scopeType"`
+	ScopeID   string `json:"scopeId"`
 }
 
 type pageScopeRequest struct {
 	PageRequest
-	ScopeType string `json:"scope_type"`
-	ScopeID   string `json:"scope_id"`
+	ScopeType string `json:"scopeType"`
+	ScopeID   string `json:"scopeId"`
 }
 
 type roleInfoRequest struct {
@@ -31,8 +31,8 @@ type roleInfoRequest struct {
 
 type roleRequest struct {
 	ID          string   `json:"id,omitempty"`
-	ScopeType   string   `json:"scope_type"`
-	ScopeID     string   `json:"scope_id"`
+	ScopeType   string   `json:"scopeType"`
+	ScopeID     string   `json:"scopeId"`
 	Code        string   `json:"code"`
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
@@ -40,24 +40,24 @@ type roleRequest struct {
 }
 
 type roleGrantRequest struct {
-	ExternalUserID string     `json:"external_user_id"`
+	ExternalUserID string     `json:"externalUserId"`
 	Name           string     `json:"name"`
 	Email          string     `json:"email"`
-	RoleCode       string     `json:"role_code"`
-	ScopeType      string     `json:"scope_type"`
-	ScopeID        string     `json:"scope_id"`
-	ExpiresAt      *time.Time `json:"expires_at"`
+	RoleCode       string     `json:"roleCode"`
+	ScopeType      string     `json:"scopeType"`
+	ScopeID        string     `json:"scopeId"`
+	ExpiresAt      *time.Time `json:"expiresAt"`
 }
 
 type userLookupRequest struct {
-	ExternalUserID string `json:"external_user_id"`
-	ScopeType      string `json:"scope_type"`
-	ScopeID        string `json:"scope_id"`
+	ExternalUserID string `json:"externalUserId"`
+	ScopeType      string `json:"scopeType"`
+	ScopeID        string `json:"scopeId"`
 }
 
 type pagedUserLookupRequest struct {
 	PageRequest
-	ExternalUserID string `json:"external_user_id"`
+	ExternalUserID string `json:"externalUserId"`
 }
 
 func (ctrl *Controller) ListPermissions(c *gin.Context) {
@@ -70,7 +70,7 @@ func (ctrl *Controller) ListPermissions(c *gin.Context) {
 	}
 	pagination := paginationFromRequest(req)
 	result, err := ctrl.rbac.ListPermissions(c.Request.Context(), pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetMyPermissions(c *gin.Context) {
@@ -99,7 +99,7 @@ func (ctrl *Controller) ListRoles(c *gin.Context) {
 	}
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.rbac.ListRoles(c.Request.Context(), req.ScopeType, req.ScopeID, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetRole(c *gin.Context) {
@@ -191,7 +191,7 @@ func (ctrl *Controller) ListRoleBindings(c *gin.Context) {
 	}
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.rbac.ListRoleBindings(c.Request.Context(), req.ScopeType, req.ScopeID, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GrantRole(c *gin.Context) {
@@ -258,7 +258,7 @@ func (ctrl *Controller) GetCurrentRBACUser(c *gin.Context) {
 		ctrl.write(c, nil, err)
 		return
 	}
-	ctrl.write(c, pageData(grants.Items, grants.Total), nil)
+	ctrl.write(c, pageData(grants.Items, grants.Total, pagination), nil)
 }
 
 func (ctrl *Controller) ListRBACUsers(c *gin.Context) {
@@ -274,7 +274,7 @@ func (ctrl *Controller) ListRBACUsers(c *gin.Context) {
 	}
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.rbac.ListUsers(c.Request.Context(), req.ScopeType, req.ScopeID, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) ListUserGrants(c *gin.Context) {
@@ -290,7 +290,7 @@ func (ctrl *Controller) ListUserGrants(c *gin.Context) {
 	}
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.rbac.ListUserGrants(c.Request.Context(), req.ExternalUserID, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total), err)
+	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetUserEffectivePermissions(c *gin.Context) {
@@ -310,7 +310,7 @@ func (ctrl *Controller) GetUserEffectivePermissions(c *gin.Context) {
 
 func (ctrl *Controller) ensureRBAC(c *gin.Context) bool {
 	if ctrl.rbac == nil {
-		response.Fail(c, http.StatusServiceUnavailable, 1001, "rbac store is not configured")
+		response.Fail(c, http.StatusServiceUnavailable, response.CodeStoreUnavailable, "rbac store is not configured")
 		return false
 	}
 	return true
@@ -318,7 +318,7 @@ func (ctrl *Controller) ensureRBAC(c *gin.Context) bool {
 
 func (ctrl *Controller) allowScope(c *gin.Context, permission, scopeType, scopeID string) bool {
 	if ctrl.authorizer == nil {
-		response.Fail(c, http.StatusForbidden, 1403, auth.ErrPermissionDenied.Error())
+		response.Fail(c, http.StatusForbidden, response.CodeForbidden, auth.ErrPermissionDenied.Error())
 		return false
 	}
 	resourceType := strings.TrimSpace(scopeType)
@@ -333,11 +333,11 @@ func (ctrl *Controller) allowScope(c *gin.Context, permission, scopeType, scopeI
 		return true
 	}
 	if errors.Is(err, postgres.ErrNotFound) {
-		response.Fail(c, http.StatusNotFound, 1404, err.Error())
+		response.Fail(c, http.StatusNotFound, response.CodeNotFound, err.Error())
 		return false
 	}
 	if errors.Is(err, auth.ErrPermissionDenied) {
-		response.Fail(c, http.StatusForbidden, 1403, err.Error())
+		response.Fail(c, http.StatusForbidden, response.CodeForbidden, err.Error())
 		return false
 	}
 	ctrl.write(c, nil, err)
@@ -348,13 +348,16 @@ func paginationFromRequest(req PageRequest) postgres.Pagination {
 	return postgres.Pagination{PageNum: req.PageNum, PageSize: req.PageSize}.Normalize()
 }
 
-func pageData(items any, total int64) PageResp {
-	return paginationData(items, total)
+func pageData(items any, total int64, pagination postgres.Pagination) PageResp {
+	return paginationData(items, total, pagination)
 }
 
-func paginationData(items any, total int64) PageResp {
+func paginationData(items any, total int64, pagination postgres.Pagination) PageResp {
+	pagination = pagination.Normalize()
 	return PageResp{
-		Total: total,
-		List:  items,
+		PageNum:  pagination.PageNum,
+		PageSize: pagination.PageSize,
+		Total:    total,
+		List:     items,
 	}
 }

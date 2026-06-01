@@ -2,6 +2,7 @@ create extension if not exists pg_trgm;
 
 create table if not exists organizations (
     id uuid primary key,
+    code text not null,
     name text not null,
     comment text not null default '',
     is_deleted boolean not null default false,
@@ -10,16 +11,18 @@ create table if not exists organizations (
     created_by text not null default '',
     updated_by text not null default '',
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    updated_at timestamptz not null default now(),
+    constraint organizations_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
 
-create unique index if not exists organizations_name_active_uidx
-    on organizations (name)
+create unique index if not exists organizations_code_active_uidx
+    on organizations (code)
     where is_deleted = false;
 
 create table if not exists projects (
     id uuid primary key,
     org_id uuid not null references organizations(id),
+    code text not null,
     name text not null,
     comment text not null default '',
     is_deleted boolean not null default false,
@@ -28,16 +31,18 @@ create table if not exists projects (
     created_by text not null default '',
     updated_by text not null default '',
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    updated_at timestamptz not null default now(),
+    constraint projects_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
 
-create unique index if not exists projects_org_name_active_uidx
-    on projects (org_id, name)
+create unique index if not exists projects_org_code_active_uidx
+    on projects (org_id, code)
     where is_deleted = false;
 
 create table if not exists environments (
     id uuid primary key,
     project_id uuid not null references projects(id),
+    code text not null,
     name text not null,
     comment text not null default '',
     is_deleted boolean not null default false,
@@ -46,16 +51,18 @@ create table if not exists environments (
     created_by text not null default '',
     updated_by text not null default '',
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    updated_at timestamptz not null default now(),
+    constraint environments_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
 
-create unique index if not exists environments_project_name_active_uidx
-    on environments (project_id, name)
+create unique index if not exists environments_project_code_active_uidx
+    on environments (project_id, code)
     where is_deleted = false;
 
 create table if not exists folders (
     id uuid primary key,
     environment_id uuid not null references environments(id),
+    code text not null,
     name text not null,
     comment text not null default '',
     is_deleted boolean not null default false,
@@ -64,11 +71,12 @@ create table if not exists folders (
     created_by text not null default '',
     updated_by text not null default '',
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    updated_at timestamptz not null default now(),
+    constraint folders_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
 
-create unique index if not exists folders_environment_name_active_uidx
-    on folders (environment_id, name)
+create unique index if not exists folders_environment_code_active_uidx
+    on folders (environment_id, code)
     where is_deleted = false;
 
 create table if not exists secrets (
@@ -84,7 +92,8 @@ create table if not exists secrets (
     created_by text not null default '',
     updated_by text not null default '',
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    updated_at timestamptz not null default now(),
+    constraint secrets_key_chk check (key ~ '^[A-Z][A-Z0-9_]*$')
 );
 
 create unique index if not exists secrets_folder_key_active_uidx

@@ -83,7 +83,11 @@ go fmt ./...
 - 有请求数据的查询或变更统一使用 `POST`，请求数据放在 JSON body 中。
 - 分页、过滤条件、资源 ID、搜索关键字都视为请求数据，应使用 `POST`。
 - 特殊场景下，例如分享链接这类带参数但适合链接访问的流程，可以使用 `GET + query params`。
-- 分页请求统一复用 `PageRequest`，分页响应统一为 `{ "total": 总条数, "list": 数据列表 }`。
+- HTTP API 的请求字段和响应字段统一使用 camelCase，例如 `parentId`、`folderId`、`scopeType`、`externalUserId`。数据库表字段、SQL 列名和索引名可以继续使用 snake_case。
+- 分页请求统一复用 `PageRequest`，字段为 `pageNum` 和 `pageSize`；分页响应统一为 `{ "pageNum": 页码, "pageSize": 每页数量, "total": 总条数, "list": 数据列表 }`。
+- HTTP 状态码只表示 HTTP 传输层结果，响应体中的 `code` 是业务状态码，二者不能混用。
+- 成功响应业务码统一为 `0`，通用失败业务码统一为 `-1`；明确可区分的特殊错误码使用 `1000` 以上，例如参数错误、未认证、无权限、资源不存在、服务不可用。
+- 成功响应优先使用 `response.OK`，需要自定义成功消息时使用 `response.OkWithMsg`；通用失败优先使用 `response.FailWithMsg`，特殊错误使用 `response.Fail` 并传入明确业务码。
 - HTTP 框架使用 Gin。
 - 请求和响应结构应保持明确，并为后续版本演进留出空间。
 - 列表和搜索接口默认不应返回密钥明文，除非该接口明确用于查看密钥，并且已经完成授权校验。

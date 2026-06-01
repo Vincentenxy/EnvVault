@@ -57,7 +57,7 @@ func RecoveryMiddleware() gin.HandlerFunc {
 					F("panic", recovered),
 				)
 				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-					"code": http.StatusInternalServerError,
+					"code": 1500,
 					"msg":  "internal server error",
 					"data": nil,
 				})

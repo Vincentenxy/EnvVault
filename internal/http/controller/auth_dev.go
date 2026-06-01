@@ -21,7 +21,7 @@ type devJWTRequest struct {
 
 func (ctrl *Controller) CreateDevJWT(c *gin.Context) {
 	if !ctrl.config.Auth.DevTokenEnabled {
-		response.Fail(c, http.StatusNotFound, 1404, "not found")
+		response.Fail(c, http.StatusNotFound, response.CodeNotFound, "not found")
 		return
 	}
 
@@ -32,12 +32,12 @@ func (ctrl *Controller) CreateDevJWT(c *gin.Context) {
 	}
 	if c.Request.Body != nil && c.Request.ContentLength != 0 {
 		if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
-			response.Fail(c, http.StatusBadRequest, 1002, err.Error())
+			response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, err.Error())
 			return
 		}
 	}
 	if req.UserID == "" {
-		response.Fail(c, http.StatusBadRequest, 1002, "userId is required")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "userId is required")
 		return
 	}
 	if req.ExpiresInSeconds <= 0 {
@@ -59,7 +59,7 @@ func (ctrl *Controller) CreateDevJWT(c *gin.Context) {
 		},
 	})
 	if err != nil {
-		response.Fail(c, http.StatusServiceUnavailable, 1503, err.Error())
+		response.Fail(c, http.StatusServiceUnavailable, response.CodeServiceUnavailable, err.Error())
 		return
 	}
 

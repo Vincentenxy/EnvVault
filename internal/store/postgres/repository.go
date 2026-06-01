@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	uuidgen "envVault/internal/id"
@@ -20,32 +21,38 @@ type Repository struct {
 
 type Entity struct {
 	ID             string    `json:"id"`
+	Code           string    `json:"code"`
 	Name           string    `json:"name"`
 	Comment        string    `json:"comment,omitempty"`
-	CreatedBy      string    `json:"created_by"`
-	CreatedByLabel string    `json:"created_by_label"`
-	UpdatedBy      string    `json:"updated_by"`
-	UpdatedByLabel string    `json:"updated_by_label"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	CreatedBy      string    `json:"createdBy"`
+	CreatedByLabel string    `json:"createdByLabel"`
+	UpdatedBy      string    `json:"updatedBy"`
+	UpdatedByLabel string    `json:"updatedByLabel"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 type Secret struct {
-	ID             string    `json:"id"`
-	OrgID          string    `json:"org_id"`
-	ProjectID      string    `json:"project_id"`
-	EnvironmentID  string    `json:"environment_id"`
-	FolderID       string    `json:"folder_id"`
-	Key            string    `json:"key"`
-	Value          string    `json:"value,omitempty"`
-	Comment        string    `json:"comment,omitempty"`
-	Version        int       `json:"version"`
-	CreatedBy      string    `json:"created_by"`
-	CreatedByLabel string    `json:"created_by_label"`
-	UpdatedBy      string    `json:"updated_by"`
-	UpdatedByLabel string    `json:"updated_by_label"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID              string    `json:"id"`
+	OrgID           string    `json:"orgId"`
+	OrgCode         string    `json:"orgCode"`
+	ProjectID       string    `json:"projectId"`
+	ProjectCode     string    `json:"projectCode"`
+	EnvironmentID   string    `json:"environmentId"`
+	EnvironmentCode string    `json:"environmentCode"`
+	FolderID        string    `json:"folderId"`
+	FolderCode      string    `json:"folderCode"`
+	Key             string    `json:"key"`
+	Path            string    `json:"path"`
+	Value           string    `json:"value,omitempty"`
+	Comment         string    `json:"comment,omitempty"`
+	Version         int       `json:"version"`
+	CreatedBy       string    `json:"createdBy"`
+	CreatedByLabel  string    `json:"createdByLabel"`
+	UpdatedBy       string    `json:"updatedBy"`
+	UpdatedByLabel  string    `json:"updatedByLabel"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
 type SecretCiphertext struct {
@@ -62,11 +69,11 @@ type SecretCacheRecord struct {
 type AuditRecord struct {
 	ID             string          `json:"id"`
 	Actor          string          `json:"actor"`
-	ResourceType   string          `json:"resource_type"`
-	ResourceID     string          `json:"resource_id"`
+	ResourceType   string          `json:"resourceType"`
+	ResourceID     string          `json:"resourceId"`
 	Action         string          `json:"action"`
-	EncryptedValue json.RawMessage `json:"encrypted_value,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
+	EncryptedValue json.RawMessage `json:"encryptedValue,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
 }
 
 type ListFilter struct {
@@ -92,8 +99,8 @@ func (r *Repository) CacheUserLabel(externalUserID, name string) {
 	r.userCache.Set(externalUserID, name)
 }
 
-func (r *Repository) CreateOrganization(ctx context.Context, name, comment, actor string) (Entity, error) {
-	return r.createEntity(ctx, "organizations", "", "", name, comment, actor, "organization")
+func (r *Repository) CreateOrganization(ctx context.Context, code, name, comment, actor string) (Entity, error) {
+	return r.createEntity(ctx, "organizations", "", "", code, name, comment, actor, "organization")
 }
 
 func (r *Repository) ListOrganizations(ctx context.Context, pagination Pagination) (PaginatedResult[Entity], error) {
@@ -112,24 +119,24 @@ func (r *Repository) DeleteOrganization(ctx context.Context, id, actor string) e
 	return r.deleteEntity(ctx, "organizations", id, actor, "organization")
 }
 
-func (r *Repository) CreateProject(ctx context.Context, orgID, name, comment, actor string) (Entity, error) {
+func (r *Repository) CreateProject(ctx context.Context, orgID, code, name, comment, actor string) (Entity, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Entity{}, err
 	}
 	defer tx.Rollback()
 
-	project, err := r.createEntityTx(ctx, tx, "projects", "org_id", orgID, name, comment, actor)
+	project, err := r.createEntityTx(ctx, tx, "projects", "org_id", orgID, code, name, comment, actor)
 	if err != nil {
 		return Entity{}, err
 	}
 	for _, envName := range []string{"dev", "test", "sim", "prod"} {
-		env, err := r.createEntityTx(ctx, tx, "environments", "project_id", project.ID, envName, "", actor)
+		env, err := r.createEntityTx(ctx, tx, "environments", "project_id", project.ID, envName, envName, "", actor)
 		if err != nil {
 			return Entity{}, err
 		}
 		for _, folderName := range []string{"globals", "groups-secrets"} {
-			if _, err := r.createEntityTx(ctx, tx, "folders", "environment_id", env.ID, folderName, "", actor); err != nil {
+			if _, err := r.createEntityTx(ctx, tx, "folders", "environment_id", env.ID, folderName, folderName, "", actor); err != nil {
 				return Entity{}, err
 			}
 		}
@@ -156,19 +163,19 @@ func (r *Repository) DeleteProject(ctx context.Context, id, actor string) error 
 	return r.deleteEntity(ctx, "projects", id, actor, "project")
 }
 
-func (r *Repository) CreateEnvironment(ctx context.Context, projectID, name, comment, actor string) (Entity, error) {
+func (r *Repository) CreateEnvironment(ctx context.Context, projectID, code, name, comment, actor string) (Entity, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Entity{}, err
 	}
 	defer tx.Rollback()
 
-	env, err := r.createEntityTx(ctx, tx, "environments", "project_id", projectID, name, comment, actor)
+	env, err := r.createEntityTx(ctx, tx, "environments", "project_id", projectID, code, name, comment, actor)
 	if err != nil {
 		return Entity{}, err
 	}
 	for _, folderName := range []string{"globals", "groups-secrets"} {
-		if _, err := r.createEntityTx(ctx, tx, "folders", "environment_id", env.ID, folderName, "", actor); err != nil {
+		if _, err := r.createEntityTx(ctx, tx, "folders", "environment_id", env.ID, folderName, folderName, "", actor); err != nil {
 			return Entity{}, err
 		}
 	}
@@ -194,8 +201,8 @@ func (r *Repository) DeleteEnvironment(ctx context.Context, id, actor string) er
 	return r.deleteEntity(ctx, "environments", id, actor, "environment")
 }
 
-func (r *Repository) CreateFolder(ctx context.Context, environmentID, name, comment, actor string) (Entity, error) {
-	return r.createEntity(ctx, "folders", "environment_id", environmentID, name, comment, actor, "folder")
+func (r *Repository) CreateFolder(ctx context.Context, environmentID, code, name, comment, actor string) (Entity, error) {
+	return r.createEntity(ctx, "folders", "environment_id", environmentID, code, name, comment, actor, "folder")
 }
 
 func (r *Repository) ListFolders(ctx context.Context, environmentID string, pagination Pagination) (PaginatedResult[Entity], error) {
@@ -245,7 +252,10 @@ returning id, folder_id, key, comment, version, created_by, updated_by, created_
 	if err := recordAuditTx(ctx, tx, actor, "secret", secret.ID, "create", payload); err != nil {
 		return Secret{}, err
 	}
-	return secret, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return Secret{}, err
+	}
+	return r.GetSecret(ctx, secret.ID)
 }
 
 func (r *Repository) UpdateSecret(ctx context.Context, id, key, comment, actor string, ciphertext SecretCiphertext) (Secret, error) {
@@ -279,13 +289,16 @@ returning id, folder_id, key, comment, version, created_by, updated_by, created_
 	if err := recordAuditTx(ctx, tx, actor, "secret", secret.ID, "update", payload); err != nil {
 		return Secret{}, err
 	}
-	return secret, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return Secret{}, err
+	}
+	return r.GetSecret(ctx, secret.ID)
 }
 
 func (r *Repository) GetSecret(ctx context.Context, id string) (Secret, error) {
 	var secret Secret
 	err := r.db.QueryRowContext(ctx, `
-select s.id, o.id, p.id, e.id, s.folder_id, s.key, s.comment, s.version,
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.comment, s.version,
        s.created_by, s.updated_by,
        s.created_at, s.updated_at
 from secrets s
@@ -295,7 +308,7 @@ join projects p on p.id = e.project_id
 join organizations o on o.id = p.org_id
 where s.id = $1 and s.is_deleted = false
 `, id).Scan(
-		&secret.ID, &secret.OrgID, &secret.ProjectID, &secret.EnvironmentID, &secret.FolderID, &secret.Key, &secret.Comment, &secret.Version,
+		&secret.ID, &secret.OrgID, &secret.OrgCode, &secret.ProjectID, &secret.ProjectCode, &secret.EnvironmentID, &secret.EnvironmentCode, &secret.FolderID, &secret.FolderCode, &secret.Key, &secret.Comment, &secret.Version,
 		&secret.CreatedBy, &secret.UpdatedBy, &secret.CreatedAt, &secret.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -305,6 +318,7 @@ where s.id = $1 and s.is_deleted = false
 		return Secret{}, err
 	}
 	r.fillSecretLabels(&secret)
+	secret.Path = buildSecretPath(secret)
 	return secret, nil
 }
 
@@ -312,7 +326,7 @@ func (r *Repository) GetSecretCiphertext(ctx context.Context, id string) (Secret
 	var secret Secret
 	var payload []byte
 	err := r.db.QueryRowContext(ctx, `
-select s.id, o.id, p.id, e.id, s.folder_id, s.key, s.value_ciphertext, s.comment, s.version,
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.value_ciphertext, s.comment, s.version,
        s.created_by, s.updated_by,
        s.created_at, s.updated_at
 from secrets s
@@ -322,7 +336,7 @@ join projects p on p.id = e.project_id
 join organizations o on o.id = p.org_id
 where s.id = $1 and s.is_deleted = false
 `, id).Scan(
-		&secret.ID, &secret.OrgID, &secret.ProjectID, &secret.EnvironmentID, &secret.FolderID, &secret.Key, &payload, &secret.Comment, &secret.Version,
+		&secret.ID, &secret.OrgID, &secret.OrgCode, &secret.ProjectID, &secret.ProjectCode, &secret.EnvironmentID, &secret.EnvironmentCode, &secret.FolderID, &secret.FolderCode, &secret.Key, &payload, &secret.Comment, &secret.Version,
 		&secret.CreatedBy, &secret.UpdatedBy, &secret.CreatedAt, &secret.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -336,6 +350,7 @@ where s.id = $1 and s.is_deleted = false
 		return Secret{}, SecretCiphertext{}, err
 	}
 	r.fillSecretLabels(&secret)
+	secret.Path = buildSecretPath(secret)
 	return secret, ciphertext, nil
 }
 
@@ -360,7 +375,7 @@ where s.is_deleted = false
 	}
 
 	rows, err := r.db.QueryContext(ctx, `
-select s.id, o.id, p.id, e.id, s.folder_id, s.key, s.comment, s.version,
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.comment, s.version,
        s.created_by, s.updated_by,
        s.created_at, s.updated_at
 from secrets s
@@ -386,12 +401,13 @@ limit $6 offset $7
 	for rows.Next() {
 		var secret Secret
 		if err := rows.Scan(
-			&secret.ID, &secret.OrgID, &secret.ProjectID, &secret.EnvironmentID, &secret.FolderID, &secret.Key, &secret.Comment, &secret.Version,
+			&secret.ID, &secret.OrgID, &secret.OrgCode, &secret.ProjectID, &secret.ProjectCode, &secret.EnvironmentID, &secret.EnvironmentCode, &secret.FolderID, &secret.FolderCode, &secret.Key, &secret.Comment, &secret.Version,
 			&secret.CreatedBy, &secret.UpdatedBy, &secret.CreatedAt, &secret.UpdatedAt,
 		); err != nil {
 			return PaginatedResult[Secret]{}, err
 		}
 		r.fillSecretLabels(&secret)
+		secret.Path = buildSecretPath(secret)
 		items = append(items, secret)
 	}
 	if err := rows.Err(); err != nil {
@@ -402,7 +418,7 @@ limit $6 offset $7
 
 func (r *Repository) ListSecretCacheRecords(ctx context.Context) ([]SecretCacheRecord, error) {
 	rows, err := r.db.QueryContext(ctx, `
-select s.id, o.id, p.id, e.id, s.folder_id, s.key, s.value_ciphertext, s.comment, s.version,
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.value_ciphertext, s.comment, s.version,
        s.created_by, s.updated_by,
        s.created_at, s.updated_at
 from secrets s
@@ -424,9 +440,13 @@ order by s.key asc
 		if err := rows.Scan(
 			&record.Secret.ID,
 			&record.Secret.OrgID,
+			&record.Secret.OrgCode,
 			&record.Secret.ProjectID,
+			&record.Secret.ProjectCode,
 			&record.Secret.EnvironmentID,
+			&record.Secret.EnvironmentCode,
 			&record.Secret.FolderID,
+			&record.Secret.FolderCode,
 			&record.Secret.Key,
 			&record.ValueCiphertext,
 			&record.Secret.Comment,
@@ -439,6 +459,7 @@ order by s.key asc
 			return nil, err
 		}
 		r.fillSecretLabels(&record.Secret)
+		record.Secret.Path = buildSecretPath(record.Secret)
 		items = append(items, record)
 	}
 	return items, rows.Err()
@@ -499,14 +520,14 @@ values ($1, $2, $3, $4, $5)
 	return err
 }
 
-func (r *Repository) createEntity(ctx context.Context, table, parentColumn, parentID, name, comment, actor, resourceType string) (Entity, error) {
+func (r *Repository) createEntity(ctx context.Context, table, parentColumn, parentID, code, name, comment, actor, resourceType string) (Entity, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Entity{}, err
 	}
 	defer tx.Rollback()
 
-	entity, err := r.createEntityTx(ctx, tx, table, parentColumn, parentID, name, comment, actor)
+	entity, err := r.createEntityTx(ctx, tx, table, parentColumn, parentID, code, name, comment, actor)
 	if err != nil {
 		return Entity{}, err
 	}
@@ -520,6 +541,7 @@ func (r *Repository) listEntities(ctx context.Context, table, parentID string, p
 	countQuery := fmt.Sprintf("select count(*) from %s where is_deleted = false", table)
 	query := fmt.Sprintf(`
 select t.id, t.name, t.comment,
+       t.code,
        t.created_by, t.updated_by,
        t.created_at, t.updated_at
 from %s t
@@ -548,7 +570,7 @@ where t.is_deleted = false`, table)
 	for rows.Next() {
 		var entity Entity
 		if err := rows.Scan(
-			&entity.ID, &entity.Name, &entity.Comment,
+			&entity.ID, &entity.Name, &entity.Comment, &entity.Code,
 			&entity.CreatedBy, &entity.UpdatedBy,
 			&entity.CreatedAt, &entity.UpdatedAt,
 		); err != nil {
@@ -567,12 +589,13 @@ func (r *Repository) getEntity(ctx context.Context, table, id string) (Entity, e
 	var entity Entity
 	query := fmt.Sprintf(`
 select t.id, t.name, t.comment,
+       t.code,
        t.created_by, t.updated_by,
        t.created_at, t.updated_at
 from %s t
 where t.id = $1 and t.is_deleted = false`, table)
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
-		&entity.ID, &entity.Name, &entity.Comment,
+		&entity.ID, &entity.Name, &entity.Comment, &entity.Code,
 		&entity.CreatedBy, &entity.UpdatedBy,
 		&entity.CreatedAt, &entity.UpdatedAt,
 	)
@@ -594,9 +617,9 @@ func (r *Repository) updateEntity(ctx context.Context, table, id, name, comment,
 	defer tx.Rollback()
 
 	var entity Entity
-	query := fmt.Sprintf("update %s set name = $2, comment = $3, updated_by = $4, updated_at = now() where id = $1 and is_deleted = false returning id, name, comment, created_by, updated_by, created_at, updated_at", table)
+	query := fmt.Sprintf("update %s set name = $2, comment = $3, updated_by = $4, updated_at = now() where id = $1 and is_deleted = false returning id, name, comment, code, created_by, updated_by, created_at, updated_at", table)
 	err = tx.QueryRowContext(ctx, query, id, name, comment, actor).Scan(
-		&entity.ID, &entity.Name, &entity.Comment, &entity.CreatedBy, &entity.UpdatedBy, &entity.CreatedAt, &entity.UpdatedAt,
+		&entity.ID, &entity.Name, &entity.Comment, &entity.Code, &entity.CreatedBy, &entity.UpdatedBy, &entity.CreatedAt, &entity.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Entity{}, ErrNotFound
@@ -658,16 +681,16 @@ values ($1, $2, $3, $4, $5, $6)
 	return tx.Commit()
 }
 
-func (r *Repository) createEntityTx(ctx context.Context, tx *sql.Tx, table, parentColumn, parentID, name, comment, actor string) (Entity, error) {
+func (r *Repository) createEntityTx(ctx context.Context, tx *sql.Tx, table, parentColumn, parentID, code, name, comment, actor string) (Entity, error) {
 	id, err := uuidgen.NewUUID()
 	if err != nil {
 		return Entity{}, err
 	}
 	var entity Entity
 	if parentColumn == "" {
-		query := fmt.Sprintf("insert into %s (id, name, comment, created_by, updated_by) values ($1, $2, $3, $4, $4) returning id, name, comment, created_by, updated_by, created_at, updated_at", table)
-		err := tx.QueryRowContext(ctx, query, id, name, comment, actor).Scan(
-			&entity.ID, &entity.Name, &entity.Comment, &entity.CreatedBy, &entity.UpdatedBy, &entity.CreatedAt, &entity.UpdatedAt,
+		query := fmt.Sprintf("insert into %s (id, code, name, comment, created_by, updated_by) values ($1, $2, $3, $4, $5, $5) returning id, code, name, comment, created_by, updated_by, created_at, updated_at", table)
+		err := tx.QueryRowContext(ctx, query, id, code, name, comment, actor).Scan(
+			&entity.ID, &entity.Code, &entity.Name, &entity.Comment, &entity.CreatedBy, &entity.UpdatedBy, &entity.CreatedAt, &entity.UpdatedAt,
 		)
 		if err != nil {
 			return Entity{}, err
@@ -676,9 +699,9 @@ func (r *Repository) createEntityTx(ctx context.Context, tx *sql.Tx, table, pare
 		return entity, err
 	}
 
-	query := fmt.Sprintf("insert into %s (id, %s, name, comment, created_by, updated_by) values ($1, $2, $3, $4, $5, $5) returning id, name, comment, created_by, updated_by, created_at, updated_at", table, parentColumn)
-	err = tx.QueryRowContext(ctx, query, id, parentID, name, comment, actor).Scan(
-		&entity.ID, &entity.Name, &entity.Comment, &entity.CreatedBy, &entity.UpdatedBy, &entity.CreatedAt, &entity.UpdatedAt,
+	query := fmt.Sprintf("insert into %s (id, %s, code, name, comment, created_by, updated_by) values ($1, $2, $3, $4, $5, $6, $6) returning id, code, name, comment, created_by, updated_by, created_at, updated_at", table, parentColumn)
+	err = tx.QueryRowContext(ctx, query, id, parentID, code, name, comment, actor).Scan(
+		&entity.ID, &entity.Code, &entity.Name, &entity.Comment, &entity.CreatedBy, &entity.UpdatedBy, &entity.CreatedAt, &entity.UpdatedAt,
 	)
 	if err != nil {
 		return Entity{}, err
@@ -702,6 +725,16 @@ func (r *Repository) userLabel(actor string) string {
 		return actor
 	}
 	return r.userCache.Label(actor)
+}
+
+func buildSecretPath(secret Secret) string {
+	parts := []string{secret.OrgCode, secret.ProjectCode, secret.EnvironmentCode, secret.FolderCode, secret.Key}
+	for _, part := range parts {
+		if part == "" {
+			return ""
+		}
+	}
+	return strings.Join(parts, ".")
 }
 
 func recordAuditTx(ctx context.Context, tx *sql.Tx, actor, resourceType, resourceID, action string, encryptedValue []byte) error {

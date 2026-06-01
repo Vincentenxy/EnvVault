@@ -35,9 +35,13 @@ func Run() error {
 	if err != nil {
 		return err
 	}
-	repository := postgres.NewRepository(db)
-	rbacStore := postgres.NewRBACStore(db, gormDB)
+	userCache := postgres.NewUserCache()
+	repository := postgres.NewRepository(db, userCache)
+	rbacStore := postgres.NewRBACStore(db, gormDB, userCache)
 	if err := rbacStore.EnsureSystemData(ctx); err != nil {
+		return err
+	}
+	if err := userCache.Load(ctx, db); err != nil {
 		return err
 	}
 	if adminUserID := os.Getenv("ENVVAULT_BOOTSTRAP_ADMIN_USER_ID"); adminUserID != "" {

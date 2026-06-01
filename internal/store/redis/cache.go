@@ -87,6 +87,10 @@ func (c *Cache) UpsertSecret(ctx context.Context, record postgres.SecretCacheRec
 		"value_ciphertext": base64.StdEncoding.EncodeToString(record.ValueCiphertext),
 		"comment":          secret.Comment,
 		"version":          secret.Version,
+		"created_by":       secret.CreatedBy,
+		"created_by_label": secret.CreatedByLabel,
+		"updated_by":       secret.UpdatedBy,
+		"updated_by_label": secret.UpdatedByLabel,
 		"created_at":       secret.CreatedAt.Format(timeLayout),
 		"updated_at":       secret.UpdatedAt.Format(timeLayout),
 	}
@@ -127,14 +131,20 @@ func (c *Cache) SearchSecrets(ctx context.Context, filter postgres.ListFilter) (
 			continue
 		}
 		items = append(items, postgres.Secret{
-			ID:            values["id"],
-			OrgID:         values["org_id"],
-			ProjectID:     values["project_id"],
-			EnvironmentID: values["environment_id"],
-			FolderID:      values["folder_id"],
-			Key:           values["key"],
-			Comment:       values["comment"],
-			Version:       atoi(values["version"]),
+			ID:             values["id"],
+			OrgID:          values["org_id"],
+			ProjectID:      values["project_id"],
+			EnvironmentID:  values["environment_id"],
+			FolderID:       values["folder_id"],
+			Key:            values["key"],
+			Comment:        values["comment"],
+			Version:        atoi(values["version"]),
+			CreatedBy:      values["created_by"],
+			CreatedByLabel: labelOrID(values["created_by_label"], values["created_by"]),
+			UpdatedBy:      values["updated_by"],
+			UpdatedByLabel: labelOrID(values["updated_by_label"], values["updated_by"]),
+			CreatedAt:      parseTime(values["created_at"]),
+			UpdatedAt:      parseTime(values["updated_at"]),
 		})
 	}
 	return items, nil

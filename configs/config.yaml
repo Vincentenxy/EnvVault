@@ -59,7 +59,7 @@ security:
   encryption_key: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
 database:
-  host: "192.168.1.110"  #"127.0.0.1"
+  host: "127.0.0.1"
   port: 5432
   user: "admin"
   password: "123456"
@@ -74,7 +74,7 @@ redis:
   enabled: true
   mode: "single"
   addrs:
-    - "192.168.1.110:6379"
+    - "127.0.0.1:6379"
   password: "123456"
   db: 0
   key_prefix: "envvault"

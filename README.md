@@ -97,9 +97,11 @@ Do not commit production secrets, JWT secrets, or encryption keys.
 
 EnvVault uses action-style HTTP APIs:
 
-- Parameterless requests use `GET`.
-- Requests with parameters use `POST` with a JSON body.
+- Requests without request data use `GET`.
+- `GET` does not carry a request body or business query parameters by default.
+- Requests with data, including pagination, filters, IDs, and search keywords, use `POST` with a JSON body.
 - Special link-style flows may use `GET` with query parameters.
+- Paginated responses use `data.total` and `data.list`.
 
 All business responses follow this format:
 

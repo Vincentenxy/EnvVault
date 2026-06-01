@@ -80,7 +80,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 
 				org := protected.Group("/org")
 				{
-					org.GET("/list", ctrl.ListOrganizations)
+					org.POST("/list", ctrl.ListOrganizations)
 					org.POST("/create", ctrl.CreateOrganization)
 					org.POST("/info", ctrl.GetOrganization)
 					org.POST("/update", ctrl.UpdateOrganization)
@@ -134,7 +134,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 				{
 					permission := rbac.Group("/permission")
 					{
-						permission.GET("/list", ctrl.ListPermissions)
+						permission.POST("/list", ctrl.ListPermissions)
 					}
 
 					me := rbac.Group("/me")
@@ -160,7 +160,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 
 					user := rbac.Group("/user")
 					{
-						user.GET("/me", ctrl.GetCurrentRBACUser)
+						user.POST("/me", ctrl.GetCurrentRBACUser)
 						user.POST("/list", ctrl.ListRBACUsers)
 						user.POST("/grants", ctrl.ListUserGrants)
 						user.POST("/permissions", ctrl.GetUserEffectivePermissions)

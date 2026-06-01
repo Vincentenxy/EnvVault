@@ -7,6 +7,8 @@ create table if not exists organizations (
     is_deleted boolean not null default false,
     deleted_at timestamptz,
     deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -23,6 +25,8 @@ create table if not exists projects (
     is_deleted boolean not null default false,
     deleted_at timestamptz,
     deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -39,6 +43,8 @@ create table if not exists environments (
     is_deleted boolean not null default false,
     deleted_at timestamptz,
     deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -55,6 +61,8 @@ create table if not exists folders (
     is_deleted boolean not null default false,
     deleted_at timestamptz,
     deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -73,6 +81,8 @@ create table if not exists secrets (
     is_deleted boolean not null default false,
     deleted_at timestamptz,
     deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -153,6 +163,7 @@ create table if not exists roles (
     deleted_at timestamptz,
     deleted_by text not null default '',
     created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
     constraint roles_scope_type_chk check (

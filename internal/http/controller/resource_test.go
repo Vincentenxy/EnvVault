@@ -31,3 +31,20 @@ func TestPaginateSecretsOutOfRange(t *testing.T) {
 		t.Fatalf("items length = %d, want 0", len(got))
 	}
 }
+
+func TestPageDataUsesGenericListShape(t *testing.T) {
+	items := []postgres.Entity{{ID: "org-1"}}
+
+	got := pageData(items, 7)
+
+	if got.Total != 7 {
+		t.Fatalf("total = %d, want 7", got.Total)
+	}
+	list, ok := got.List.([]postgres.Entity)
+	if !ok {
+		t.Fatalf("list type = %T, want []postgres.Entity", got.List)
+	}
+	if len(list) != 1 || list[0].ID != "org-1" {
+		t.Fatalf("list = %#v, want org-1", list)
+	}
+}

@@ -363,6 +363,7 @@ create table if not exists roles (
     deleted_at timestamptz,
     deleted_by text not null default '',
     created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
     constraint roles_scope_type_chk check (
@@ -493,21 +494,28 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 ## HTTP API 设计
 
-接口保持当前动作式风格：无参数查询使用 `GET`，有参数请求使用 `POST`。
+接口保持当前动作式风格：
+
+- 无请求数据的查询使用 `GET`。
+- `GET` 默认不承载 request body，也不承载业务 query 参数。
+- 有请求数据的查询或变更使用 `POST`，请求数据统一放在 JSON body 中。
+- 分页、过滤条件、资源 ID、搜索关键字都视为请求数据，应使用 `POST`。
+- 只有分享链接、跳转链接等天然需要 URL 表达的场景，允许使用 `GET + query params`。
 
 列表查询统一支持分页：
 
 - `pageNum`：页码，从 `1` 开始，默认 `1`。
 - `pageSize`：每页数量，默认 `20`，最大 `100`。
-- GET 列表接口使用 query string，例如 `/api/v1/rbac/permission/list?pageNum=1&pageSize=20`。
-- POST 列表接口将 `pageNum`、`pageSize` 放在 JSON body 中。
-- 响应中统一返回分页元信息：`pageNum`、`pageSize`、`total`。
+- 列表接口将 `pageNum`、`pageSize` 放在 JSON body 中。
+- 分页请求统一复用 `PageRequest`。
+- 分页响应统一复用 `PageResp`，格式为 `{ "total": 总条数, "list": 数据列表 }`。
+- 分页响应不返回 `pageNum`、`pageSize`，调用方以请求参数作为当前分页上下文。
 
 ### 权限查询
 
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/v1/rbac/permission/list` | 已认证 | 查看系统权限点 |
+| POST | `/api/v1/rbac/permission/list` | 已认证 | 查看系统权限点 |
 | POST | `/api/v1/rbac/me/permissions` | 已认证 | 查看当前用户在某作用域下拥有的权限 |
 
 查询当前用户权限：
@@ -632,7 +640,7 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/v1/rbac/user/me` | 已认证 | 查看当前本地用户和角色摘要 |
+| POST | `/api/v1/rbac/user/me` | 已认证 | 查看当前用户直接授权清单 |
 | POST | `/api/v1/rbac/user/list` | `rbac:binding:read` | 查看某作用域可见成员 |
 | POST | `/api/v1/rbac/user/grants` | `rbac:binding:read` | 查看某用户被直接授予的角色清单 |
 | POST | `/api/v1/rbac/user/permissions` | `rbac:binding:read` | 查看某用户在某作用域下的有效权限 |
@@ -665,7 +673,8 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
   "code": 0,
   "msg": "success",
   "data": {
-    "grants": [
+    "total": 2,
+    "list": [
       {
         "role_code": "project_admin",
         "scope_type": "project",
@@ -680,10 +689,7 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
         "granted_by": "admin-user",
         "expires_at": ""
       }
-    ],
-    "pageNum": 1,
-    "pageSize": 20,
-    "total": 2
+    ]
   }
 }
 ```
@@ -738,7 +744,7 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 | 接口 | 所需权限 |
 | --- | --- |
-| `GET /api/v1/org/list` | `org:read`，按可见组织过滤 |
+| `POST /api/v1/org/list` | `org:read`，按可见组织过滤 |
 | `POST /api/v1/org/create` | `org:create` on `global` |
 | `POST /api/v1/org/info` | `org:read` on organization |
 | `POST /api/v1/org/update` | `org:update` on organization |

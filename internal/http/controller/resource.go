@@ -31,6 +31,7 @@ type updateEntityRequest struct {
 }
 
 type listRequest struct {
+	PageRequest
 	OrgID         string `json:"org_id,omitempty"`
 	ProjectID     string `json:"project_id,omitempty"`
 	EnvironmentID string `json:"environment_id,omitempty"`
@@ -38,8 +39,16 @@ type listRequest struct {
 	ResourceType  string `json:"resource_type,omitempty"`
 	ResourceID    string `json:"resource_id,omitempty"`
 	Keyword       string `json:"keyword,omitempty"`
-	PageNum       int    `json:"pageNum"`
-	PageSize      int    `json:"pageSize"`
+}
+
+type PageRequest struct {
+	PageNum  int `json:"pageNum"`
+	PageSize int `json:"pageSize"`
+}
+
+type PageResp struct {
+	Total int64 `json:"total"`
+	List  any   `json:"list"`
 }
 
 type secretRequest struct {
@@ -61,10 +70,14 @@ func (ctrl *Controller) CreateOrganization(c *gin.Context) {
 }
 
 func (ctrl *Controller) ListOrganizations(c *gin.Context) {
+	var req PageRequest
+	if !ctrl.bind(c, &req) {
+		return
+	}
 	ctrl.log(c, "ListOrganizations")
-	pagination := paginationFromQuery(c)
+	pagination := paginationFromRequest(req)
 	result, err := ctrl.store.ListOrganizations(c.Request.Context(), pagination)
-	ctrl.write(c, paginatedData("organizations", result.Items, result.Total, pagination), err)
+	ctrl.write(c, pageData(result.Items, result.Total), err)
 }
 
 func (ctrl *Controller) GetOrganization(c *gin.Context) {
@@ -110,9 +123,9 @@ func (ctrl *Controller) ListProjects(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "ListProjects", logging.F("org_id", req.OrgID))
-	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListProjects(c.Request.Context(), req.OrgID, pagination)
-	ctrl.write(c, paginatedData("projects", result.Items, result.Total, pagination), err)
+	ctrl.write(c, pageData(result.Items, result.Total), err)
 }
 
 func (ctrl *Controller) GetProject(c *gin.Context) {
@@ -158,9 +171,9 @@ func (ctrl *Controller) ListEnvironments(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "ListEnvironments", logging.F("project_id", req.ProjectID))
-	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListEnvironments(c.Request.Context(), req.ProjectID, pagination)
-	ctrl.write(c, paginatedData("environments", result.Items, result.Total, pagination), err)
+	ctrl.write(c, pageData(result.Items, result.Total), err)
 }
 
 func (ctrl *Controller) GetEnvironment(c *gin.Context) {
@@ -206,9 +219,9 @@ func (ctrl *Controller) ListFolders(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "ListFolders", logging.F("environment_id", req.EnvironmentID))
-	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListFolders(c.Request.Context(), req.EnvironmentID, pagination)
-	ctrl.write(c, paginatedData("folders", result.Items, result.Total, pagination), err)
+	ctrl.write(c, pageData(result.Items, result.Total), err)
 }
 
 func (ctrl *Controller) GetFolder(c *gin.Context) {
@@ -314,14 +327,14 @@ func (ctrl *Controller) ListSecrets(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "ListSecrets", logging.F("org_id", req.OrgID), logging.F("project_id", req.ProjectID), logging.F("environment_id", req.EnvironmentID), logging.F("folder_id", req.FolderID))
-	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListSecrets(c.Request.Context(), postgres.ListFilter{
 		OrgID:         req.OrgID,
 		ProjectID:     req.ProjectID,
 		EnvironmentID: req.EnvironmentID,
 		FolderID:      req.FolderID,
 	}, pagination)
-	ctrl.write(c, paginatedData("secrets", result.Items, result.Total, pagination), err)
+	ctrl.write(c, pageData(result.Items, result.Total), err)
 }
 
 func (ctrl *Controller) SearchSecrets(c *gin.Context) {
@@ -340,14 +353,14 @@ func (ctrl *Controller) SearchSecrets(c *gin.Context) {
 	if ctrl.cache != nil {
 		items, err := ctrl.cache.SearchSecrets(c.Request.Context(), filter)
 		if err == nil {
-			pagination := paginationFromRequest(req.PageNum, req.PageSize)
+			pagination := paginationFromRequest(req.PageRequest)
 			pagedItems, total := paginateSecrets(items, pagination)
-			ctrl.write(c, paginatedData("secrets", pagedItems, total, pagination), nil)
+			ctrl.write(c, pageData(pagedItems, total), nil)
 			return
 		}
 		logging.Warn(c.Request.Context(), "SearchSecrets", "redis search failed, fallback to postgres", logging.F("error", err))
 	}
-	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListSecrets(c.Request.Context(), postgres.ListFilter{
 		OrgID:         req.OrgID,
 		ProjectID:     req.ProjectID,
@@ -355,7 +368,7 @@ func (ctrl *Controller) SearchSecrets(c *gin.Context) {
 		FolderID:      req.FolderID,
 		Keyword:       req.Keyword,
 	}, pagination)
-	ctrl.write(c, paginatedData("secrets", result.Items, result.Total, pagination), err)
+	ctrl.write(c, pageData(result.Items, result.Total), err)
 }
 
 func (ctrl *Controller) DeleteSecret(c *gin.Context) {
@@ -377,9 +390,9 @@ func (ctrl *Controller) ListAuditRecords(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "ListAuditRecords", logging.F("resource_type", req.ResourceType), logging.F("resource_id", req.ResourceID))
-	pagination := paginationFromRequest(req.PageNum, req.PageSize)
+	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListAuditRecords(c.Request.Context(), req.ResourceType, req.ResourceID, pagination)
-	ctrl.write(c, paginatedData("audit_records", result.Items, result.Total, pagination), err)
+	ctrl.write(c, pageData(result.Items, result.Total), err)
 }
 
 func (ctrl *Controller) bind(c *gin.Context, target any) bool {
@@ -421,6 +434,9 @@ func (ctrl *Controller) delete(c *gin.Context, fn func(idRequest) error) {
 
 func (ctrl *Controller) actor(c *gin.Context) string {
 	user := auth.UserFromContext(c)
+	if ctrl.store != nil {
+		ctrl.store.CacheUserLabel(user.UserId, user.Name)
+	}
 	return user.UserId
 }
 

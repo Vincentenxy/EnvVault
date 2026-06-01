@@ -14,3 +14,18 @@ func atoi(value string) int {
 	}
 	return parsed
 }
+
+func labelOrID(label, id string) string {
+	if label != "" {
+		return label
+	}
+	return id
+}
+
+func parseTime(value string) time.Time {
+	parsed, err := time.Parse(timeLayout, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
+}

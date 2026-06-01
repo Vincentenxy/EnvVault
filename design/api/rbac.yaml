@@ -4,7 +4,7 @@ info:
   version: 0.1.0
   description: EnvVault RBAC interfaces for permissions, roles, users, and role bindings.
 servers:
-  - url: /api/v1
+  - url: /
 security:
   - bearerAuth: []
 tags:
@@ -13,15 +13,18 @@ tags:
   - name: RBAC Bindings
   - name: RBAC Users
 paths:
-  /rbac/permission/list:
-    get:
+  /api/v1/rbac/permission/list:
+    post:
       tags:
         - RBAC Permissions
       summary: List system permissions
       operationId: listPermissions
-      parameters:
-        - $ref: "#/components/parameters/PaginationPageNum"
-        - $ref: "#/components/parameters/PaginationPageSize"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PageRequest"
       responses:
         "200":
           description: Permission list.
@@ -33,26 +36,18 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: object
-                        properties:
-                          permissions:
-                            type: array
-                            items:
-                              $ref: "#/components/schemas/Permission"
-                          pageNum:
-                            type: integer
-                            example: 1
-                          pageSize:
-                            type: integer
-                            example: 20
-                          total:
-                            type: integer
-                            format: int64
-                            example: 128
+                        allOf:
+                          - $ref: "#/components/schemas/PageResp"
+                          - type: object
+                            properties:
+                              list:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/Permission"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
-  /rbac/me/permissions:
+  /api/v1/rbac/me/permissions:
     post:
       tags:
         - RBAC Permissions
@@ -81,7 +76,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
-  /rbac/role/list:
+  /api/v1/rbac/role/list:
     post:
       tags:
         - RBAC Roles
@@ -94,7 +89,7 @@ paths:
             schema:
               allOf:
                 - $ref: "#/components/schemas/ScopeRequest"
-                - $ref: "#/components/schemas/PaginationRequest"
+                - $ref: "#/components/schemas/PageRequest"
       responses:
         "200":
           description: Role list.
@@ -106,26 +101,18 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: object
-                        properties:
-                          roles:
-                            type: array
-                            items:
-                              $ref: "#/components/schemas/Role"
-                          pageNum:
-                            type: integer
-                            example: 1
-                          pageSize:
-                            type: integer
-                            example: 20
-                          total:
-                            type: integer
-                            format: int64
-                            example: 128
+                        allOf:
+                          - $ref: "#/components/schemas/PageResp"
+                          - type: object
+                            properties:
+                              list:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/Role"
         "403":
           $ref: "#/components/responses/Forbidden"
 
-  /rbac/role/info:
+  /api/v1/rbac/role/info:
     post:
       tags:
         - RBAC Roles
@@ -154,7 +141,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /rbac/role/create:
+  /api/v1/rbac/role/create:
     post:
       tags:
         - RBAC Roles
@@ -185,7 +172,7 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
 
-  /rbac/role/update:
+  /api/v1/rbac/role/update:
     post:
       tags:
         - RBAC Roles
@@ -226,7 +213,7 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
 
-  /rbac/role/delete:
+  /api/v1/rbac/role/delete:
     post:
       tags:
         - RBAC Roles
@@ -248,7 +235,7 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
 
-  /rbac/binding/list:
+  /api/v1/rbac/binding/list:
     post:
       tags:
         - RBAC Bindings
@@ -261,7 +248,7 @@ paths:
             schema:
               allOf:
                 - $ref: "#/components/schemas/ScopeRequest"
-                - $ref: "#/components/schemas/PaginationRequest"
+                - $ref: "#/components/schemas/PageRequest"
       responses:
         "200":
           description: Role binding list.
@@ -273,26 +260,18 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: object
-                        properties:
-                          bindings:
-                            type: array
-                            items:
-                              $ref: "#/components/schemas/RoleBinding"
-                          pageNum:
-                            type: integer
-                            example: 1
-                          pageSize:
-                            type: integer
-                            example: 20
-                          total:
-                            type: integer
-                            format: int64
-                            example: 128
+                        allOf:
+                          - $ref: "#/components/schemas/PageResp"
+                          - type: object
+                            properties:
+                              list:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/RoleBinding"
         "403":
           $ref: "#/components/responses/Forbidden"
 
-  /rbac/binding/grant:
+  /api/v1/rbac/binding/grant:
     post:
       tags:
         - RBAC Bindings
@@ -323,7 +302,7 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
 
-  /rbac/binding/revoke:
+  /api/v1/rbac/binding/revoke:
     post:
       tags:
         - RBAC Bindings
@@ -347,15 +326,18 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
 
-  /rbac/user/me:
-    get:
+  /api/v1/rbac/user/me:
+    post:
       tags:
         - RBAC Users
-      summary: Get current local user and role summary
+      summary: List direct grants for the current user
       operationId: getCurrentRBACUser
-      parameters:
-        - $ref: "#/components/parameters/PaginationPageNum"
-        - $ref: "#/components/parameters/PaginationPageSize"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PageRequest"
       responses:
         "200":
           description: Current RBAC user.
@@ -367,11 +349,18 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: "#/components/schemas/UserWithGrantSummary"
+                        allOf:
+                          - $ref: "#/components/schemas/PageResp"
+                          - type: object
+                            properties:
+                              list:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/RoleBinding"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
-  /rbac/user/list:
+  /api/v1/rbac/user/list:
     post:
       tags:
         - RBAC Users
@@ -384,7 +373,7 @@ paths:
             schema:
               allOf:
                 - $ref: "#/components/schemas/ScopeRequest"
-                - $ref: "#/components/schemas/PaginationRequest"
+                - $ref: "#/components/schemas/PageRequest"
       responses:
         "200":
           description: User list.
@@ -396,26 +385,18 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: object
-                        properties:
-                          users:
-                            type: array
-                            items:
-                              $ref: "#/components/schemas/User"
-                          pageNum:
-                            type: integer
-                            example: 1
-                          pageSize:
-                            type: integer
-                            example: 20
-                          total:
-                            type: integer
-                            format: int64
-                            example: 128
+                        allOf:
+                          - $ref: "#/components/schemas/PageResp"
+                          - type: object
+                            properties:
+                              list:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/User"
         "403":
           $ref: "#/components/responses/Forbidden"
 
-  /rbac/user/grants:
+  /api/v1/rbac/user/grants:
     post:
       tags:
         - RBAC Users
@@ -428,7 +409,7 @@ paths:
             schema:
               allOf:
                 - $ref: "#/components/schemas/UserLookupRequest"
-                - $ref: "#/components/schemas/PaginationRequest"
+                - $ref: "#/components/schemas/PageRequest"
       responses:
         "200":
           description: Direct grants for the user.
@@ -440,28 +421,20 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: object
-                        properties:
-                          grants:
-                            type: array
-                            items:
-                              $ref: "#/components/schemas/RoleBinding"
-                          pageNum:
-                            type: integer
-                            example: 1
-                          pageSize:
-                            type: integer
-                            example: 20
-                          total:
-                            type: integer
-                            format: int64
-                            example: 128
+                        allOf:
+                          - $ref: "#/components/schemas/PageResp"
+                          - type: object
+                            properties:
+                              list:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/RoleBinding"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /rbac/user/permissions:
+  /api/v1/rbac/user/permissions:
     post:
       tags:
         - RBAC Users
@@ -498,27 +471,6 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-
-  parameters:
-    PaginationPageNum:
-      name: pageNum
-      in: query
-      required: false
-      schema:
-        type: integer
-        minimum: 1
-        default: 1
-      description: pageNum starts from 1.
-    PaginationPageSize:
-      name: pageSize
-      in: query
-      required: false
-      schema:
-        type: integer
-        minimum: 1
-        maximum: 100
-        default: 20
-      description: pageSize is capped at 100.
 
   responses:
     BadRequest:
@@ -648,7 +600,7 @@ components:
           type: string
           example: user-123
 
-    PaginationRequest:
+    PageRequest:
       type: object
       properties:
         pageNum:
@@ -662,6 +614,20 @@ components:
           maximum: 100
           default: 20
           example: 20
+
+    PageResp:
+      type: object
+      required:
+        - total
+        - list
+      properties:
+        total:
+          type: integer
+          format: int64
+          example: 128
+        list:
+          type: array
+          items: {}
 
     Permission:
       type: object
@@ -802,26 +768,6 @@ components:
           type: string
           format: date-time
           nullable: true
-
-    UserWithGrantSummary:
-      type: object
-      properties:
-        user:
-          $ref: "#/components/schemas/User"
-        grants:
-          type: array
-          items:
-            $ref: "#/components/schemas/RoleBinding"
-        pageNum:
-          type: integer
-          example: 1
-        pageSize:
-          type: integer
-          example: 20
-        total:
-          type: integer
-          format: int64
-          example: 2
 
     RoleBinding:
       type: object

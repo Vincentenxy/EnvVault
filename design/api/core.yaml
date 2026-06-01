@@ -79,12 +79,15 @@ paths:
                         $ref: "#/components/schemas/UserInfo"
 
   /api/v1/org/list:
-    get:
+    post:
       tags: [Organizations]
       summary: List organizations
-      parameters:
-        - $ref: "#/components/parameters/PageNum"
-        - $ref: "#/components/parameters/PageSize"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PageRequest"
       responses:
         "200":
           $ref: "#/components/responses/OrganizationList"
@@ -139,7 +142,7 @@ paths:
           application/json:
             schema:
               allOf:
-                - $ref: "#/components/schemas/PaginationRequest"
+                - $ref: "#/components/schemas/PageRequest"
                 - type: object
                   properties:
                     org_id:
@@ -200,7 +203,7 @@ paths:
           application/json:
             schema:
               allOf:
-                - $ref: "#/components/schemas/PaginationRequest"
+                - $ref: "#/components/schemas/PageRequest"
                 - type: object
                   properties:
                     project_id:
@@ -261,7 +264,7 @@ paths:
           application/json:
             schema:
               allOf:
-                - $ref: "#/components/schemas/PaginationRequest"
+                - $ref: "#/components/schemas/PageRequest"
                 - type: object
                   properties:
                     environment_id:
@@ -401,7 +404,7 @@ paths:
           application/json:
             schema:
               allOf:
-                - $ref: "#/components/schemas/PaginationRequest"
+                - $ref: "#/components/schemas/PageRequest"
                 - type: object
                   properties:
                     resource_type:
@@ -419,25 +422,6 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-
-  parameters:
-    PageNum:
-      name: pageNum
-      in: query
-      required: false
-      schema:
-        type: integer
-        minimum: 1
-        default: 1
-    PageSize:
-      name: pageSize
-      in: query
-      required: false
-      schema:
-        type: integer
-        minimum: 1
-        maximum: 100
-        default: 20
 
   requestBodies:
     ID:
@@ -470,7 +454,7 @@ components:
         application/json:
           schema:
             allOf:
-              - $ref: "#/components/schemas/PaginationRequest"
+              - $ref: "#/components/schemas/PageRequest"
               - $ref: "#/components/schemas/SecretFilter"
     SecretSearch:
       required: true
@@ -478,7 +462,7 @@ components:
         application/json:
           schema:
             allOf:
-              - $ref: "#/components/schemas/PaginationRequest"
+              - $ref: "#/components/schemas/PageRequest"
               - $ref: "#/components/schemas/SecretFilter"
               - type: object
                 properties:
@@ -588,7 +572,7 @@ components:
           type: string
           format: uuid
 
-    PaginationRequest:
+    PageRequest:
       type: object
       properties:
         pageNum:
@@ -603,19 +587,17 @@ components:
           default: 20
           example: 20
 
-    PaginationFields:
+    PageResp:
       type: object
+      required: [total, list]
       properties:
-        pageNum:
-          type: integer
-          example: 1
-        pageSize:
-          type: integer
-          example: 20
         total:
           type: integer
           format: int64
           example: 1
+        list:
+          type: array
+          items: {}
 
     CreateEntityRequest:
       type: object
@@ -660,6 +642,18 @@ components:
           type: string
         comment:
           type: string
+        created_by:
+          type: string
+          example: dev-user
+        created_by_label:
+          type: string
+          example: Dev User
+        updated_by:
+          type: string
+          example: dev-user
+        updated_by_label:
+          type: string
+          example: Dev User
         created_at:
           type: string
           format: date-time
@@ -757,6 +751,18 @@ components:
           description: Only returned by /api/v1/secret/reveal.
         comment:
           type: string
+        created_by:
+          type: string
+          example: dev-user
+        created_by_label:
+          type: string
+          example: Dev User
+        updated_by:
+          type: string
+          example: dev-user
+        updated_by_label:
+          type: string
+          example: Dev User
         version:
           type: integer
         created_at:
@@ -794,10 +800,10 @@ components:
           properties:
             data:
               allOf:
-                - $ref: "#/components/schemas/PaginationFields"
+                - $ref: "#/components/schemas/PageResp"
                 - type: object
                   properties:
-                    organizations:
+                    list:
                       type: array
                       items:
                         $ref: "#/components/schemas/Entity"
@@ -809,10 +815,10 @@ components:
           properties:
             data:
               allOf:
-                - $ref: "#/components/schemas/PaginationFields"
+                - $ref: "#/components/schemas/PageResp"
                 - type: object
                   properties:
-                    projects:
+                    list:
                       type: array
                       items:
                         $ref: "#/components/schemas/Entity"
@@ -824,10 +830,10 @@ components:
           properties:
             data:
               allOf:
-                - $ref: "#/components/schemas/PaginationFields"
+                - $ref: "#/components/schemas/PageResp"
                 - type: object
                   properties:
-                    environments:
+                    list:
                       type: array
                       items:
                         $ref: "#/components/schemas/Entity"
@@ -839,10 +845,10 @@ components:
           properties:
             data:
               allOf:
-                - $ref: "#/components/schemas/PaginationFields"
+                - $ref: "#/components/schemas/PageResp"
                 - type: object
                   properties:
-                    folders:
+                    list:
                       type: array
                       items:
                         $ref: "#/components/schemas/Entity"
@@ -854,10 +860,10 @@ components:
           properties:
             data:
               allOf:
-                - $ref: "#/components/schemas/PaginationFields"
+                - $ref: "#/components/schemas/PageResp"
                 - type: object
                   properties:
-                    secrets:
+                    list:
                       type: array
                       items:
                         $ref: "#/components/schemas/Secret"
@@ -869,10 +875,10 @@ components:
           properties:
             data:
               allOf:
-                - $ref: "#/components/schemas/PaginationFields"
+                - $ref: "#/components/schemas/PageResp"
                 - type: object
                   properties:
-                    audit_records:
+                    list:
                       type: array
                       items:
                         $ref: "#/components/schemas/AuditRecord"

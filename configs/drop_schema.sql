@@ -1,0 +1,13 @@
+drop table if exists role_binding_audit_records cascade;
+drop table if exists user_role_bindings cascade;
+drop table if exists role_permissions cascade;
+drop table if exists roles cascade;
+drop table if exists permissions cascade;
+drop table if exists users cascade;
+drop table if exists audit_records cascade;
+drop table if exists deleted_records cascade;
+drop table if exists secrets cascade;
+drop table if exists folders cascade;
+drop table if exists environments cascade;
+drop table if exists projects cascade;
+drop table if exists organizations cascade;

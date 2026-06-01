@@ -54,7 +54,7 @@ func TestCoreRoutesAreRegistered(t *testing.T) {
 		"GET /api/v1/readyz":          {},
 		"POST /api/v1/auth/dev/token": {},
 		"GET /api/v1/me":              {},
-		"GET /api/v1/org/list":        {},
+		"POST /api/v1/org/list":       {},
 		"POST /api/v1/org/create":     {},
 		"POST /api/v1/org/info":       {},
 		"POST /api/v1/org/update":     {},

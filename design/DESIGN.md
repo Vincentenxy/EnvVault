@@ -361,6 +361,15 @@ GORM v2 可以降低这类样板代码，提高开发效率和可维护性。项
 
 当前基础表由 `configs/schema.sql` 初始化。后续如果引入迁移工具，应保持本节与迁移文件一致。
 
+本地测试如果需要重建全量库表，可以先手动执行：
+
+```bash
+psql "postgres://admin:123456@127.0.0.1:5432/envvault?sslmode=disable" -f configs/drop_schema.sql
+psql "postgres://admin:123456@127.0.0.1:5432/envvault?sslmode=disable" -f configs/schema.sql
+```
+
+`configs/drop_schema.sql` 只用于本地测试或明确确认要清空库表的场景，生产环境不能直接执行。
+
 ### PostgreSQL 扩展
 
 ```sql
@@ -379,6 +388,8 @@ create table if not exists organizations (
     is_deleted boolean not null default false,
     deleted_at timestamptz,
     deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -399,6 +410,8 @@ create table if not exists projects (
     is_deleted boolean not null default false,
     deleted_at timestamptz,
     deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -419,6 +432,8 @@ create table if not exists environments (
     is_deleted boolean not null default false,
     deleted_at timestamptz,
     deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -439,6 +454,8 @@ create table if not exists folders (
     is_deleted boolean not null default false,
     deleted_at timestamptz,
     deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -461,6 +478,8 @@ create table if not exists secrets (
     is_deleted boolean not null default false,
     deleted_at timestamptz,
     deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -479,6 +498,38 @@ create index if not exists secrets_key_search_idx
 - `value_ciphertext` 是 JSONB，保存算法、nonce 和密文数据。
 - 当前只对 `key` 建立 trigram 搜索索引。
 - value 搜索详见 [search.md](search.md)。
+
+### 创建人与更新人字段
+
+组织、项目、环境、Folder、Secret 等核心业务主表统一维护：
+
+- `created_by`：创建人用户 ID，来源于当前 JWT 解析出的 `userId`。
+- `updated_by`：最后更新人用户 ID，来源于当前 JWT 解析出的 `userId`。
+- `deleted_by`：删除人用户 ID，来源于当前 JWT 解析出的 `userId`。
+
+这些字段表示资源当前状态的责任人，便于列表页、详情页和排障场景直接展示。完整历史行为仍以 `audit_records` 为准。
+
+查询返回给前端时，除了用户 ID，还需要返回 label 字段。label 不在资源查询 SQL 中连表计算，而是在 Go 服务内维护用户基础信息内存缓存，通过 `created_by` / `updated_by` 到缓存中查找展示名：
+
+- `created_by_label`：创建人展示名，优先取用户缓存中的姓名，如果缓存没有记录或姓名为空，则回退为 `created_by`。
+- `updated_by_label`：最后更新人展示名，优先取用户缓存中的姓名，如果缓存没有记录或姓名为空，则回退为 `updated_by`。
+- 用户缓存启动时从 `users` 表加载；JWT 用户同步、授权导入用户、bootstrap 管理员创建时同步刷新缓存；普通请求读取当前用户信息时，也可以用 JWT 中的 `userId` 和 `name` 刷新当前进程缓存。
+- 资源列表、详情、Secret Redis 预热等查询禁止为了 label 额外 `join users`，避免核心资源查询和用户展示信息强耦合。
+
+接口响应示例：
+
+```json
+{
+  "id": "uuid",
+  "name": "default-org",
+  "created_by": "dev-user",
+  "created_by_label": "Dev User",
+  "updated_by": "dev-user",
+  "updated_by_label": "Dev User",
+  "created_at": "2026-06-01T10:00:00Z",
+  "updated_at": "2026-06-01T10:00:00Z"
+}
+```
 
 ### deleted_records
 
@@ -753,8 +804,11 @@ x-request-id
 
 接口风格：
 
-- 无参数查询使用 `GET`。
-- 有参数查询或变更使用 `POST`。
+- 无请求数据的查询使用 `GET`。
+- `GET` 默认不承载 request body，也不承载业务 query 参数。
+- 有请求数据的查询或变更使用 `POST`，请求数据统一放在 JSON body 中。
+- 分页、过滤条件、资源 ID、搜索关键字都视为请求数据，应使用 `POST`。
+- 只有分享链接、跳转链接等天然需要 URL 表达的场景，允许使用 `GET + query params`。
 - 请求体使用 JSON。
 - 响应体使用统一结构。
 
@@ -767,6 +821,41 @@ x-request-id
   "data": {}
 }
 ```
+
+分页请求统一使用 `PageRequest`：
+
+```json
+{
+  "pageNum": 1,
+  "pageSize": 20
+}
+```
+
+分页请求规则：
+
+- `pageNum`：页码，从 `1` 开始；为空或小于 `1` 时按 `1` 处理。
+- `pageSize`：每页数量；为空或小于 `1` 时按 `20` 处理，最大 `100`。
+- 所有分页查询接口必须复用 `PageRequest`，业务过滤字段通过组合或嵌入方式扩展。
+
+分页响应统一使用 `PageResp`，放在统一响应的 `data` 中：
+
+```json
+{
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "total": 100,
+    "list": []
+  }
+}
+```
+
+分页响应规则：
+
+- `total`：符合查询条件的总条数。
+- `list`：当前页数据列表。
+- 分页响应不返回 `pageNum`、`pageSize`，调用方以请求参数作为当前分页上下文。
+- 不允许再使用 `organizations`、`projects`、`secrets` 等按资源类型命名的列表字段，所有分页列表统一使用 `list`。
 
 错误响应：
 
@@ -833,11 +922,20 @@ x-request-id
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/v1/org/list` | 组织列表 |
+| POST | `/api/v1/org/list` | 组织列表 |
 | POST | `/api/v1/org/create` | 创建组织 |
 | POST | `/api/v1/org/info` | 组织详情 |
 | POST | `/api/v1/org/update` | 更新组织 |
 | POST | `/api/v1/org/delete` | 删除组织 |
+
+组织列表：
+
+```json
+{
+  "pageNum": 1,
+  "pageSize": 20
+}
+```
 
 创建组织：
 

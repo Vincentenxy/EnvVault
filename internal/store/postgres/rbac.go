@@ -14,8 +14,9 @@ import (
 )
 
 type RBACStore struct {
-	db     *sql.DB
-	gormDB *gorm.DB
+	db        *sql.DB
+	gormDB    *gorm.DB
+	userCache *UserCache
 }
 
 type Permission struct {
@@ -103,8 +104,12 @@ type systemRole struct {
 	Permissions []string
 }
 
-func NewRBACStore(db *sql.DB, gormDB *gorm.DB) *RBACStore {
-	return &RBACStore{db: db, gormDB: gormDB}
+func NewRBACStore(db *sql.DB, gormDB *gorm.DB, userCache ...*UserCache) *RBACStore {
+	var cache *UserCache
+	if len(userCache) > 0 {
+		cache = userCache[0]
+	}
+	return &RBACStore{db: db, gormDB: gormDB, userCache: cache}
 }
 
 func (s *RBACStore) EnsureSystemData(ctx context.Context) error {
@@ -175,7 +180,11 @@ func (s *RBACStore) EnsureBootstrapAdmin(ctx context.Context, externalUserID, na
 		return err
 	}
 	if existingID != "" {
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		s.cacheUserLabel(externalUserID, name)
+		return nil
 	}
 	bindingID, err := uuidgen.NewUUID()
 	if err != nil {
@@ -188,7 +197,11 @@ values ($1, $2, $3, 'global', null, 'bootstrap')
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.cacheUserLabel(externalUserID, name)
+	return nil
 }
 
 func (s *RBACStore) ResourceScopes(ctx context.Context, resource auth.Resource) ([]auth.Scope, error) {
@@ -276,7 +289,12 @@ func (s *RBACStore) SyncUser(ctx context.Context, externalUserID, name, email st
 	if err := tx.Commit(); err != nil {
 		return User{}, err
 	}
-	return s.GetUserByExternalID(ctx, externalUserID)
+	user, err := s.GetUserByExternalID(ctx, externalUserID)
+	if err != nil {
+		return User{}, err
+	}
+	s.cacheUserLabel(user.ExternalUserID, user.Name)
+	return user, nil
 }
 
 func (s *RBACStore) ListRoles(ctx context.Context, scopeType, scopeID string, pagination Pagination) (PaginatedResult[Role], error) {
@@ -350,8 +368,8 @@ func (s *RBACStore) CreateRole(ctx context.Context, input RoleInput) (Role, erro
 	orgID, projectID := roleOwnerColumns(input.ScopeType, input.ScopeID)
 	var role Role
 	err = tx.QueryRowContext(ctx, `
-insert into roles (id, code, name, description, scope_type, org_id, project_id, is_system, created_by)
-values ($1, $2, $3, $4, $5, nullif($6, '')::uuid, nullif($7, '')::uuid, false, $8)
+insert into roles (id, code, name, description, scope_type, org_id, project_id, is_system, created_by, updated_by)
+values ($1, $2, $3, $4, $5, nullif($6, '')::uuid, nullif($7, '')::uuid, false, $8, $8)
 returning id, code, name, description, scope_type, coalesce(org_id::text, ''), coalesce(project_id::text, ''), is_system
 `, id, input.Code, input.Name, input.Description, input.ScopeType, orgID, projectID, input.Actor).Scan(
 		&role.ID, &role.Code, &role.Name, &role.Description, &role.ScopeType, &role.OrgID, &role.ProjectID, &role.IsSystem,
@@ -391,10 +409,10 @@ func (s *RBACStore) UpdateRole(ctx context.Context, input RoleInput) (Role, erro
 	var role Role
 	err = tx.QueryRowContext(ctx, `
 update roles
-set code = $2, name = $3, description = $4, scope_type = $5, org_id = nullif($6, '')::uuid, project_id = nullif($7, '')::uuid, updated_at = now()
+set code = $2, name = $3, description = $4, scope_type = $5, org_id = nullif($6, '')::uuid, project_id = nullif($7, '')::uuid, updated_by = $8, updated_at = now()
 where id = $1 and is_deleted = false
 returning id, code, name, description, scope_type, coalesce(org_id::text, ''), coalesce(project_id::text, ''), is_system
-`, input.ID, input.Code, input.Name, input.Description, input.ScopeType, orgID, projectID).Scan(
+`, input.ID, input.Code, input.Name, input.Description, input.ScopeType, orgID, projectID, input.Actor).Scan(
 		&role.ID, &role.Code, &role.Name, &role.Description, &role.ScopeType, &role.OrgID, &role.ProjectID, &role.IsSystem,
 	)
 	if err != nil {
@@ -418,6 +436,7 @@ func (s *RBACStore) DeleteRole(ctx context.Context, id, actor string) error {
 			"is_deleted": true,
 			"deleted_at": time.Now(),
 			"deleted_by": actor,
+			"updated_by": actor,
 			"updated_at": time.Now(),
 		})
 	if result.Error != nil {
@@ -456,6 +475,7 @@ func (s *RBACStore) GrantRole(ctx context.Context, input GrantInput) (RoleBindin
 		if err := tx.Commit(); err != nil {
 			return RoleBinding{}, err
 		}
+		s.cacheUserLabel(input.ExternalUserID, input.Name)
 		return s.GetRoleBinding(ctx, existingID)
 	}
 
@@ -476,6 +496,7 @@ values ($1, $2, $3, $4, nullif($5, '')::uuid, $6, $7)
 	if err := tx.Commit(); err != nil {
 		return RoleBinding{}, err
 	}
+	s.cacheUserLabel(input.ExternalUserID, input.Name)
 	return s.GetRoleBinding(ctx, id)
 }
 
@@ -894,6 +915,13 @@ func normalizeResourceType(value string) string {
 	}
 }
 
+func (s *RBACStore) cacheUserLabel(externalUserID, name string) {
+	if s == nil {
+		return
+	}
+	s.userCache.Set(externalUserID, name)
+}
+
 func normalizeScopeType(value string) string {
 	switch strings.TrimSpace(value) {
 	case "global", "organization", "project", "environment", "folder", "secret":
@@ -947,8 +975,8 @@ where code = $1 and is_system = true and is_deleted = false
 			return "", err
 		}
 		_, err = tx.ExecContext(ctx, `
-insert into roles (id, code, name, description, scope_type, is_system, created_by)
-values ($1, $2, $3, $4, $5, true, 'system')
+insert into roles (id, code, name, description, scope_type, is_system, created_by, updated_by)
+values ($1, $2, $3, $4, $5, true, 'system', 'system')
 `, id, role.Code, role.Name, role.Description, role.ScopeType)
 		return id, err
 	}
@@ -957,7 +985,7 @@ values ($1, $2, $3, $4, $5, true, 'system')
 	}
 	_, err = tx.ExecContext(ctx, `
 update roles
-set name = $2, description = $3, scope_type = $4, is_system = true, updated_at = now()
+set name = $2, description = $3, scope_type = $4, is_system = true, updated_by = 'system', updated_at = now()
 where id = $1
 `, id, role.Name, role.Description, role.ScopeType)
 	return id, err

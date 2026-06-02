@@ -473,3 +473,200 @@ func buildSecretPath(orgCode, projectCode, envCode, folderPath, key string) stri
 - [ ] env 软删时 binding 处置选 (a) 同事务软删 vs (b) 保留 + 查询过滤 vs (c) 同事务软删 + 审计
 - [ ] 是否需要在 `secrets` 上加 `last_accessed_at` / `access_count` 等访问统计字段（路径快查相关的可观测性）
 - [ ] RBAC 范围是否需要扩展到 `project:env:bind` / `project:env:read-bindings` 权限码（与现有 `rbac:*` 解耦）
+
+---
+
+## Org 共享 env 模型下的权限设计
+
+> 状态：v2 设计评审要点，需在 schema 改动前敲定。
+
+### 1. 核心论点：env 是"标签"，folder/secret 才是"数据"
+
+在 v2 模型里：
+
+```text
+env         → 只是个命名容器，自身不带数据
+folder      → 数据归属点，作用域 = (project, env)
+secret      → 数据，作用域 = folder
+```
+
+- **env 共享不共享数据**：把 env X 绑给 project A 和 B，A 和 B 在 X 下各自创建自己的 folder 树；A 看不到 B 的 folder，B 也看不到 A 的。
+- **数据访问的边界永远是 project**：secret/folder 的 RBAC scope 全部 project-scoped，不变。
+- **env 自身的增删/绑定是 org 级的管理动作**：env 是 org 的资产，需要新的 org-scoped 权限码。
+
+### 2. 与"per-project env"模型的权限对比
+
+| 维度 | Per-project env（A 方案） | Org 共享 env（B 方案） |
+| --- | --- | --- |
+| env 列表查询 | 必须按 project 过滤 | 可以按 org 过滤（看组织下所有 env 标签） |
+| env 创建权限 | `project:env:manage`（project 维度） | `env:manage`（org 维度） |
+| 跨项目 env 复用 | 不可 | 不可（因为不能跨项目复用 env 的内容）但 env 标签可以复用 |
+| secret/folder 权限 scope | project（不变） | project（不变） |
+| 数据泄漏面 | 局限于 project | 局限于 project（folder 是 (project, env) 私有的） |
+| 新增权限码 | 0 | 3（`env:read` / `env:manage` / `env:bind`） |
+
+**结论：权限复杂度上 B 略高（多 3 个权限码），但数据隔离面与 A 完全相同。**
+
+### 3. 新增权限码
+
+| 权限码 | scope | 用途 | 默认授予角色建议 |
+| --- | --- | --- | --- |
+| `env:read` | organization | 列出/查看 org 下的 env、查看 env 详情 | org admin、project admin |
+| `env:manage` | organization | 在 org 下创建/更新/删除 env | org admin |
+| `env:bind` | organization | 绑定/解绑 env 与 project | org admin |
+
+> 说明：这里把 `env:bind` 放在 org 维度，而不是 project 维度。理由是 env 是 org 共享资产，谁有权把 env "开放"给哪些 project 应该由 org 决定，而不是由 project 自行决定。
+
+### 4. 关键 API 的权限检查流程
+
+#### 4.1 `POST /api/v1/env/list`（列 org 下 env）
+
+```text
+检查: user 在 org 范围内有 env:read
+查询: select * from environments where org_id = $orgId and is_deleted = false
+返回: env 列表（不包含 project_environments 绑定关系）
+```
+
+#### 4.2 `POST /api/v1/project/env/list`（列项目可绑的 env）
+
+```text
+检查: user 在 project 上有 project:read
+      （同时 user 在 org 上有 env:read，用于过滤 org 下的 env）
+查询: select e.*, pe.id as binding_id
+      from environments e
+      left join project_environments pe
+        on pe.environment_id = e.id and pe.project_id = $projectId and pe.is_deleted = false
+      where e.org_id = $orgId and e.is_deleted = false
+返回: 每个 env + 是否已绑
+```
+
+#### 4.3 `POST /api/v1/project/env/attach`
+
+```text
+检查: user 在 org 上有 env:bind
+校验: 所有 environmentId 都属于该 org（防止跨 org 绑定）
+写入: insert into project_environments ... on conflict do nothing
+审计: action = "bind_env", resource_id = project_id, metadata = environment_ids
+```
+
+#### 4.4 `POST /api/v1/project/env/detach`
+
+```text
+检查: user 在 org 上有 env:bind
+校验: binding 存在
+软删: update project_environments set is_deleted = true, deleted_at = now() where id = $bindingId
+审计: action = "unbind_env", resource_id = project_id
+```
+
+#### 4.5 `POST /api/v1/folder/list`
+
+```text
+检查: user 在 project 上有 folder:read
+查询: select * from folders where project_id = $projectId and environment_id = $envId and is_deleted = false
+      （自动过滤掉其他 project 的 folder，即使 env 是共享的）
+```
+
+#### 4.6 `POST /api/v1/secret/info-by-path`
+
+```text
+1. 解析 path → (org_code, project_code, env_code, folder_path, key)
+2. 解析出 project_id
+3. 检查: user 在 project_id 上有 secret:read
+4. 查询: select * from secrets where path = $path and is_deleted = false
+5. 二次校验: 找到的 secret.folder_id 必须属于 project_id
+```
+
+### 5. 常见疑问与解答
+
+#### Q1. 共享 env 不会泄漏其他项目的 secret 吗？
+
+**答：不会**。folder 是 (project, env) 私有的，query 都带 `project_id` 过滤。即使 env 是共享的，A 用户查 A 项目的 secret 时只返回 A 项目 folder 下的数据。
+
+反例（必须避免的写法）：
+
+```sql
+-- 错误：只按 env_id 过滤，不带 project_id
+select s.* from secrets s
+join folders f on f.id = s.folder_id
+where f.environment_id = $envId
+```
+
+正确写法（必须带 project_id）：
+
+```sql
+-- 正确：始终带 project_id
+select s.* from secrets s
+join folders f on f.id = s.folder_id
+where f.environment_id = $envId and f.project_id = $projectId
+```
+
+所有 secret/folder 查询都需要 code review 时强制验证带 `project_id` 过滤。
+
+#### Q2. 列 org 下 env 时，会不会把不该看的 env 名字泄漏出去？
+
+**答**：env 名字通常是公开的（"dev"/"test"/"prod"）。如果某些 env 名字本身就是敏感信息（如 "internal-payroll-system"），通过限制 `env:read` 的授权范围来控制，而不是限制 API 行为。
+
+#### Q3. env:bind 权限下放给 project 维度可以吗？
+
+**答：不建议**。`env:bind` 放在 org 维度才能保证 env 作为共享资产的"开放"决策不被任一项目私自篡改。如果放开到 project 维度，A 项目可以把敏感 env 绑给自己，绕过 org 的策略。
+
+#### Q4. 跨 project 共享同一份 secret 怎么办？
+
+**答**：v2 不支持，需要时让每个 project 在自己的 folder 下各写一份。如果将来需要"真正共享"语义，扩展方向：
+
+```sql
+alter table folders add column visibility text not null default 'private';
+-- visibility ∈ {private, shared}
+-- private: 仅 folders.project_id 可见
+-- shared: env 下所有 project 都可见（仍需要 env:bind 才能 bind）
+```
+
+但 v2 **不做**，先用"重复写"覆盖 90% 场景。
+
+#### Q5. 用户 A 在项目 P1，P1 绑了 env X。env X 也绑给了项目 P2（P1 没有访问权）。A 能看到 P2 在 X 下的 folder 吗？
+
+**答：看不到**。所有 folder/secret 查询强制带 `project_id` 过滤。A 的请求 context 只有 P1，查询走 `where project_id = P1`，自然拿不到 P2 的数据。
+
+#### Q6. 删除 env 时，绑定的 project_environments 怎么处置？
+
+**答**：同事务软删（§ 8.2 选项 a）。理由：避免查询时 join 过滤的复杂度；让 RBAC scope 看不到幽灵 binding。审计通过 `audit_records` 留痕。
+
+### 6. 受影响接口与权限映射表
+
+| 接口 | 检查权限 | scope |
+| --- | --- | --- |
+| `POST /api/v1/org/list` | `org:read` | global |
+| `POST /api/v1/org/create` | `org:manage` | global |
+| `POST /api/v1/project/list` | `project:read` | organization |
+| `POST /api/v1/project/create` | `project:manage` | organization |
+| `POST /api/v1/project/info` | `project:read` | project |
+| `POST /api/v1/project/update` | `project:manage` | project |
+| `POST /api/v1/project/delete` | `project:manage` | project |
+| `POST /api/v1/env/list` | `env:read` | organization |
+| `POST /api/v1/env/create` | `env:manage` | organization |
+| `POST /api/v1/env/info` | `env:read` | organization |
+| `POST /api/v1/env/update` | `env:manage` | organization |
+| `POST /api/v1/env/delete` | `env:manage` | organization |
+| `POST /api/v1/project/env/list` | `project:read` + `env:read` | project × organization |
+| `POST /api/v1/project/env/attach` | `env:bind` | organization |
+| `POST /api/v1/project/env/detach` | `env:bind` | organization |
+| `POST /api/v1/folder/list` | `folder:read` | project |
+| `POST /api/v1/folder/create` | `folder:manage` | project |
+| `POST /api/v1/folder/info` | `folder:read` | project |
+| `POST /api/v1/folder/update` | `folder:manage` | project |
+| `POST /api/v1/folder/delete` | `folder:manage` | project |
+| `POST /api/v1/secret/list` | `secret:read` | project |
+| `POST /api/v1/secret/search` | `secret:read` | project |
+| `POST /api/v1/secret/create` | `secret:manage` | project |
+| `POST /api/v1/secret/info` | `secret:read` | project |
+| `POST /api/v1/secret/reveal` | `secret:reveal` | project |
+| `POST /api/v1/secret/update` | `secret:manage` | project |
+| `POST /api/v1/secret/delete` | `secret:manage` | project |
+| `POST /api/v1/secret/info-by-path` | `secret:read`（解析 path 后） | project |
+
+### 7. 仍需拍板的点
+
+- [ ] `env:bind` 是否需要细分为 `env:bind:self`（只能 bind 涉及自己项目的 env）和 `env:bind:any`（能 bind 任意 project 的 env）—— 当前倾向只保留 `env:bind` 一个码
+- [ ] 跨 project 共享 folder 语义（§ 5.Q4）—— v2 不做，记入未来
+- [ ] env 名字本身是否敏感 —— 当前模型默认公开，由 `env:read` 授权范围控制可见性
+- [ ] 是否新增系统角色 `org:env:admin`（带 `env:manage` + `env:bind`）—— 当前可以让 org admin 直接持有这两个权限码

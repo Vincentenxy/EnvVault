@@ -9,23 +9,23 @@ import (
 	"envVault/internal/id"
 )
 
-func RequestIDMiddleware(headerName string) gin.HandlerFunc {
-	headerName = RequestIDHeader(headerName)
+func RequestIdMiddleware(headerName string) gin.HandlerFunc {
+	headerName = RequestIdHeader(headerName)
 
 	return func(c *gin.Context) {
-		requestID := c.GetHeader(headerName)
-		if requestID == "" {
+		requestId := c.GetHeader(headerName)
+		if requestId == "" {
 			generated, err := id.NewUUID()
 			if err != nil {
 				generated = time.Now().Format("20060102150405.000000000")
 			}
-			requestID = generated
+			requestId = generated
 		}
 
-		c.Request.Header.Set(headerName, requestID)
-		c.Header(headerName, requestID)
-		c.Set(string(requestIDContextKey), requestID)
-		c.Request = c.Request.WithContext(WithRequestID(c.Request.Context(), requestID))
+		c.Request.Header.Set(headerName, requestId)
+		c.Header(headerName, requestId)
+		c.Set(string(requestIdContextKey), requestId)
+		c.Request = c.Request.WithContext(WithRequestId(c.Request.Context(), requestId))
 		c.Next()
 	}
 }

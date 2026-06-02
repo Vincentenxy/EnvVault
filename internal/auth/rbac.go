@@ -17,12 +17,12 @@ type UserInfo struct {
 
 type Resource struct {
 	Type string
-	ID   string
+	Id   string
 }
 
 type Scope struct {
 	Type string
-	ID   string
+	Id   string
 }
 
 type Authorizer interface {
@@ -31,7 +31,7 @@ type Authorizer interface {
 
 type PermissionStore interface {
 	ResourceScopes(ctx context.Context, resource Resource) ([]Scope, error)
-	UserPermissions(ctx context.Context, externalUserID string, scopes []Scope) (map[string]struct{}, error)
+	UserPermissions(ctx context.Context, externalUserId string, scopes []Scope) (map[string]struct{}, error)
 }
 
 type RBACAuthorizer struct {

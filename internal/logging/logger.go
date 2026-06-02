@@ -9,11 +9,11 @@ import (
 	"time"
 )
 
-const defaultRequestIDHeader = "x-request-id"
+const defaultRequestIdHeader = "x-request-id"
 
 type contextKey string
 
-const requestIDContextKey contextKey = "envvault.request_id"
+const requestIdContextKey contextKey = "envvault.request_id"
 
 var std = log.New(os.Stdout, "", 0)
 
@@ -36,24 +36,24 @@ func F(key string, value any) Field {
 	return Field{Key: key, Value: value}
 }
 
-func WithRequestID(ctx context.Context, requestID string) context.Context {
-	return context.WithValue(ctx, requestIDContextKey, requestID)
+func WithRequestId(ctx context.Context, requestId string) context.Context {
+	return context.WithValue(ctx, requestIdContextKey, requestId)
 }
 
-func RequestIDFromContext(ctx context.Context) string {
+func RequestIdFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return "-"
 	}
-	requestID, ok := ctx.Value(requestIDContextKey).(string)
-	if !ok || requestID == "" {
+	requestId, ok := ctx.Value(requestIdContextKey).(string)
+	if !ok || requestId == "" {
 		return "-"
 	}
-	return requestID
+	return requestId
 }
 
-func RequestIDHeader(header string) string {
+func RequestIdHeader(header string) string {
 	if strings.TrimSpace(header) == "" {
-		return defaultRequestIDHeader
+		return defaultRequestIdHeader
 	}
 	return header
 }
@@ -71,7 +71,7 @@ func Error(ctx context.Context, method string, message string, fields ...Field) 
 }
 
 func write(ctx context.Context, level string, color string, method string, message string, fields ...Field) {
-	requestID := sanitize(RequestIDFromContext(ctx))
+	requestId := sanitize(RequestIdFromContext(ctx))
 	timestamp := time.Now().Format("2006-01-02 15:04:05.000000000")
 
 	var fieldsStr string
@@ -86,7 +86,7 @@ func write(ctx context.Context, level string, color string, method string, messa
 	logLine := fmt.Sprintf("%s %s %s  request_id=%s  method=%s  %s  msg=%s %s",
 		colorize(timestamp, colorGray),
 		colorize(level, color),
-		colorize(requestID, colorCyan),
+		colorize(requestId, colorCyan),
 		colorize(method, colorCyan),
 		fieldsStr,
 		colorize("msg", colorGray),

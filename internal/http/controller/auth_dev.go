@@ -15,7 +15,7 @@ import (
 )
 
 type devJWTRequest struct {
-	UserID           string `json:"userId"`
+	UserId           string `json:"userId"`
 	Name             string `json:"name"`
 	ExpiresInSeconds int64  `json:"expiresInSeconds"`
 }
@@ -28,7 +28,7 @@ func (ctrl *Controller) CreateDevJWT(c *gin.Context) {
 	}
 
 	req := devJWTRequest{
-		UserID:           ctrl.config.Auth.DevUserID,
+		UserId:           ctrl.config.Auth.DevUserId,
 		Name:             ctrl.config.Auth.DevUserName,
 		ExpiresInSeconds: 3600,
 	}
@@ -39,7 +39,7 @@ func (ctrl *Controller) CreateDevJWT(c *gin.Context) {
 			return
 		}
 	}
-	if req.UserID == "" {
+	if req.UserId == "" {
 		logging.Warn(c.Request.Context(), "CreateDevJWT", "userId is required but empty")
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "userId is required")
 		return
@@ -54,10 +54,10 @@ func (ctrl *Controller) CreateDevJWT(c *gin.Context) {
 	now := time.Now()
 	expiresAt := now.Add(time.Duration(req.ExpiresInSeconds) * time.Second)
 	token, err := auth.SignToken(ctrl.config.Auth.DevPrivateKey, auth.Claims{
-		UserId: req.UserID,
+		UserId: req.UserId,
 		Name:   req.Name,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   req.UserID,
+			Subject:   req.UserId,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 		},

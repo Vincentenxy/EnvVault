@@ -13,11 +13,11 @@ func TestCoreSecretRevealRouteIsRegistered(t *testing.T) {
 	router := NewRouter(Dependencies{
 		Config: config.Config{
 			HTTP: config.HTTPConfig{
-				RequestIDHeader: "x-request-id",
+				RequestIdHeader: "x-request-id",
 			},
 			Auth: config.AuthConfig{
 				Enabled:     false,
-				DevUserID:   "dev-user",
+				DevUserId:   "dev-user",
 				DevUserName: "Dev User",
 			},
 		},
@@ -38,12 +38,12 @@ func TestCoreRoutesAreRegistered(t *testing.T) {
 	router := NewRouter(Dependencies{
 		Config: config.Config{
 			HTTP: config.HTTPConfig{
-				RequestIDHeader: "x-request-id",
+				RequestIdHeader: "x-request-id",
 			},
 			Auth: config.AuthConfig{
 				Enabled:         false,
 				DevTokenEnabled: true,
-				DevUserID:       "dev-user",
+				DevUserId:       "dev-user",
 				DevUserName:     "Dev User",
 			},
 		},

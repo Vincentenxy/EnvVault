@@ -79,7 +79,7 @@ func (c *Cache) UpsertSecret(ctx context.Context, record postgres.SecretCacheRec
 	}
 
 	secret := record.Secret
-	key := c.secretKey(secret.ID)
+	key := c.secretKey(secret.Id)
 	oldPath, err := c.client.HGet(ctx, key, "path").Result()
 	if err != nil && err != goredis.Nil {
 		return err
@@ -90,14 +90,14 @@ func (c *Cache) UpsertSecret(ctx context.Context, record postgres.SecretCacheRec
 		}
 	}
 	values := map[string]any{
-		"id":               secret.ID,
-		"org_id":           secret.OrgID,
+		"id":               secret.Id,
+		"org_id":           secret.OrgId,
 		"org_code":         secret.OrgCode,
-		"project_id":       secret.ProjectID,
+		"project_id":       secret.ProjectId,
 		"project_code":     secret.ProjectCode,
-		"environment_id":   secret.EnvironmentID,
+		"environment_id":   secret.EnvironmentId,
 		"environment_code": secret.EnvironmentCode,
-		"folder_id":        secret.FolderID,
+		"folder_id":        secret.FolderId,
 		"folder_code":      secret.FolderCode,
 		"key":              secret.Key,
 		"path":             secret.Path,
@@ -115,11 +115,11 @@ func (c *Cache) UpsertSecret(ctx context.Context, record postgres.SecretCacheRec
 		return err
 	}
 	if secret.Path != "" {
-		if err := c.client.Set(ctx, c.pathKey(secret.Path), secret.ID, 0).Err(); err != nil {
+		if err := c.client.Set(ctx, c.pathKey(secret.Path), secret.Id, 0).Err(); err != nil {
 			return err
 		}
 	}
-	return c.client.SAdd(ctx, c.idsKey(), secret.ID).Err()
+	return c.client.SAdd(ctx, c.idsKey(), secret.Id).Err()
 }
 
 func (c *Cache) DeleteSecret(ctx context.Context, id string) error {
@@ -162,23 +162,23 @@ func (c *Cache) SearchSecrets(ctx context.Context, filter postgres.ListFilter) (
 			continue
 		}
 		items = append(items, postgres.Secret{
-			ID:              values["id"],
-			OrgID:           values["org_id"],
+			Id:              values["id"],
+			OrgId:           values["org_id"],
 			OrgCode:         values["org_code"],
-			ProjectID:       values["project_id"],
+			ProjectId:       values["project_id"],
 			ProjectCode:     values["project_code"],
-			EnvironmentID:   values["environment_id"],
+			EnvironmentId:   values["environment_id"],
 			EnvironmentCode: values["environment_code"],
-			FolderID:        values["folder_id"],
+			FolderId:        values["folder_id"],
 			FolderCode:      values["folder_code"],
 			Key:             values["key"],
 			Path:            values["path"],
 			Comment:         values["comment"],
 			Version:         atoi(values["version"]),
 			CreatedBy:       values["created_by"],
-			CreatedByLabel:  labelOrID(values["created_by_label"], values["created_by"]),
+			CreatedByLabel:  labelOrId(values["created_by_label"], values["created_by"]),
 			UpdatedBy:       values["updated_by"],
-			UpdatedByLabel:  labelOrID(values["updated_by_label"], values["updated_by"]),
+			UpdatedByLabel:  labelOrId(values["updated_by_label"], values["updated_by"]),
 			CreatedAt:       parseTime(values["created_at"]),
 			UpdatedAt:       parseTime(values["updated_at"]),
 		})
@@ -218,16 +218,16 @@ func (c *Cache) deletePathKeys(ctx context.Context) error {
 }
 
 func matches(values map[string]string, filter postgres.ListFilter, keyword string) bool {
-	if filter.OrgID != "" && values["org_id"] != filter.OrgID {
+	if filter.OrgId != "" && values["org_id"] != filter.OrgId {
 		return false
 	}
-	if filter.ProjectID != "" && values["project_id"] != filter.ProjectID {
+	if filter.ProjectId != "" && values["project_id"] != filter.ProjectId {
 		return false
 	}
-	if filter.EnvironmentID != "" && values["environment_id"] != filter.EnvironmentID {
+	if filter.EnvironmentId != "" && values["environment_id"] != filter.EnvironmentId {
 		return false
 	}
-	if filter.FolderID != "" && values["folder_id"] != filter.FolderID {
+	if filter.FolderId != "" && values["folder_id"] != filter.FolderId {
 		return false
 	}
 	if keyword != "" && !strings.Contains(strings.ToLower(values["key"]), keyword) && !strings.Contains(strings.ToLower(values["path"]), keyword) {

@@ -1,7 +1,7 @@
 package domain
 
-type OrganizationID string
-type ProjectID string
+type OrganizationId string
+type ProjectId string
 type EnvironmentName string
 type FolderName string
 type SecretKey string
@@ -14,8 +14,8 @@ const (
 )
 
 type SecretScope struct {
-	OrganizationID OrganizationID
-	ProjectID      ProjectID
+	OrganizationId OrganizationId
+	ProjectId      ProjectId
 	Environment    EnvironmentName
 	Folder         FolderName
 }

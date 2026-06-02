@@ -9,10 +9,13 @@ EnvVault 是一个类似 Infisical 的轻量级、支持私有化部署的密钥
 ```text
 organization
   project
-    environment
-      folder
-        secret key:value
+    └─ 通过 project_environments 关联 0..n 个 environment
+  environment
+    └─ folder
+        └─ secret key:value
 ```
+
+环境属于组织，项目通过 `project_environments` 关联表按需关联到具体环境。
 
 默认环境：
 
@@ -144,7 +147,9 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 ### Project
 
-项目属于一个组织。创建项目时自动创建默认环境和默认 Folder。
+项目属于一个组织。创建项目时不再自动创建环境，而是关联组织下默认的 `dev`、`test`、`sim`、`prod` 四个环境。
+
+如果创建请求携带 `environmentIds` 字段，则按传入的环境 ID 列表建立关联；否则按 `code in ('dev','test','sim','prod')` 查找组织下同名环境进行关联，未找到的环境会被忽略。
 
 核心字段：
 
@@ -163,12 +168,14 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 ### Environment
 
-环境属于一个项目。默认环境为 `dev`、`test`、`sim`、`prod`，同时支持自定义环境。
+环境属于一个组织，组织下所有项目共享同一份环境列表。默认环境为 `dev`、`test`、`sim`、`prod`，同时支持自定义环境（如 `poc`）。
+
+项目通过 `project_environments` 关联表按需关联到具体环境，关联表结构见下文。
 
 核心字段：
 
 - `id`
-- `project_id`
+- `org_id`
 - `code`
 - `name`
 - `comment`
@@ -177,8 +184,10 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 约束：
 
-- 同一个项目下未删除环境的 `code` 唯一。
+- 同一个组织下未删除环境的 `code` 唯一。
 - `name` 是展示名称，不参与唯一约束。
+- 创建环境时自动在该环境上创建默认 Folder：`globals` 和 `groups-secrets`。
+- 创建环境时自动把新环境关联到该组织下所有已有项目，确保新环境对存量项目立即可见。
 
 ### Folder
 
@@ -449,7 +458,7 @@ create unique index if not exists projects_org_code_active_uidx
 ```sql
 create table if not exists environments (
     id uuid primary key,
-    project_id uuid not null references projects(id),
+    org_id uuid not null references organizations(id),
     code text not null,
     name text not null,
     comment text not null default '',
@@ -459,13 +468,34 @@ create table if not exists environments (
     created_by text not null default '',
     updated_by text not null default '',
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    updated_at timestamptz not null default now(),
+    constraint environments_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
 
-create unique index if not exists environments_project_code_active_uidx
-    on environments (project_id, code)
+create unique index if not exists environments_org_code_active_uidx
+    on environments (org_id, code)
     where is_deleted = false;
 ```
+
+### project_environments
+
+```sql
+create table if not exists project_environments (
+    id uuid primary key,
+    project_id uuid not null references projects(id),
+    environment_id uuid not null references environments(id),
+    created_at timestamptz not null default now(),
+    constraint project_environments_unique unique (project_id, environment_id)
+);
+```
+
+说明：
+
+- 关联表表达"项目使用了哪些环境"。
+- 一对多：同一个项目可关联多个环境，同一个环境可被多个项目关联。
+- 创建项目时按 `environmentIds` 写入；为空时按 `code in ('dev','test','sim','prod')` 自动关联。
+- 创建环境时自动把新环境反向关联到组织下所有已有项目。
+- 查询"项目可见的环境"必须 join 该表；删除关联记录会切断项目对环境的可见性，但不影响环境本身的存续。
 
 ### folders
 
@@ -785,10 +815,10 @@ security:
 - JWT 中间件已实现认证。
 - JWT 认证可通过配置 `auth.enabled` 开关控制，默认开启。
 - 当 `auth.enabled = false` 时，服务端跳过 JWT 校验，并使用 `auth.dev_user_id`、`auth.dev_user_name` 注入开发用户，便于本地测试。
-- `Authorizer` 接口已预留。
-- 默认实现为 `AllowAllAuthorizer`，即全部放行。
+- `Authorizer` 接口已实现，默认装载为 `RBACAuthorizer`（在 `internal/app/app.go` 中通过 `auth.NewRBACAuthorizer(rbacStore)` 注入），不再使用 `AllowAllAuthorizer`。
+- `AllowAllAuthorizer` 仍保留为测试与本地放行的可选实现。
 
-后续 RBAC 以 [rbac_degisn.md](rbac_degisn.md) 为准。
+完整 RBAC 设计、实现细节和权限矩阵以 [rbac_degisn.md](rbac_degisn.md) 为准。
 
 关键原则：
 
@@ -1025,11 +1055,16 @@ x-request-id
   "parentId": "org uuid",
   "code": "project-a",
   "name": "项目 A",
-  "comment": "项目说明"
+  "comment": "项目说明",
+  "environmentIds": ["env-uuid-1", "env-uuid-2"]
 }
 ```
 
-创建项目成功后自动创建默认环境和默认 Folder。
+`environmentIds` 为可选字段：
+
+- 不传或传空数组：按 `code in ('dev','test','sim','prod')` 查找组织下同名环境并自动关联。
+- 传入具体 ID 列表：按入参 ID 建立 `project_environments` 关联，未在组织下找到的环境会被忽略。
+- 当前实现不支持在项目创建后再修改环境关联，需要追加专门的关联接口。
 
 ### 环境接口
 
@@ -1045,7 +1080,7 @@ x-request-id
 
 ```json
 {
-  "projectId": "uuid",
+  "orgId": "uuid",
   "pageNum": 1,
   "pageSize": 20
 }
@@ -1055,14 +1090,14 @@ x-request-id
 
 ```json
 {
-  "parentId": "project uuid",
+  "parentId": "org uuid",
   "code": "poc",
   "name": "poc",
   "comment": "自定义环境"
 }
 ```
 
-创建环境成功后自动创建默认 Folder。
+创建环境成功后自动在该环境下创建默认 Folder `globals` 和 `groups-secrets`，并把新环境关联到组织下所有已有项目。
 
 ### Folder 接口
 
@@ -1272,6 +1307,7 @@ curl http://localhost:8080/api/v1/readyz
 - 当前 controller 仍直接调用 repository，后续应将加密、授权、审计、缓存同步收敛到 service 层。
 - 当前删除上级资源时未定义是否级联删除子资源，需要补业务规则。
 - 当前 `audit_records` 只保存基础字段，后续建议补充 request id、metadata 和 diff。
-- 当前 `secret_versions` 尚未实现。
-- 当前 RBAC 尚未正式启用，仍是 `AllowAllAuthorizer`。
+- 当前 `secret_versions` 尚未实现，主表只保留最新 version 字段，缺少历史回滚能力。
+- 当前缺少项目级别的环境关联调整接口：项目创建后再修改 `project_environments` 关联记录的 HTTP 接口尚未暴露。
+- 当前 `project_environments` 表只声明了 `unique` 约束，没有声明式 `references` 外键，与其他父子表的风格不一致，建议补齐。
 - 当前 value 搜索尚未实现，详见 [search.md](search.md)。

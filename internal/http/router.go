@@ -29,7 +29,7 @@ type Dependencies struct {
 func NewRouter(deps Dependencies) *gin.Engine {
 	router := gin.New()
 	router.Use(
-		logging.RequestIDMiddleware(deps.Config.HTTP.RequestIDHeader),
+		logging.RequestIdMiddleware(deps.Config.HTTP.RequestIdHeader),
 		logging.AccessLogMiddleware(),
 		logging.RecoveryMiddleware(),
 	)
@@ -72,7 +72,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 					}))
 				} else {
 					protected.Use(auth.StaticUserMiddleware(auth.UserInfo{
-						UserId: deps.Config.Auth.DevUserID,
+						UserId: deps.Config.Auth.DevUserId,
 						Name:   deps.Config.Auth.DevUserName,
 					}))
 				}

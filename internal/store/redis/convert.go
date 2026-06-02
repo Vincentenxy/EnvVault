@@ -15,7 +15,7 @@ func atoi(value string) int {
 	return parsed
 }
 
-func labelOrID(label, id string) string {
+func labelOrId(label, id string) string {
 	if label != "" {
 		return label
 	}

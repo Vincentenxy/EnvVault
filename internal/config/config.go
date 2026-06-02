@@ -23,7 +23,7 @@ type Config struct {
 
 type HTTPConfig struct {
 	Addr            string `mapstructure:"addr"`
-	RequestIDHeader string `mapstructure:"request_id_header"`
+	RequestIdHeader string `mapstructure:"request_id_header"`
 }
 
 type AuthConfig struct {
@@ -31,7 +31,7 @@ type AuthConfig struct {
 	PublicKey       string `mapstructure:"public_key"`
 	DevTokenEnabled bool   `mapstructure:"dev_token_enabled"`
 	DevPrivateKey   string `mapstructure:"dev_private_key"`
-	DevUserID       string `mapstructure:"dev_user_id"`
+	DevUserId       string `mapstructure:"dev_user_id"`
 	DevUserName     string `mapstructure:"dev_user_name"`
 }
 
@@ -112,7 +112,7 @@ func (c Config) Validate() error {
 	if c.HTTP.Addr == "" {
 		return fmt.Errorf("http.addr is required")
 	}
-	if c.HTTP.RequestIDHeader == "" {
+	if c.HTTP.RequestIdHeader == "" {
 		return fmt.Errorf("http.request_id_header is required")
 	}
 	if c.Database.Host == "" {

@@ -31,15 +31,15 @@ from users
 
 	labels := make(map[string]string)
 	for rows.Next() {
-		var externalUserID, name string
-		if err := rows.Scan(&externalUserID, &name); err != nil {
+		var externalUserId, name string
+		if err := rows.Scan(&externalUserId, &name); err != nil {
 			return err
 		}
-		externalUserID = strings.TrimSpace(externalUserID)
-		if externalUserID == "" {
+		externalUserId = strings.TrimSpace(externalUserId)
+		if externalUserId == "" {
 			continue
 		}
-		labels[externalUserID] = userLabel(externalUserID, name)
+		labels[externalUserId] = userLabel(externalUserId, name)
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -51,40 +51,40 @@ from users
 	return nil
 }
 
-func (c *UserCache) Set(externalUserID, name string) {
+func (c *UserCache) Set(externalUserId, name string) {
 	if c == nil {
 		return
 	}
-	externalUserID = strings.TrimSpace(externalUserID)
-	if externalUserID == "" {
+	externalUserId = strings.TrimSpace(externalUserId)
+	if externalUserId == "" {
 		return
 	}
 	c.mu.Lock()
-	c.labels[externalUserID] = userLabel(externalUserID, name)
+	c.labels[externalUserId] = userLabel(externalUserId, name)
 	c.mu.Unlock()
 }
 
-func (c *UserCache) Label(externalUserID string) string {
-	externalUserID = strings.TrimSpace(externalUserID)
-	if externalUserID == "" {
+func (c *UserCache) Label(externalUserId string) string {
+	externalUserId = strings.TrimSpace(externalUserId)
+	if externalUserId == "" {
 		return ""
 	}
 	if c == nil {
-		return externalUserID
+		return externalUserId
 	}
 	c.mu.RLock()
-	label, ok := c.labels[externalUserID]
+	label, ok := c.labels[externalUserId]
 	c.mu.RUnlock()
 	if ok && strings.TrimSpace(label) != "" {
 		return label
 	}
-	return externalUserID
+	return externalUserId
 }
 
-func userLabel(externalUserID, name string) string {
+func userLabel(externalUserId, name string) string {
 	name = strings.TrimSpace(name)
 	if name != "" {
 		return name
 	}
-	return externalUserID
+	return externalUserId
 }

@@ -63,8 +63,8 @@ func TestLoadFromPathAllowsAuthDisabled(t *testing.T) {
 	if cfg.Auth.Enabled {
 		t.Fatal("Auth.Enabled = true, want false")
 	}
-	if cfg.Auth.DevUserID != "local-user" {
-		t.Fatalf("Auth.DevUserID = %q, want local-user", cfg.Auth.DevUserID)
+	if cfg.Auth.DevUserId != "local-user" {
+		t.Fatalf("Auth.DevUserId = %q, want local-user", cfg.Auth.DevUserId)
 	}
 }
 

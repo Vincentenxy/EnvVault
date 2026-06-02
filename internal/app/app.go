@@ -44,8 +44,8 @@ func Run() error {
 	if err := userCache.Load(ctx, db); err != nil {
 		return err
 	}
-	if adminUserID := os.Getenv("ENVVAULT_BOOTSTRAP_ADMIN_USER_ID"); adminUserID != "" {
-		if err := rbacStore.EnsureBootstrapAdmin(ctx, adminUserID, os.Getenv("ENVVAULT_BOOTSTRAP_ADMIN_NAME")); err != nil {
+	if adminUserId := os.Getenv("ENVVAULT_BOOTSTRAP_ADMIN_USER_ID"); adminUserId != "" {
+		if err := rbacStore.EnsureBootstrapAdmin(ctx, adminUserId, os.Getenv("ENVVAULT_BOOTSTRAP_ADMIN_NAME")); err != nil {
 			return err
 		}
 	}

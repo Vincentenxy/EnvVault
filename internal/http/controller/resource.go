@@ -15,9 +15,26 @@ import (
 	"envVault/internal/store/postgres"
 )
 
+type Entity = postgres.Entity
+
 type createEntityRequest struct {
+	ParentID       string   `json:"parentId,omitempty"`
+	Code           string   `json:"code"`
+	Name           string   `json:"name"`
+	Comment        string   `json:"comment"`
+	EnvironmentIDs []string `json:"environmentIds,omitempty"`
+}
+
+type idOrCodeRequest struct {
 	ParentID string `json:"parentId,omitempty"`
-	Code     string `json:"code"`
+	ID       string `json:"id,omitempty"`
+	Code     string `json:"code,omitempty"`
+}
+
+type updateByIdOrCodeRequest struct {
+	ParentID string `json:"parentId,omitempty"`
+	ID       string `json:"id,omitempty"`
+	Code     string `json:"code,omitempty"`
 	Name     string `json:"name"`
 	Comment  string `json:"comment"`
 }
@@ -93,30 +110,71 @@ func (ctrl *Controller) ListOrganizations(c *gin.Context) {
 }
 
 func (ctrl *Controller) GetOrganization(c *gin.Context) {
-	var req idRequest
+	var req idOrCodeRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "GetOrganization", logging.F("id", req.ID))
-	item, err := ctrl.store.GetOrganization(c.Request.Context(), req.ID)
+	if !validateIdOrCode(c, req, "organization") {
+		return
+	}
+	var item Entity
+	var err error
+	if req.Code != "" {
+		ctrl.log(c, "GetOrganization", logging.F("code", req.Code))
+		item, err = ctrl.store.GetOrganizationByCode(c.Request.Context(), req.Code)
+	} else {
+		ctrl.log(c, "GetOrganization", logging.F("id", req.ID))
+		item, err = ctrl.store.GetOrganization(c.Request.Context(), req.ID)
+	}
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) UpdateOrganization(c *gin.Context) {
-	var req updateEntityRequest
+	var req updateByIdOrCodeRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "UpdateOrganization", logging.F("id", req.ID), logging.F("name", req.Name))
-	item, err := ctrl.store.UpdateOrganization(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
+	if !validateUpdateIdOrCode(c, req, "organization") {
+		return
+	}
+	var item Entity
+	var err error
+	if req.Code != "" {
+		ctrl.log(c, "UpdateOrganization", logging.F("code", req.Code), logging.F("name", req.Name))
+		org, getErr := ctrl.store.GetOrganizationByCode(c.Request.Context(), req.Code)
+		if getErr != nil {
+			ctrl.write(c, nil, getErr)
+			return
+		}
+		item, err = ctrl.store.UpdateOrganization(c.Request.Context(), org.ID, req.Name, req.Comment, ctrl.actor(c))
+	} else {
+		ctrl.log(c, "UpdateOrganization", logging.F("id", req.ID), logging.F("name", req.Name))
+		item, err = ctrl.store.UpdateOrganization(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
+	}
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) DeleteOrganization(c *gin.Context) {
+	var req idOrCodeRequest
+	if !ctrl.bind(c, &req) {
+		return
+	}
+	if !validateIdOrCode(c, req, "organization") {
+		return
+	}
 	ctrl.log(c, "DeleteOrganization")
-	ctrl.delete(c, func(req idRequest) error {
-		return ctrl.store.DeleteOrganization(c.Request.Context(), req.ID, ctrl.actor(c))
-	})
+	if req.Code != "" {
+		org, err := ctrl.store.GetOrganizationByCode(c.Request.Context(), req.Code)
+		if err != nil {
+			ctrl.write(c, nil, err)
+			return
+		}
+		err = ctrl.store.DeleteOrganization(c.Request.Context(), org.ID, ctrl.actor(c))
+		ctrl.write(c, gin.H{"deleted": true}, err)
+	} else {
+		err := ctrl.store.DeleteOrganization(c.Request.Context(), req.ID, ctrl.actor(c))
+		ctrl.write(c, gin.H{"deleted": true}, err)
+	}
 }
 
 func (ctrl *Controller) CreateProject(c *gin.Context) {
@@ -128,13 +186,16 @@ func (ctrl *Controller) CreateProject(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "CreateProject", logging.F("org_id", req.ParentID), logging.F("code", req.Code), logging.F("name", req.Name))
-	item, err := ctrl.store.CreateProject(c.Request.Context(), req.ParentID, req.Code, req.Name, req.Comment, ctrl.actor(c))
+	item, err := ctrl.store.CreateProject(c.Request.Context(), req.ParentID, req.Code, req.Name, req.Comment, ctrl.actor(c), req.EnvironmentIDs)
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) ListProjects(c *gin.Context) {
 	var req listRequest
 	if !ctrl.bind(c, &req) {
+		return
+	}
+	if !validateListProjects(c, req) {
 		return
 	}
 	ctrl.log(c, "ListProjects", logging.F("org_id", req.OrgID))
@@ -144,30 +205,71 @@ func (ctrl *Controller) ListProjects(c *gin.Context) {
 }
 
 func (ctrl *Controller) GetProject(c *gin.Context) {
-	var req idRequest
+	var req idOrCodeRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "GetProject", logging.F("id", req.ID))
-	item, err := ctrl.store.GetProject(c.Request.Context(), req.ID)
+	if !validateIdOrCode(c, req, "project") {
+		return
+	}
+	var item Entity
+	var err error
+	if req.Code != "" {
+		ctrl.log(c, "GetProject", logging.F("org_id", req.ParentID), logging.F("code", req.Code))
+		item, err = ctrl.store.GetProjectByCode(c.Request.Context(), req.ParentID, req.Code)
+	} else {
+		ctrl.log(c, "GetProject", logging.F("id", req.ID))
+		item, err = ctrl.store.GetProject(c.Request.Context(), req.ID)
+	}
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) UpdateProject(c *gin.Context) {
-	var req updateEntityRequest
+	var req updateByIdOrCodeRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "UpdateProject", logging.F("id", req.ID), logging.F("name", req.Name))
-	item, err := ctrl.store.UpdateProject(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
+	if !validateUpdateIdOrCode(c, req, "project") {
+		return
+	}
+	var item Entity
+	var err error
+	if req.Code != "" {
+		ctrl.log(c, "UpdateProject", logging.F("org_id", req.ParentID), logging.F("code", req.Code), logging.F("name", req.Name))
+		proj, getErr := ctrl.store.GetProjectByCode(c.Request.Context(), req.ParentID, req.Code)
+		if getErr != nil {
+			ctrl.write(c, nil, getErr)
+			return
+		}
+		item, err = ctrl.store.UpdateProject(c.Request.Context(), proj.ID, req.Name, req.Comment, ctrl.actor(c))
+	} else {
+		ctrl.log(c, "UpdateProject", logging.F("id", req.ID), logging.F("name", req.Name))
+		item, err = ctrl.store.UpdateProject(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
+	}
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) DeleteProject(c *gin.Context) {
+	var req idOrCodeRequest
+	if !ctrl.bind(c, &req) {
+		return
+	}
+	if !validateIdOrCode(c, req, "project") {
+		return
+	}
 	ctrl.log(c, "DeleteProject")
-	ctrl.delete(c, func(req idRequest) error {
-		return ctrl.store.DeleteProject(c.Request.Context(), req.ID, ctrl.actor(c))
-	})
+	if req.Code != "" {
+		proj, err := ctrl.store.GetProjectByCode(c.Request.Context(), req.ParentID, req.Code)
+		if err != nil {
+			ctrl.write(c, nil, err)
+			return
+		}
+		err = ctrl.store.DeleteProject(c.Request.Context(), proj.ID, ctrl.actor(c))
+		ctrl.write(c, gin.H{"deleted": true}, err)
+	} else {
+		err := ctrl.store.DeleteProject(c.Request.Context(), req.ID, ctrl.actor(c))
+		ctrl.write(c, gin.H{"deleted": true}, err)
+	}
 }
 
 func (ctrl *Controller) CreateEnvironment(c *gin.Context) {
@@ -188,37 +290,81 @@ func (ctrl *Controller) ListEnvironments(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "ListEnvironments", logging.F("project_id", req.ProjectID))
+	if !validateListEnvironments(c, req) {
+		return
+	}
+	ctrl.log(c, "ListEnvironments", logging.F("org_id", req.OrgID))
 	pagination := paginationFromRequest(req.PageRequest)
-	result, err := ctrl.store.ListEnvironments(c.Request.Context(), req.ProjectID, pagination)
+	result, err := ctrl.store.ListEnvironments(c.Request.Context(), req.OrgID, pagination)
 	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GetEnvironment(c *gin.Context) {
-	var req idRequest
+	var req idOrCodeRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "GetEnvironment", logging.F("id", req.ID))
-	item, err := ctrl.store.GetEnvironment(c.Request.Context(), req.ID)
+	if !validateIdOrCode(c, req, "environment") {
+		return
+	}
+	var item Entity
+	var err error
+	if req.Code != "" {
+		ctrl.log(c, "GetEnvironment", logging.F("org_id", req.ParentID), logging.F("code", req.Code))
+		item, err = ctrl.store.GetEnvironmentByCode(c.Request.Context(), req.ParentID, req.Code)
+	} else {
+		ctrl.log(c, "GetEnvironment", logging.F("id", req.ID))
+		item, err = ctrl.store.GetEnvironment(c.Request.Context(), req.ID)
+	}
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) UpdateEnvironment(c *gin.Context) {
-	var req updateEntityRequest
+	var req updateByIdOrCodeRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "UpdateEnvironment", logging.F("id", req.ID), logging.F("name", req.Name))
-	item, err := ctrl.store.UpdateEnvironment(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
+	if !validateUpdateIdOrCode(c, req, "environment") {
+		return
+	}
+	var item Entity
+	var err error
+	if req.Code != "" {
+		ctrl.log(c, "UpdateEnvironment", logging.F("org_id", req.ParentID), logging.F("code", req.Code), logging.F("name", req.Name))
+		env, getErr := ctrl.store.GetEnvironmentByCode(c.Request.Context(), req.ParentID, req.Code)
+		if getErr != nil {
+			ctrl.write(c, nil, getErr)
+			return
+		}
+		item, err = ctrl.store.UpdateEnvironment(c.Request.Context(), env.ID, req.Name, req.Comment, ctrl.actor(c))
+	} else {
+		ctrl.log(c, "UpdateEnvironment", logging.F("id", req.ID), logging.F("name", req.Name))
+		item, err = ctrl.store.UpdateEnvironment(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
+	}
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) DeleteEnvironment(c *gin.Context) {
+	var req idOrCodeRequest
+	if !ctrl.bind(c, &req) {
+		return
+	}
+	if !validateIdOrCode(c, req, "environment") {
+		return
+	}
 	ctrl.log(c, "DeleteEnvironment")
-	ctrl.delete(c, func(req idRequest) error {
-		return ctrl.store.DeleteEnvironment(c.Request.Context(), req.ID, ctrl.actor(c))
-	})
+	if req.Code != "" {
+		env, err := ctrl.store.GetEnvironmentByCode(c.Request.Context(), req.ParentID, req.Code)
+		if err != nil {
+			ctrl.write(c, nil, err)
+			return
+		}
+		err = ctrl.store.DeleteEnvironment(c.Request.Context(), env.ID, ctrl.actor(c))
+		ctrl.write(c, gin.H{"deleted": true}, err)
+	} else {
+		err := ctrl.store.DeleteEnvironment(c.Request.Context(), req.ID, ctrl.actor(c))
+		ctrl.write(c, gin.H{"deleted": true}, err)
+	}
 }
 
 func (ctrl *Controller) CreateFolder(c *gin.Context) {
@@ -239,6 +385,9 @@ func (ctrl *Controller) ListFolders(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	if !validateListFolders(c, req) {
+		return
+	}
 	ctrl.log(c, "ListFolders", logging.F("environment_id", req.EnvironmentID))
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListFolders(c.Request.Context(), req.EnvironmentID, pagination)
@@ -246,30 +395,71 @@ func (ctrl *Controller) ListFolders(c *gin.Context) {
 }
 
 func (ctrl *Controller) GetFolder(c *gin.Context) {
-	var req idRequest
+	var req idOrCodeRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "GetFolder", logging.F("id", req.ID))
-	item, err := ctrl.store.GetFolder(c.Request.Context(), req.ID)
+	if !validateIdOrCode(c, req, "folder") {
+		return
+	}
+	var item Entity
+	var err error
+	if req.Code != "" {
+		ctrl.log(c, "GetFolder", logging.F("environment_id", req.ParentID), logging.F("code", req.Code))
+		item, err = ctrl.store.GetFolderByCode(c.Request.Context(), req.ParentID, req.Code)
+	} else {
+		ctrl.log(c, "GetFolder", logging.F("id", req.ID))
+		item, err = ctrl.store.GetFolder(c.Request.Context(), req.ID)
+	}
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) UpdateFolder(c *gin.Context) {
-	var req updateEntityRequest
+	var req updateByIdOrCodeRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	ctrl.log(c, "UpdateFolder", logging.F("id", req.ID), logging.F("name", req.Name))
-	item, err := ctrl.store.UpdateFolder(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
+	if !validateUpdateIdOrCode(c, req, "folder") {
+		return
+	}
+	var item Entity
+	var err error
+	if req.Code != "" {
+		ctrl.log(c, "UpdateFolder", logging.F("environment_id", req.ParentID), logging.F("code", req.Code), logging.F("name", req.Name))
+		folder, getErr := ctrl.store.GetFolderByCode(c.Request.Context(), req.ParentID, req.Code)
+		if getErr != nil {
+			ctrl.write(c, nil, getErr)
+			return
+		}
+		item, err = ctrl.store.UpdateFolder(c.Request.Context(), folder.ID, req.Name, req.Comment, ctrl.actor(c))
+	} else {
+		ctrl.log(c, "UpdateFolder", logging.F("id", req.ID), logging.F("name", req.Name))
+		item, err = ctrl.store.UpdateFolder(c.Request.Context(), req.ID, req.Name, req.Comment, ctrl.actor(c))
+	}
 	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) DeleteFolder(c *gin.Context) {
+	var req idOrCodeRequest
+	if !ctrl.bind(c, &req) {
+		return
+	}
+	if !validateIdOrCode(c, req, "folder") {
+		return
+	}
 	ctrl.log(c, "DeleteFolder")
-	ctrl.delete(c, func(req idRequest) error {
-		return ctrl.store.DeleteFolder(c.Request.Context(), req.ID, ctrl.actor(c))
-	})
+	if req.Code != "" {
+		folder, err := ctrl.store.GetFolderByCode(c.Request.Context(), req.ParentID, req.Code)
+		if err != nil {
+			ctrl.write(c, nil, err)
+			return
+		}
+		err = ctrl.store.DeleteFolder(c.Request.Context(), folder.ID, ctrl.actor(c))
+		ctrl.write(c, gin.H{"deleted": true}, err)
+	} else {
+		err := ctrl.store.DeleteFolder(c.Request.Context(), req.ID, ctrl.actor(c))
+		ctrl.write(c, gin.H{"deleted": true}, err)
+	}
 }
 
 func (ctrl *Controller) CreateSecret(c *gin.Context) {
@@ -353,6 +543,9 @@ func (ctrl *Controller) ListSecrets(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
+	if !validateListSecrets(c, req) {
+		return
+	}
 	ctrl.log(c, "ListSecrets", logging.F("org_id", req.OrgID), logging.F("project_id", req.ProjectID), logging.F("environment_id", req.EnvironmentID), logging.F("folder_id", req.FolderID))
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.store.ListSecrets(c.Request.Context(), postgres.ListFilter{
@@ -367,6 +560,9 @@ func (ctrl *Controller) ListSecrets(c *gin.Context) {
 func (ctrl *Controller) SearchSecrets(c *gin.Context) {
 	var req listRequest
 	if !ctrl.bind(c, &req) {
+		return
+	}
+	if !validateSearchSecrets(c, req) {
 		return
 	}
 	ctrl.log(c, "SearchSecrets", logging.F("org_id", req.OrgID), logging.F("project_id", req.ProjectID), logging.F("environment_id", req.EnvironmentID), logging.F("folder_id", req.FolderID), logging.F("keyword", req.Keyword))
@@ -425,9 +621,11 @@ func (ctrl *Controller) ListAuditRecords(c *gin.Context) {
 func (ctrl *Controller) bind(c *gin.Context, target any) bool {
 	if ctrl.store == nil {
 		response.Fail(c, http.StatusServiceUnavailable, response.CodeStoreUnavailable, "store is not configured")
+		logging.Error(c.Request.Context(), "bind", "store is not configured")
 		return false
 	}
 	if err := c.ShouldBindJSON(target); err != nil {
+		logging.Error(c.Request.Context(), "bind", "invalid request body", logging.F("error", err))
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, err.Error())
 		return false
 	}
@@ -529,7 +727,36 @@ func (ctrl *Controller) log(c *gin.Context, method string, fields ...logging.Fie
 
 func validateCode(c *gin.Context, code string) bool {
 	if !codePattern.MatchString(code) {
+		logging.Warn(c.Request.Context(), "validateCode", "invalid code format", logging.F("code", code))
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "code must match ^[a-z0-9]+(-[a-z0-9]+)*$")
+		return false
+	}
+	return true
+}
+
+func validateIdOrCode(c *gin.Context, req idOrCodeRequest, resourceType string) bool {
+	if req.ID == "" && req.Code == "" {
+		logging.Warn(c.Request.Context(), "validateIdOrCode", resourceType+" id or code is required")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, resourceType+" id or code is required")
+		return false
+	}
+	if req.ID != "" && req.Code != "" {
+		logging.Warn(c.Request.Context(), "validateIdOrCode", resourceType+" id and code are mutually exclusive")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, resourceType+" id and code are mutually exclusive")
+		return false
+	}
+	return true
+}
+
+func validateUpdateIdOrCode(c *gin.Context, req updateByIdOrCodeRequest, resourceType string) bool {
+	if req.ID == "" && req.Code == "" {
+		logging.Warn(c.Request.Context(), "validateUpdateIdOrCode", resourceType+" id or code is required")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, resourceType+" id or code is required")
+		return false
+	}
+	if req.ID != "" && req.Code != "" {
+		logging.Warn(c.Request.Context(), "validateUpdateIdOrCode", resourceType+" id and code are mutually exclusive")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, resourceType+" id and code are mutually exclusive")
 		return false
 	}
 	return true
@@ -537,7 +764,58 @@ func validateCode(c *gin.Context, code string) bool {
 
 func validateSecretKey(c *gin.Context, key string) bool {
 	if !secretKeyPattern.MatchString(key) {
+		logging.Warn(c.Request.Context(), "validateSecretKey", "invalid secret key format", logging.F("key", key))
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "key must match ^[A-Z][A-Z0-9_]*$")
+		return false
+	}
+	return true
+}
+
+func validateListProjects(c *gin.Context, req listRequest) bool {
+	if req.OrgID == "" {
+		logging.Warn(c.Request.Context(), "validateListProjects", "orgId is required")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "orgId is required")
+		return false
+	}
+	return true
+}
+
+func validateListEnvironments(c *gin.Context, req listRequest) bool {
+	if req.OrgID == "" {
+		logging.Warn(c.Request.Context(), "validateListEnvironments", "orgId is required")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "orgId is required")
+		return false
+	}
+	return true
+}
+
+func validateListFolders(c *gin.Context, req listRequest) bool {
+	if req.EnvironmentID == "" {
+		logging.Warn(c.Request.Context(), "validateListFolders", "environmentId is required")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "environmentId is required")
+		return false
+	}
+	return true
+}
+
+func validateListSecrets(c *gin.Context, req listRequest) bool {
+	if req.EnvironmentID == "" && req.FolderID == "" {
+		logging.Warn(c.Request.Context(), "validateListSecrets", "environmentId or folderId is required")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "environmentId or folderId is required")
+		return false
+	}
+	return true
+}
+
+func validateSearchSecrets(c *gin.Context, req listRequest) bool {
+	if req.Keyword == "" {
+		logging.Warn(c.Request.Context(), "validateSearchSecrets", "keyword is required")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "keyword is required")
+		return false
+	}
+	if req.EnvironmentID == "" && req.FolderID == "" {
+		logging.Warn(c.Request.Context(), "validateSearchSecrets", "environmentId or folderId is required")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "environmentId or folderId is required")
 		return false
 	}
 	return true

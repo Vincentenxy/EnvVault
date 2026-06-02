@@ -6,7 +6,7 @@ http:
 
 auth:
   # 本地测试可改为 false。关闭后会跳过 JWT 校验，并注入下面的开发用户。
-  enabled: false
+  enabled: true
   # JWT 验签公钥，支持 PEM 格式 RSA/ECDSA/Ed25519 public key。
   # 如果通过环境变量传入，可以使用 \n 表示换行。
   public_key: |-
@@ -50,7 +50,6 @@ auth:
     ryCtJJ435GWsBdlMO8HNSdBpUlEo9LWdFgzKJltDJDu835l4KkpwJrQEQhkgMUWa
     52JHSWzN3fIrUpG3/SxM+ybM
     -----END PRIVATE KEY-----
-
   dev_user_id: "dev-user"
   dev_user_name: "Dev User"
 
@@ -59,7 +58,8 @@ security:
   encryption_key: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
 database:
-  host: "192.168.1.110" #"127.0.0.1"
+  #host: "192.168.1.110"
+  host: "127.0.0.1"
   port: 5432
   user: "admin"
   password: "123456"
@@ -74,8 +74,8 @@ redis:
   enabled: true
   mode: "single"
   addrs:
-    #- "127.0.0.1:6379"
-    - "192.168.1.110:6379"
+    - "127.0.0.1:6379"
+    # - "192.168.1.110:6379"
   password: "123456"
   db: 0
   key_prefix: "envvault"

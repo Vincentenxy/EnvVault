@@ -11,6 +11,7 @@ import (
 
 	"envVault/internal/auth"
 	"envVault/internal/http/response"
+	"envVault/internal/logging"
 )
 
 type devJWTRequest struct {
@@ -21,6 +22,7 @@ type devJWTRequest struct {
 
 func (ctrl *Controller) CreateDevJWT(c *gin.Context) {
 	if !ctrl.config.Auth.DevTokenEnabled {
+		logging.Warn(c.Request.Context(), "CreateDevJWT", "dev token endpoint called but not enabled")
 		response.Fail(c, http.StatusNotFound, response.CodeNotFound, "not found")
 		return
 	}
@@ -32,11 +34,13 @@ func (ctrl *Controller) CreateDevJWT(c *gin.Context) {
 	}
 	if c.Request.Body != nil && c.Request.ContentLength != 0 {
 		if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+			logging.Warn(c.Request.Context(), "CreateDevJWT", "invalid request body", logging.F("error", err))
 			response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, err.Error())
 			return
 		}
 	}
 	if req.UserID == "" {
+		logging.Warn(c.Request.Context(), "CreateDevJWT", "userId is required but empty")
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "userId is required")
 		return
 	}
@@ -59,6 +63,7 @@ func (ctrl *Controller) CreateDevJWT(c *gin.Context) {
 		},
 	})
 	if err != nil {
+		logging.Error(c.Request.Context(), "CreateDevJWT", "failed to sign token", logging.F("error", err))
 		response.Fail(c, http.StatusServiceUnavailable, response.CodeServiceUnavailable, err.Error())
 		return
 	}

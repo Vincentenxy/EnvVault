@@ -111,6 +111,10 @@ func (r *Repository) GetOrganization(ctx context.Context, id string) (Entity, er
 	return r.getEntity(ctx, "organizations", id)
 }
 
+func (r *Repository) GetOrganizationByCode(ctx context.Context, code string) (Entity, error) {
+	return r.getEntityByCode(ctx, "organizations", code)
+}
+
 func (r *Repository) UpdateOrganization(ctx context.Context, id, name, comment, actor string) (Entity, error) {
 	return r.updateEntity(ctx, "organizations", id, name, comment, actor, "organization")
 }
@@ -119,7 +123,7 @@ func (r *Repository) DeleteOrganization(ctx context.Context, id, actor string) e
 	return r.deleteEntity(ctx, "organizations", id, actor, "organization")
 }
 
-func (r *Repository) CreateProject(ctx context.Context, orgID, code, name, comment, actor string) (Entity, error) {
+func (r *Repository) CreateProject(ctx context.Context, orgID, code, name, comment, actor string, environmentIDs []string) (Entity, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Entity{}, err
@@ -130,17 +134,34 @@ func (r *Repository) CreateProject(ctx context.Context, orgID, code, name, comme
 	if err != nil {
 		return Entity{}, err
 	}
-	for _, envName := range []string{"dev", "test", "sim", "prod"} {
-		env, err := r.createEntityTx(ctx, tx, "environments", "project_id", project.ID, envName, envName, "", actor)
+
+	// If no environment IDs provided, find dev/test/sim/prod from org
+	if len(environmentIDs) == 0 {
+		rows, err := tx.QueryContext(ctx, `
+			select id from environments
+			where org_id = $1::uuid and code in ('dev', 'test', 'sim', 'prod') and is_deleted = false
+		`, orgID)
 		if err != nil {
 			return Entity{}, err
 		}
-		for _, folderName := range []string{"globals", "groups-secrets"} {
-			if _, err := r.createEntityTx(ctx, tx, "folders", "environment_id", env.ID, folderName, folderName, "", actor); err != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var envID string
+			if err := rows.Scan(&envID); err != nil {
 				return Entity{}, err
 			}
+			environmentIDs = append(environmentIDs, envID)
+		}
+		if err := rows.Err(); err != nil {
+			return Entity{}, err
 		}
 	}
+
+	// Associate environments to project
+	if err := r.associateEnvironmentsToProjectTx(ctx, tx, project.ID, environmentIDs); err != nil {
+		return Entity{}, err
+	}
+
 	if err := recordAuditTx(ctx, tx, actor, "project", project.ID, "create", nil); err != nil {
 		return Entity{}, err
 	}
@@ -155,6 +176,10 @@ func (r *Repository) GetProject(ctx context.Context, id string) (Entity, error) 
 	return r.getEntity(ctx, "projects", id)
 }
 
+func (r *Repository) GetProjectByCode(ctx context.Context, orgID, code string) (Entity, error) {
+	return r.getEntityByCodeWithParent(ctx, "projects", "org_id", orgID, code)
+}
+
 func (r *Repository) UpdateProject(ctx context.Context, id, name, comment, actor string) (Entity, error) {
 	return r.updateEntity(ctx, "projects", id, name, comment, actor, "project")
 }
@@ -163,14 +188,14 @@ func (r *Repository) DeleteProject(ctx context.Context, id, actor string) error 
 	return r.deleteEntity(ctx, "projects", id, actor, "project")
 }
 
-func (r *Repository) CreateEnvironment(ctx context.Context, projectID, code, name, comment, actor string) (Entity, error) {
+func (r *Repository) CreateEnvironment(ctx context.Context, orgID, code, name, comment, actor string) (Entity, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Entity{}, err
 	}
 	defer tx.Rollback()
 
-	env, err := r.createEntityTx(ctx, tx, "environments", "project_id", projectID, code, name, comment, actor)
+	env, err := r.createEntityTx(ctx, tx, "environments", "org_id", orgID, code, name, comment, actor)
 	if err != nil {
 		return Entity{}, err
 	}
@@ -179,18 +204,126 @@ func (r *Repository) CreateEnvironment(ctx context.Context, projectID, code, nam
 			return Entity{}, err
 		}
 	}
+
+	// Associate this environment to all existing projects in the org
+	rows, err := tx.QueryContext(ctx, `select id from projects where org_id = $1::uuid and is_deleted = false`, orgID)
+	if err != nil {
+		return Entity{}, err
+	}
+	defer rows.Close()
+
+	var projectIDs []string
+	for rows.Next() {
+		var projID string
+		if err := rows.Scan(&projID); err != nil {
+			return Entity{}, err
+		}
+		projectIDs = append(projectIDs, projID)
+	}
+	if err := rows.Err(); err != nil {
+		return Entity{}, err
+	}
+
+	if err := r.associateEnvironmentsToProjectsTx(ctx, tx, projectIDs, env.ID); err != nil {
+		return Entity{}, err
+	}
+
 	if err := recordAuditTx(ctx, tx, actor, "environment", env.ID, "create", nil); err != nil {
 		return Entity{}, err
 	}
 	return env, tx.Commit()
 }
 
-func (r *Repository) ListEnvironments(ctx context.Context, projectID string, pagination Pagination) (PaginatedResult[Entity], error) {
-	return r.listEntities(ctx, "environments", projectID, pagination)
+func (r *Repository) ListEnvironments(ctx context.Context, orgID string, pagination Pagination) (PaginatedResult[Entity], error) {
+	return r.listEntities(ctx, "environments", orgID, pagination)
+}
+
+func (r *Repository) ListProjectEnvironments(ctx context.Context, projectID string, pagination Pagination) (PaginatedResult[Entity], error) {
+	var total int64
+	err := r.db.QueryRowContext(ctx, `
+		select count(*)
+		from project_environments pe
+		join environments e on e.id = pe.environment_id
+		where pe.project_id = $1::uuid and e.is_deleted = false
+	`, projectID).Scan(&total)
+	if err != nil {
+		return PaginatedResult[Entity]{}, err
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		select e.id, e.code, e.name, e.comment, e.created_by, e.updated_by, e.created_at, e.updated_at
+		from project_environments pe
+		join environments e on e.id = pe.environment_id
+		where pe.project_id = $1::uuid and e.is_deleted = false
+		order by e.name asc
+		limit $2 offset $3
+	`, projectID, pagination.Limit(), pagination.Offset())
+	if err != nil {
+		return PaginatedResult[Entity]{}, err
+	}
+	defer rows.Close()
+
+	var items []Entity
+	for rows.Next() {
+		var entity Entity
+		if err := rows.Scan(
+			&entity.ID, &entity.Code, &entity.Name, &entity.Comment,
+			&entity.CreatedBy, &entity.UpdatedBy,
+			&entity.CreatedAt, &entity.UpdatedAt,
+		); err != nil {
+			return PaginatedResult[Entity]{}, err
+		}
+		r.fillEntityLabels(&entity)
+		items = append(items, entity)
+	}
+	if err := rows.Err(); err != nil {
+		return PaginatedResult[Entity]{}, err
+	}
+	return PaginatedResult[Entity]{Items: items, Total: total}, nil
+}
+
+func (r *Repository) associateEnvironmentsToProjectTx(ctx context.Context, tx *sql.Tx, projectID string, environmentIDs []string) error {
+	for _, envID := range environmentIDs {
+		id, err := uuidgen.NewUUID()
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `
+			insert into project_environments (id, project_id, environment_id)
+			values ($1, $2, $3)
+			on conflict (project_id, environment_id) do nothing
+		`, id, projectID, envID)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) associateEnvironmentsToProjectsTx(ctx context.Context, tx *sql.Tx, projectIDs []string, environmentID string) error {
+	for _, projID := range projectIDs {
+		id, err := uuidgen.NewUUID()
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `
+			insert into project_environments (id, project_id, environment_id)
+			values ($1, $2, $3)
+			on conflict (project_id, environment_id) do nothing
+		`, id, projID, environmentID)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *Repository) GetEnvironment(ctx context.Context, id string) (Entity, error) {
 	return r.getEntity(ctx, "environments", id)
+}
+
+func (r *Repository) GetEnvironmentByCode(ctx context.Context, orgID, code string) (Entity, error) {
+	return r.getEntityByCodeWithParent(ctx, "environments", "org_id", orgID, code)
 }
 
 func (r *Repository) UpdateEnvironment(ctx context.Context, id, name, comment, actor string) (Entity, error) {
@@ -211,6 +344,10 @@ func (r *Repository) ListFolders(ctx context.Context, environmentID string, pagi
 
 func (r *Repository) GetFolder(ctx context.Context, id string) (Entity, error) {
 	return r.getEntity(ctx, "folders", id)
+}
+
+func (r *Repository) GetFolderByCode(ctx context.Context, environmentID, code string) (Entity, error) {
+	return r.getEntityByCodeWithParent(ctx, "folders", "environment_id", environmentID, code)
 }
 
 func (r *Repository) UpdateFolder(ctx context.Context, id, name, comment, actor string) (Entity, error) {
@@ -304,10 +441,39 @@ select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.ke
 from secrets s
 join folders f on f.id = s.folder_id
 join environments e on e.id = f.environment_id
-join projects p on p.id = e.project_id
+join project_environments pe on pe.environment_id = e.id
+join projects p on p.id = pe.project_id
 join organizations o on o.id = p.org_id
 where s.id = $1 and s.is_deleted = false
 `, id).Scan(
+		&secret.ID, &secret.OrgID, &secret.OrgCode, &secret.ProjectID, &secret.ProjectCode, &secret.EnvironmentID, &secret.EnvironmentCode, &secret.FolderID, &secret.FolderCode, &secret.Key, &secret.Comment, &secret.Version,
+		&secret.CreatedBy, &secret.UpdatedBy, &secret.CreatedAt, &secret.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Secret{}, ErrNotFound
+	}
+	if err != nil {
+		return Secret{}, err
+	}
+	r.fillSecretLabels(&secret)
+	secret.Path = buildSecretPath(secret)
+	return secret, nil
+}
+
+func (r *Repository) GetSecretByKey(ctx context.Context, folderID, key string) (Secret, error) {
+	var secret Secret
+	err := r.db.QueryRowContext(ctx, `
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.comment, s.version,
+       s.created_by, s.updated_by,
+       s.created_at, s.updated_at
+from secrets s
+join folders f on f.id = s.folder_id
+join environments e on e.id = f.environment_id
+join project_environments pe on pe.environment_id = e.id
+join projects p on p.id = pe.project_id
+join organizations o on o.id = p.org_id
+where s.folder_id = $1::uuid and s.key = $2 and s.is_deleted = false
+`, folderID, key).Scan(
 		&secret.ID, &secret.OrgID, &secret.OrgCode, &secret.ProjectID, &secret.ProjectCode, &secret.EnvironmentID, &secret.EnvironmentCode, &secret.FolderID, &secret.FolderCode, &secret.Key, &secret.Comment, &secret.Version,
 		&secret.CreatedBy, &secret.UpdatedBy, &secret.CreatedAt, &secret.UpdatedAt,
 	)
@@ -332,7 +498,8 @@ select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.ke
 from secrets s
 join folders f on f.id = s.folder_id
 join environments e on e.id = f.environment_id
-join projects p on p.id = e.project_id
+join project_environments pe on pe.environment_id = e.id
+join projects p on p.id = pe.project_id
 join organizations o on o.id = p.org_id
 where s.id = $1 and s.is_deleted = false
 `, id).Scan(
@@ -361,7 +528,8 @@ select count(*)
 from secrets s
 join folders f on f.id = s.folder_id
 join environments e on e.id = f.environment_id
-join projects p on p.id = e.project_id
+join project_environments pe on pe.environment_id = e.id
+join projects p on p.id = pe.project_id
 join organizations o on o.id = p.org_id
 where s.is_deleted = false
   and ($1 = '' or o.id = $1::uuid)
@@ -381,7 +549,8 @@ select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.ke
 from secrets s
 join folders f on f.id = s.folder_id
 join environments e on e.id = f.environment_id
-join projects p on p.id = e.project_id
+join project_environments pe on pe.environment_id = e.id
+join projects p on p.id = pe.project_id
 join organizations o on o.id = p.org_id
 where s.is_deleted = false
   and ($1 = '' or o.id = $1::uuid)
@@ -424,7 +593,8 @@ select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.ke
 from secrets s
 join folders f on f.id = s.folder_id
 join environments e on e.id = f.environment_id
-join projects p on p.id = e.project_id
+join project_environments pe on pe.environment_id = e.id
+join projects p on p.id = pe.project_id
 join organizations o on o.id = p.org_id
 where s.is_deleted = false
 order by s.key asc
@@ -609,6 +779,54 @@ where t.id = $1 and t.is_deleted = false`, table)
 	return entity, nil
 }
 
+func (r *Repository) getEntityByCode(ctx context.Context, table, code string) (Entity, error) {
+	var entity Entity
+	query := fmt.Sprintf(`
+select t.id, t.name, t.comment,
+       t.code,
+       t.created_by, t.updated_by,
+       t.created_at, t.updated_at
+from %s t
+where t.code = $1 and t.is_deleted = false`, table)
+	err := r.db.QueryRowContext(ctx, query, code).Scan(
+		&entity.ID, &entity.Name, &entity.Comment, &entity.Code,
+		&entity.CreatedBy, &entity.UpdatedBy,
+		&entity.CreatedAt, &entity.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Entity{}, ErrNotFound
+	}
+	if err != nil {
+		return Entity{}, err
+	}
+	r.fillEntityLabels(&entity)
+	return entity, nil
+}
+
+func (r *Repository) getEntityByCodeWithParent(ctx context.Context, table, parentColumn, parentID, code string) (Entity, error) {
+	var entity Entity
+	query := fmt.Sprintf(`
+select t.id, t.name, t.comment,
+       t.code,
+       t.created_by, t.updated_by,
+       t.created_at, t.updated_at
+from %s t
+where t.%s = $1::uuid and t.code = $2 and t.is_deleted = false`, table, parentColumn)
+	err := r.db.QueryRowContext(ctx, query, parentID, code).Scan(
+		&entity.ID, &entity.Name, &entity.Comment, &entity.Code,
+		&entity.CreatedBy, &entity.UpdatedBy,
+		&entity.CreatedAt, &entity.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Entity{}, ErrNotFound
+	}
+	if err != nil {
+		return Entity{}, err
+	}
+	r.fillEntityLabels(&entity)
+	return entity, nil
+}
+
 func (r *Repository) updateEntity(ctx context.Context, table, id, name, comment, actor, resourceType string) (Entity, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -761,7 +979,7 @@ func parentColumn(table string) string {
 	case "projects":
 		return "org_id"
 	case "environments":
-		return "project_id"
+		return "org_id"
 	case "folders":
 		return "environment_id"
 	default:

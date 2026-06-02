@@ -1,3 +1,19 @@
+-- Drop statements (in reverse dependency order)
+drop table if exists role_binding_audit_records;
+drop table if exists user_role_bindings;
+drop table if exists role_permissions;
+drop table if exists roles;
+drop table if exists permissions;
+drop table if exists users;
+drop table if exists secrets;
+drop table if exists folders;
+drop table if exists environments;
+drop table if exists projects;
+drop table if exists audit_records;
+drop table if exists deleted_records;
+drop table if exists organizations;
+
+-- Create statements
 create extension if not exists pg_trgm;
 
 create table if not exists organizations (
@@ -21,7 +37,7 @@ create unique index if not exists organizations_code_active_uidx
 
 create table if not exists projects (
     id uuid primary key,
-    org_id uuid not null references organizations(id),
+    org_id uuid not null,
     code text not null,
     name text not null,
     comment text not null default '',
@@ -41,7 +57,7 @@ create unique index if not exists projects_org_code_active_uidx
 
 create table if not exists environments (
     id uuid primary key,
-    project_id uuid not null references projects(id),
+    org_id uuid not null,
     code text not null,
     name text not null,
     comment text not null default '',
@@ -55,13 +71,21 @@ create table if not exists environments (
     constraint environments_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
 
-create unique index if not exists environments_project_code_active_uidx
-    on environments (project_id, code)
+create unique index if not exists environments_org_code_active_uidx
+    on environments (org_id, code)
     where is_deleted = false;
+
+create table if not exists project_environments (
+    id uuid primary key,
+    project_id uuid not null,
+    environment_id uuid not null,
+    created_at timestamptz not null default now(),
+    constraint project_environments_unique unique (project_id, environment_id)
+);
 
 create table if not exists folders (
     id uuid primary key,
-    environment_id uuid not null references environments(id),
+    environment_id uuid not null,
     code text not null,
     name text not null,
     comment text not null default '',
@@ -81,7 +105,7 @@ create unique index if not exists folders_environment_code_active_uidx
 
 create table if not exists secrets (
     id uuid primary key,
-    folder_id uuid not null references folders(id),
+    folder_id uuid not null,
     key text not null,
     value_ciphertext jsonb not null,
     comment text not null default '',
@@ -165,8 +189,8 @@ create table if not exists roles (
     name text not null,
     description text not null default '',
     scope_type text not null,
-    org_id uuid references organizations(id),
-    project_id uuid references projects(id),
+    org_id uuid,
+    project_id uuid,
     is_system boolean not null default false,
     is_deleted boolean not null default false,
     deleted_at timestamptz,
@@ -193,8 +217,8 @@ create unique index if not exists roles_project_code_uidx
     where project_id is not null and is_deleted = false;
 
 create table if not exists role_permissions (
-    role_id uuid not null references roles(id),
-    permission_id uuid not null references permissions(id),
+    role_id uuid not null,
+    permission_id uuid not null,
     created_at timestamptz not null default now(),
     primary key (role_id, permission_id)
 );
@@ -204,8 +228,8 @@ create index if not exists role_permissions_permission_id_idx
 
 create table if not exists user_role_bindings (
     id uuid primary key,
-    user_id uuid not null references users(id),
-    role_id uuid not null references roles(id),
+    user_id uuid not null,
+    role_id uuid not null,
     scope_type text not null,
     scope_id uuid,
     granted_by text not null default '',
@@ -240,8 +264,8 @@ create table if not exists role_binding_audit_records (
     id uuid primary key,
     actor text not null default '',
     action text not null,
-    target_user_id uuid references users(id),
-    role_id uuid references roles(id),
+    target_user_id uuid,
+    role_id uuid,
     scope_type text not null,
     scope_id uuid,
     snapshot jsonb,

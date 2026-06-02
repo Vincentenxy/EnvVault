@@ -17,6 +17,16 @@ const requestIDContextKey contextKey = "envvault.request_id"
 
 var std = log.New(os.Stdout, "", 0)
 
+// ANSI color codes
+const (
+	colorReset  = "\033[0m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorRed    = "\033[31m"
+	colorCyan   = "\033[36m"
+	colorGray   = "\033[90m"
+)
+
 type Field struct {
 	Key   string
 	Value any
@@ -49,29 +59,42 @@ func RequestIDHeader(header string) string {
 }
 
 func Info(ctx context.Context, method string, message string, fields ...Field) {
-	write(ctx, "INFO", method, message, fields...)
+	write(ctx, "INFO", colorGreen, method, message, fields...)
 }
 
 func Warn(ctx context.Context, method string, message string, fields ...Field) {
-	write(ctx, "WARN", method, message, fields...)
+	write(ctx, "WARN", colorYellow, method, message, fields...)
 }
 
 func Error(ctx context.Context, method string, message string, fields ...Field) {
-	write(ctx, "ERROR", method, message, fields...)
+	write(ctx, "ERROR", colorRed, method, message, fields...)
 }
 
-func write(ctx context.Context, level string, method string, message string, fields ...Field) {
-	parts := []string{
-		time.Now().Format(time.RFC3339Nano),
-		level,
-		"x-request-id=" + sanitize(RequestIDFromContext(ctx)),
-		"method=" + sanitize(method),
-		"msg=" + quote(message),
+func write(ctx context.Context, level string, color string, method string, message string, fields ...Field) {
+	requestID := sanitize(RequestIDFromContext(ctx))
+	timestamp := time.Now().Format("2006-01-02 15:04:05.000000000")
+
+	var fieldsStr string
+	if len(fields) > 0 {
+		parts := make([]string, 0, len(fields))
+		for _, field := range fields {
+			parts = append(parts, sanitize(field.Key)+"="+quote(formatValue(field)))
+		}
+		fieldsStr = "  " + strings.Join(parts, "  ")
 	}
-	for _, field := range fields {
-		parts = append(parts, sanitize(field.Key)+"="+quote(formatValue(field)))
-	}
-	std.Println(strings.Join(parts, " "))
+
+	logLine := fmt.Sprintf("%s %s %s  request_id=%s  method=%s  %s  msg=%s %s",
+		colorize(timestamp, colorGray),
+		colorize(level, color),
+		colorize(requestID, colorCyan),
+		colorize(method, colorCyan),
+		fieldsStr,
+		colorize("msg", colorGray),
+		colorize(quote(message), colorReset),
+		colorReset,
+	)
+
+	std.Println(logLine)
 }
 
 func formatValue(field Field) string {
@@ -101,4 +124,8 @@ func sanitize(value string) string {
 		return "-"
 	}
 	return strings.ReplaceAll(value, " ", "_")
+}
+
+func colorize(s string, color string) string {
+	return color + s + colorReset
 }

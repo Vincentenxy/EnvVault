@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v4"
 
+	"envVault/internal/http/response"
 	"envVault/internal/logging"
 )
 
@@ -217,18 +218,9 @@ func signingMethodForPrivateKey(privateKey any) (jwt.SigningMethod, error) {
 }
 
 func abort(c *gin.Context, status int, err error) {
-	code := -1
-	switch status {
-	case http.StatusUnauthorized:
-		code = 1401
-	case http.StatusForbidden:
-		code = 1403
-	case http.StatusServiceUnavailable:
-		code = 1503
-	}
-	c.AbortWithStatusJSON(status, gin.H{
-		"code": code,
-		"msg":  err.Error(),
-		"data": nil,
+	c.AbortWithStatusJSON(status, response.Body{
+		Code: status,
+		Msg:  err.Error(),
+		Data: nil,
 	})
 }

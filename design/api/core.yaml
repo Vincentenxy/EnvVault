@@ -107,7 +107,7 @@ paths:
       tags: [Organizations]
       summary: Get organization
       requestBody:
-        $ref: "#/components/requestBodies/ID"
+        $ref: "#/components/requestBodies/IdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Entity"
@@ -117,7 +117,7 @@ paths:
       tags: [Organizations]
       summary: Update organization
       requestBody:
-        $ref: "#/components/requestBodies/UpdateEntity"
+        $ref: "#/components/requestBodies/UpdateByIdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Entity"
@@ -127,7 +127,7 @@ paths:
       tags: [Organizations]
       summary: Delete organization
       requestBody:
-        $ref: "#/components/requestBodies/ID"
+        $ref: "#/components/requestBodies/IdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Deleted"
@@ -156,9 +156,22 @@ paths:
     post:
       tags: [Projects]
       summary: Create project
-      description: Creates default environments and default folders automatically.
+      description: Creates default environment associations automatically if environmentIds not provided.
       requestBody:
-        $ref: "#/components/requestBodies/CreateChildEntity"
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/CreateChildEntityRequest"
+                - type: object
+                  properties:
+                    environmentIds:
+                      type: array
+                      items:
+                        type: string
+                        format: uuid
+                      description: Optional list of environment IDs to associate. If not provided, associates dev/test/sim/prod.
       responses:
         "200":
           $ref: "#/components/responses/Entity"
@@ -168,7 +181,7 @@ paths:
       tags: [Projects]
       summary: Get project
       requestBody:
-        $ref: "#/components/requestBodies/ID"
+        $ref: "#/components/requestBodies/IdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Entity"
@@ -178,7 +191,7 @@ paths:
       tags: [Projects]
       summary: Update project
       requestBody:
-        $ref: "#/components/requestBodies/UpdateEntity"
+        $ref: "#/components/requestBodies/UpdateByIdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Entity"
@@ -188,7 +201,7 @@ paths:
       tags: [Projects]
       summary: Delete project
       requestBody:
-        $ref: "#/components/requestBodies/ID"
+        $ref: "#/components/requestBodies/IdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Deleted"
@@ -206,7 +219,7 @@ paths:
                 - $ref: "#/components/schemas/PageRequest"
                 - type: object
                   properties:
-                    projectId:
+                    orgId:
                       type: string
                       format: uuid
       responses:
@@ -229,7 +242,7 @@ paths:
       tags: [Environments]
       summary: Get environment
       requestBody:
-        $ref: "#/components/requestBodies/ID"
+        $ref: "#/components/requestBodies/IdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Entity"
@@ -239,7 +252,7 @@ paths:
       tags: [Environments]
       summary: Update environment
       requestBody:
-        $ref: "#/components/requestBodies/UpdateEntity"
+        $ref: "#/components/requestBodies/UpdateByIdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Entity"
@@ -249,7 +262,7 @@ paths:
       tags: [Environments]
       summary: Delete environment
       requestBody:
-        $ref: "#/components/requestBodies/ID"
+        $ref: "#/components/requestBodies/IdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Deleted"
@@ -289,7 +302,7 @@ paths:
       tags: [Folders]
       summary: Get folder
       requestBody:
-        $ref: "#/components/requestBodies/ID"
+        $ref: "#/components/requestBodies/IdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Entity"
@@ -299,7 +312,7 @@ paths:
       tags: [Folders]
       summary: Update folder
       requestBody:
-        $ref: "#/components/requestBodies/UpdateEntity"
+        $ref: "#/components/requestBodies/UpdateByIdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Entity"
@@ -309,7 +322,7 @@ paths:
       tags: [Folders]
       summary: Delete folder
       requestBody:
-        $ref: "#/components/requestBodies/ID"
+        $ref: "#/components/requestBodies/IdOrCode"
       responses:
         "200":
           $ref: "#/components/responses/Deleted"
@@ -430,6 +443,18 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/IDRequest"
+    IdOrCode:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/IdOrCodeRequest"
+    UpdateByIdOrCode:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UpdateIdOrCodeRequest"
     CreateEntity:
       required: true
       content:
@@ -571,6 +596,41 @@ components:
         id:
           type: string
           format: uuid
+
+    IdOrCodeRequest:
+      type: object
+      properties:
+        parentId:
+          type: string
+          format: uuid
+          description: Required when using code for project/environment/folder
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+        description: id and code are mutually exclusive, one is required
+
+    UpdateIdOrCodeRequest:
+      type: object
+      required: [name]
+      properties:
+        parentId:
+          type: string
+          format: uuid
+          description: Required when using code for project/environment/folder
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+        name:
+          type: string
+        comment:
+          type: string
+        description: id and code are mutually exclusive, one is required for update
 
     PageRequest:
       type: object

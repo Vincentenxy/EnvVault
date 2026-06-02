@@ -10,6 +10,7 @@ import (
 
 	"envVault/internal/auth"
 	"envVault/internal/http/response"
+	"envVault/internal/logging"
 	"envVault/internal/store/postgres"
 )
 
@@ -310,6 +311,7 @@ func (ctrl *Controller) GetUserEffectivePermissions(c *gin.Context) {
 
 func (ctrl *Controller) ensureRBAC(c *gin.Context) bool {
 	if ctrl.rbac == nil {
+		logging.Error(c.Request.Context(), "ensureRBAC", "rbac store is not configured")
 		response.Fail(c, http.StatusServiceUnavailable, response.CodeStoreUnavailable, "rbac store is not configured")
 		return false
 	}
@@ -318,6 +320,7 @@ func (ctrl *Controller) ensureRBAC(c *gin.Context) bool {
 
 func (ctrl *Controller) allowScope(c *gin.Context, permission, scopeType, scopeID string) bool {
 	if ctrl.authorizer == nil {
+		logging.Error(c.Request.Context(), "allowScope", "authorizer is not configured", logging.F("permission", permission), logging.F("scopeType", scopeType))
 		response.Fail(c, http.StatusForbidden, response.CodeForbidden, auth.ErrPermissionDenied.Error())
 		return false
 	}
@@ -333,10 +336,12 @@ func (ctrl *Controller) allowScope(c *gin.Context, permission, scopeType, scopeI
 		return true
 	}
 	if errors.Is(err, postgres.ErrNotFound) {
+		logging.Warn(c.Request.Context(), "allowScope", "resource not found", logging.F("scopeType", scopeType), logging.F("scopeId", scopeID))
 		response.Fail(c, http.StatusNotFound, response.CodeNotFound, err.Error())
 		return false
 	}
 	if errors.Is(err, auth.ErrPermissionDenied) {
+		logging.Warn(c.Request.Context(), "allowScope", "permission denied", logging.F("permission", permission), logging.F("scopeType", scopeType), logging.F("scopeId", scopeID))
 		response.Fail(c, http.StatusForbidden, response.CodeForbidden, err.Error())
 		return false
 	}

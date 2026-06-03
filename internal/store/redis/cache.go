@@ -8,8 +8,8 @@ import (
 	goredis "github.com/go-redis/redis/v8"
 
 	"envVault/internal/config"
+	"envVault/internal/domain"
 	"envVault/internal/logging"
-	"envVault/internal/store/postgres"
 )
 
 type Cache struct {
@@ -53,7 +53,7 @@ func (c *Cache) Close() error {
 	return c.client.Close()
 }
 
-func (c *Cache) WarmSecrets(ctx context.Context, records []postgres.SecretCacheRecord) error {
+func (c *Cache) WarmSecrets(ctx context.Context, records []domain.SecretCacheRecord) error {
 	if c == nil {
 		return nil
 	}
@@ -73,7 +73,7 @@ func (c *Cache) WarmSecrets(ctx context.Context, records []postgres.SecretCacheR
 	return nil
 }
 
-func (c *Cache) UpsertSecret(ctx context.Context, record postgres.SecretCacheRecord) error {
+func (c *Cache) UpsertSecret(ctx context.Context, record domain.SecretCacheRecord) error {
 	if c == nil {
 		return nil
 	}
@@ -141,7 +141,7 @@ func (c *Cache) DeleteSecret(ctx context.Context, id string) error {
 	return c.client.SRem(ctx, c.idsKey(), id).Err()
 }
 
-func (c *Cache) SearchSecrets(ctx context.Context, filter postgres.ListFilter) ([]postgres.Secret, error) {
+func (c *Cache) SearchSecrets(ctx context.Context, filter domain.ListFilter) ([]domain.Secret, error) {
 	if c == nil {
 		return nil, nil
 	}
@@ -152,7 +152,7 @@ func (c *Cache) SearchSecrets(ctx context.Context, filter postgres.ListFilter) (
 	}
 
 	keyword := strings.ToLower(filter.Keyword)
-	items := make([]postgres.Secret, 0, len(ids))
+	items := make([]domain.Secret, 0, len(ids))
 	for _, id := range ids {
 		values, err := c.client.HGetAll(ctx, c.secretKey(id)).Result()
 		if err != nil {
@@ -161,7 +161,7 @@ func (c *Cache) SearchSecrets(ctx context.Context, filter postgres.ListFilter) (
 		if len(values) == 0 || !matches(values, filter, keyword) {
 			continue
 		}
-		items = append(items, postgres.Secret{
+		items = append(items, domain.Secret{
 			Id:              values["id"],
 			OrgId:           values["org_id"],
 			OrgCode:         values["org_code"],
@@ -217,7 +217,7 @@ func (c *Cache) deletePathKeys(ctx context.Context) error {
 	}
 }
 
-func matches(values map[string]string, filter postgres.ListFilter, keyword string) bool {
+func matches(values map[string]string, filter domain.ListFilter, keyword string) bool {
 	if filter.OrgId != "" && values["org_id"] != filter.OrgId {
 		return false
 	}

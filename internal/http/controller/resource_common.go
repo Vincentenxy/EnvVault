@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
@@ -9,20 +8,26 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"envVault/internal/auth"
-	secretcrypto "envVault/internal/crypto"
+	"envVault/internal/domain"
 	"envVault/internal/http/response"
 	"envVault/internal/logging"
-	"envVault/internal/store/postgres"
 )
 
-type Entity = postgres.Entity
+type Entity = domain.Entity
 
 type createEntityRequest struct {
-	ParentId       string   `json:"parentId,omitempty"`
-	Code           string   `json:"code"`
-	Name           string   `json:"name"`
-	Comment        string   `json:"comment"`
-	EnvironmentIds []string `json:"environmentIds,omitempty"`
+	ParentId     string           `json:"parentId,omitempty"`
+	Code         string           `json:"code"`
+	Name         string           `json:"name"`
+	Comment      string           `json:"comment"`
+	Environments []EnvSpecRequest `json:"environments,omitempty"`
+}
+
+// EnvSpecRequest 在创建 project/env 时,描述一个 env 的最小信息。
+type EnvSpecRequest struct {
+	Code    string `json:"code"`
+	Name    string `json:"name"`
+	Comment string `json:"comment"`
 }
 
 type idOrCodeRequest struct {
@@ -86,10 +91,11 @@ var (
 )
 
 // bind 将请求体绑定到 target，并在失败时直接写回错误响应。
+// 任一底层依赖为 nil 都视作未配置(503)。
 func (ctrl *Controller) bind(c *gin.Context, target any) bool {
-	if ctrl.store == nil {
-		response.Fail(c, http.StatusServiceUnavailable, response.CodeStoreUnavailable, "store is not configured")
-		logging.Error(c.Request.Context(), "bind", "store is not configured")
+	if ctrl.repo == nil || ctrl.secret == nil {
+		response.Fail(c, http.StatusServiceUnavailable, response.CodeStoreUnavailable, "services are not configured")
+		logging.Error(c.Request.Context(), "bind", "services are not configured")
 		return false
 	}
 	if err := c.ShouldBindJSON(target); err != nil {
@@ -100,7 +106,7 @@ func (ctrl *Controller) bind(c *gin.Context, target any) bool {
 	return true
 }
 
-// write 统一写入响应：成功直接返回 data；错误时根据错误类型映射到不同的 HTTP 状态码。
+// write 统一写入响应:成功直接返回 data;错误时根据错误类型映射到不同的 HTTP 状态码。
 func (ctrl *Controller) write(c *gin.Context, data any, err error) {
 	if err == nil {
 		response.OK(c, data)
@@ -111,14 +117,14 @@ func (ctrl *Controller) write(c *gin.Context, data any, err error) {
 		response.Fail(c, http.StatusForbidden, response.CodeForbidden, err.Error())
 		return
 	}
-	if errors.Is(err, postgres.ErrNotFound) {
+	if errors.Is(err, domain.ErrNotFound) {
 		response.Fail(c, http.StatusNotFound, response.CodeNotFound, err.Error())
 		return
 	}
 	response.FailWithMsg(c, err.Error())
 }
 
-// delete 是删除接口的通用包装：绑定 idRequest 后调用 fn 执行真正的删除逻辑。
+// delete 是删除接口的通用包装:绑定 idRequest 后调用 fn 执行真正的删除逻辑。
 func (ctrl *Controller) delete(c *gin.Context, fn func(idRequest) error) {
 	var req idRequest
 	if !ctrl.bind(c, &req) {
@@ -127,72 +133,14 @@ func (ctrl *Controller) delete(c *gin.Context, fn func(idRequest) error) {
 	ctrl.write(c, gin.H{"deleted": true}, fn(req))
 }
 
-// actor 返回当前请求的操作者用户 ID，并顺便把用户标签缓存到 store。
+// actor 返回当前请求的操作者用户 ID,并顺便把用户标签缓存起来。
+// 缓存预热失败不影响主流程,后续 audit 渲染会按需兜底。
 func (ctrl *Controller) actor(c *gin.Context) string {
 	user := auth.UserFromContext(c)
-	if ctrl.store != nil {
-		ctrl.store.CacheUserLabel(user.UserId, user.Name)
+	if ctrl.repo != nil {
+		ctrl.repo.CacheUserLabel(user.UserId, user.Name)
 	}
 	return user.UserId
-}
-
-// encryptSecret 将明文 value 加密为可持久化的 ciphertext。
-func (ctrl *Controller) encryptSecret(c *gin.Context, value string) (postgres.SecretCiphertext, error) {
-	if ctrl.encryptor == nil {
-		return postgres.SecretCiphertext{}, errors.New("encryptor is not configured")
-	}
-	ciphertext, err := ctrl.encryptor.Encrypt(c.Request.Context(), []byte(value))
-	if err != nil {
-		return postgres.SecretCiphertext{}, err
-	}
-	return postgres.SecretCiphertext{
-		Algorithm: ciphertext.Algorithm,
-		Nonce:     ciphertext.Nonce,
-		Data:      ciphertext.Data,
-	}, nil
-}
-
-// decryptSecret 把 ciphertext 解密为明文字符串。
-func (ctrl *Controller) decryptSecret(c *gin.Context, ciphertext postgres.SecretCiphertext) (string, error) {
-	if ctrl.encryptor == nil {
-		return "", errors.New("encryptor is not configured")
-	}
-	plaintext, err := ctrl.encryptor.Decrypt(c.Request.Context(), secretcrypto.Ciphertext{
-		Algorithm: ciphertext.Algorithm,
-		Nonce:     ciphertext.Nonce,
-		Data:      ciphertext.Data,
-	})
-	if err != nil {
-		return "", err
-	}
-	return string(plaintext), nil
-}
-
-// cacheSecret 把 secret 密文写回 Redis，便于后续走缓存搜索。
-func (ctrl *Controller) cacheSecret(c *gin.Context, id string, ciphertext postgres.SecretCiphertext) {
-	if ctrl.cache == nil {
-		return
-	}
-
-	secret, err := ctrl.store.GetSecret(c.Request.Context(), id)
-	if err != nil {
-		logging.Warn(c.Request.Context(), "cacheSecret", "load secret for redis failed", logging.F("error", err), logging.F("id", id))
-		return
-	}
-
-	payload, err := json.Marshal(ciphertext)
-	if err != nil {
-		logging.Warn(c.Request.Context(), "cacheSecret", "marshal ciphertext failed", logging.F("error", err), logging.F("id", id))
-		return
-	}
-
-	err = ctrl.cache.UpsertSecret(c.Request.Context(), postgres.SecretCacheRecord{
-		Secret:          secret,
-		ValueCiphertext: payload,
-	})
-	if err != nil {
-		logging.Warn(c.Request.Context(), "cacheSecret", "redis upsert failed", logging.F("error", err), logging.F("id", id))
-	}
 }
 
 // log 是 handler 入口的统一访问日志。
@@ -256,8 +204,17 @@ func validateListProjects(c *gin.Context, req listRequest) bool {
 }
 
 func validateListEnvironments(c *gin.Context, req listRequest) bool {
+	if req.ProjectId == "" {
+		logging.Warn(c.Request.Context(), "validateListEnvironments", "projectId is required")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "projectId is required")
+		return false
+	}
+	return true
+}
+
+func validateListEnvironmentTemplates(c *gin.Context, req listRequest) bool {
 	if req.OrgId == "" {
-		logging.Warn(c.Request.Context(), "validateListEnvironments", "orgId is required")
+		logging.Warn(c.Request.Context(), "validateListEnvironmentTemplates", "orgId is required")
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "orgId is required")
 		return false
 	}
@@ -294,18 +251,4 @@ func validateSearchSecrets(c *gin.Context, req listRequest) bool {
 		return false
 	}
 	return true
-}
-
-func paginateSecrets(items []postgres.Secret, pagination postgres.Pagination) ([]postgres.Secret, int64) {
-	pagination = pagination.Normalize()
-	total := int64(len(items))
-	start := pagination.Offset()
-	if start >= len(items) {
-		return []postgres.Secret{}, total
-	}
-	end := start + pagination.Limit()
-	if end > len(items) {
-		end = len(items)
-	}
-	return items[start:end], total
 }

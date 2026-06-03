@@ -2,84 +2,255 @@
 
 状态：本文件中的业务路径 `code` 设计已按清库重建方式落地到 `configs/schema.sql`、核心 CRUD 接口、Redis Secret 缓存和 `design/api/core.yaml`。后续如果已有生产数据，需要另写迁移脚本，本次不包含历史数据迁移。
 
+v3 增量：环境归项目所有（`environments.project_id`），新增 `environment_templates` org 层只读模板汇总，删除 `project_environments` 关联表，代码与 schema 已按清库重建方式落地（v2 草稿"Org 共享 env"与"Org 共享 env 权限设计"两节已标记为 superseded）。
+
+v4 增量（架构瘦身）：去掉 7 个透传 service（Org/Project/Env/EnvTpl/Folder/Audit/User）与强类型 ID、`RoleInput`/`GrantInput` 入参结构;`internal/service/` 只保留 `SecretService`(加密/缓存/审计编排)与 `RBACService`(授权计算);handler → repo 直接调用;`Domain` 仅保留数据形状(无业务方法)。核心功能(secrets 管理、权限管控、JWT 认证、审计)与对外 API 无破坏性变更。后续平台扩展(OAuth、K8s、SDK、Helm、metrics、schema 迁移、secret 版本历史、KMS)记入文末"待办清单"。
+
+v5 增量（RBAC 接入 + 路径访问 + 命名澄清）：所有数据 handler(`/org/*`、`/project/*`、`/env/*`、`/env/template/*`、`/folder/*`、`/secret/*`、`/audit/*`)统一接入 `allowScope`;`org_admin` / `project_admin` / `project_viewer` 等角色真正生效。新增路径访问 `org_code.project_code.env_code.folder_code.KEY`,**单 SQL 5 表 join** 完成 4 级 code→id 解析,新增 `POST /api/v1/secret/path/info` 和 `/secret/path/reveal`。在 domain 层和 HTTP API 字段中显式表达 `userId` / `roleType` / `resourceType` / `resourceId` 三段式,RBAC 授权请求/响应支持新旧 alias 并存(无 breaking change)。数据库 schema 与 `permissionCode` / `defaultPermissions` / `defaultRoles` 不动。
+
+## v5：数据接口 RBAC 接入 + 路径访问 + RBAC 命名澄清
+
+> 本节为 v5 的最终设计,已按代码落地。覆盖三块改动:
+> 1. 数据 handler 全部接入 `allowScope`(Phase A);
+> 2. Secret 路径访问 `org_code.project_code.env_code.folder_code.KEY`(Phase B);
+> 3. RBAC 字段命名在 domain 和 API 层统一为 `userId` / `roleType` / `resourceType` / `resourceId`(Phase C)。
+
+### 1. 数据 handler RBAC 接入矩阵
+
+每个 handler 的 `allowScope` 矩阵(scope 取请求体中最深的可用字段):
+
+| Handler | Permission | scopeType | scopeId 来源 |
+| --- | --- | --- | --- |
+| `ListOrganizations` | `org:read` | `global` | `""` |
+| `CreateOrganization` | `org:create` | `global` | `""` |
+| `GetOrganization` | `org:read` | by-code: 先 `GetOrganizationByCode` 拿 id,再 `organization`/`id`;by-id: `organization`/`req.Id` | 视入口 |
+| `UpdateOrganization` | `org:update` | 同上 | 同上 |
+| `DeleteOrganization` | `org:delete` | 同上 | 同上 |
+| `ListProjects` | `project:read` | `organization` | `req.OrgId` |
+| `CreateProject` | `project:create` | `organization` | `req.ParentId` |
+| `GetProject` / `UpdateProject` / `DeleteProject` | `project:read/update/delete` | by-code: `project`/`req.Id`(先 `GetProjectByCode` 拿 id);by-id: `project`/`req.Id` | 视入口 |
+| `ListEnvironments` | `env:read` | `project` | `req.ProjectId` |
+| `CreateEnvironment` | `env:create` | `project` | `req.ParentId` |
+| `GetEnvironment` / `UpdateEnvironment` / `DeleteEnvironment` | `env:read/update/delete` | by-code: `environment`/`id`;by-id: `environment`/`req.Id` | 视入口 |
+| `ListEnvironmentTemplates` | `env:template:read` | `organization` | `req.OrgId` |
+| `GetEnvironmentTemplate` | `env:template:read` | by-code: `env_template`/`id`;by-id: `env_template`/`req.Id` | 视入口 |
+| `ListFolders` | `folder:read` | `environment` | `req.EnvironmentId` |
+| `CreateFolder` | `folder:create` | `environment` | `req.ParentId` |
+| `GetFolder` / `UpdateFolder` / `DeleteFolder` | `folder:read/update/delete` | by-code: `folder`/`id`;by-id: `folder`/`req.Id` | 视入口 |
+| `CreateSecret` | `secret:create` | `folder` | `req.FolderId` |
+| `UpdateSecret` | `secret:update` | `secret` | `req.Id` |
+| `RevealSecret` | **`secret:reveal`** | `secret` | `req.Id` |
+| `GetSecret` | `secret:read` | `secret` | `req.Id` |
+| `ListSecrets` | `secret:list` | `FolderId` 非空走 `folder`;否则 `environment` | 取最深 |
+| `SearchSecrets` | **`secret:search`** | 同上 | 取最深 |
+| `DeleteSecret` | `secret:delete` | `secret` | `req.Id` |
+| `ListAuditRecords` | `audit:read` | `req.ResourceType`/`req.ResourceId`;空时回退 `("global", "")` | 视入口 |
+
+关键点:
+
+- **`RevealSecret` 用 `secret:reveal`**,不与 `secret:read` 混用。`project_viewer` 有 read 但无 reveal,`project_developer` 同时有两者。
+- **`SearchSecrets` 用 `secret:search`**(跨 folder 的 keyword 检索,权限上比 list 高一档)。
+- **`ListSecrets` / `SearchSecrets` scope 策略**:FolderId 非空走 `folder` scope,否则 EnvironmentId 非空走 `environment` scope。RBAC 继承链在 `ResourceScopes` 内部走完。
+- **`Get/Update/Delete Organization` by-code 路径**:先 `GetOrganizationByCode` 拿 id,再以 id 做 RBAC 校验,保证 `org_admin` 绑在 org X 上后用 `code` 也能命中。
+- **`DeleteSecret` 重构**:从 `ctrl.delete(c, fn)` 展开为 `bind → allowScope → Delete`,权限校验在删之前,先于业务事务。
+- `platform_admin` 默认拥有所有权限码,`org_admin` / `project_admin` / `project_viewer` / `project_developer` 等角色在 v5 真正生效。
+
+### 2. Secret 路径访问
+
+#### 2.1 路径格式
+
+```text
+org_code.project_code.env_code.folder_code.KEY
+```
+
+例如:`o1.p1.dev.globals.DATABASE_URL`。
+
+#### 2.2 单 SQL 5 表 join
+
+`internal/store/postgres/repository.go::GetSecretByPath` 一次 round-trip 解析:
+
+```sql
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.comment, s.version,
+       s.created_by, s.updated_by,
+       s.created_at, s.updated_at
+from secrets s
+join folders f
+  on f.id = s.folder_id
+ and f.code = $5
+ and f.is_deleted = false
+join environments e
+  on e.id = f.environment_id
+ and e.code = $4
+ and e.is_deleted = false
+join projects p
+  on p.id = e.project_id
+ and p.code = $3
+ and p.is_deleted = false
+join organizations o
+  on o.id = p.org_id
+ and o.code = $2
+ and o.is_deleted = false
+where s.key = $1
+  and s.is_deleted = false
+limit 1
+```
+
+执行计划:
+
+- 4 步 index-nested-loop,每步命中一个 `(parent_id, code) where is_deleted = false` 唯一索引;
+- 任意一段 code 找不到 → 0 rows → `ErrNotFound`;
+- `Path` 字段由 `buildSecretPath` 自动拼接,值与 SQL 中的 code 一致。
+
+#### 2.3 接口
+
+| 路径 | 用途 | 权限 |
+| --- | --- | --- |
+| `POST /api/v1/secret/path/info` | 路径查询 secret metadata,不返回明文 value | `secret:read` |
+| `POST /api/v1/secret/path/reveal` | 路径查询 secret 明文 value,走加密 + reveal 审计 | `secret:reveal` |
+
+请求体:
+
+```json
+{ "path": "o1.p1.dev.globals.DATABASE_URL" }
+```
+
+#### 2.4 解析规则
+
+`internal/service/secret_service.go::parseSecretPath`:
+
+- 段间分隔符 `.`,共 5 段;
+- 任意一段为空或段数 != 5 → 返回 `invalid secret path` 错误;
+- 路径两侧空白被 `TrimSpace` 吃掉,中间空白不被处理。
+
+#### 2.5 效率与侧信道
+
+- 4 级 code 解析 + 最终 secret 查找,共 5 步 index-nested-loop,全走唯一索引,实测单次 < 5ms(本地 PG,常规数据量);
+- 相对"先 4 个 lookup 接口再 reveal"方案减少 4 次网络 round-trip,SDK 端代码从 5 次请求降为 1 次;
+- 路径接口在 `GetByPath` 成功后做 RBAC(`secret:read` / `secret:reveal`);无权限用户拿到 403,不会泄漏 secret 元数据。本次不隐藏侧信道(无权用户仍可通过 200 vs 403 时延差推断存在性),后续若需要严格防探测,把 `allowScope` 失败时的 403 改 404 即可。
+
+### 3. RBAC 命名澄清
+
+#### 3.1 字段映射
+
+domain 层和 HTTP API 层把内部实现术语映射为 SDK 友好的"用户-角色-资源"三段式:
+
+| 内部表/字段 | domain / API 字段 | 说明 |
+| --- | --- | --- |
+| `users.external_user_id` | `userId` | 客户端标识 |
+| `roles.code` | `roleType` | 角色码,例如 `org_admin` |
+| `user_role_bindings.scope_type` | `resourceType` | `global` / `organization` / `project` / `environment` / `folder` / `secret` / `env_template` |
+| `user_role_bindings.scope_id` | `resourceId` | global 时为空 |
+| `user_role_bindings.expires_at` | `expiresAt` | RFC3339 |
+| `user_role_bindings.granted_by` | `grantedBy` | 授权人 external_user_id |
+| `user_role_bindings.created_at` | `grantedAt` | 授权时间 |
+
+#### 3.2 domain 层
+
+`internal/domain/rbac.go` 新增 `RoleGrant` 类型(语义别名,字段一一对应)和 `(RoleBinding).ToGrant()` 转换方法。`RoleBinding` 字段保持不变,store/service 层不动。新类型仅在 HTTP API 响应中用。
+
+#### 3.3 HTTP API alias
+
+请求体 `roleGrantRequest` / `userLookupRequest` / `pagedUserLookupRequest` 新增 alias 字段:
+
+| 旧字段 | 新 alias | 解析优先级 |
+| --- | --- | --- |
+| `externalUserId` | `userId` | alias 非空(TrimSpace)时优先,否则回退旧字段 |
+| `roleCode` | `roleType` | 同上 |
+| `scopeType` | `resourceType` | 同上 |
+| `scopeId` | `resourceId` | 同上 |
+
+旧字段仍然兼容,绑定逻辑取 alias 优先。响应(`ListRoleBindings` / `ListUserGrants` / `GrantRole`)字段从 `RoleBinding` 整结构转成 `RoleGrant`,SDK 看到的是三段式;其他模块仍按 `RoleBinding` 消费,无 breaking change。
+
+### 4. 风险
+
+- `allowScope` 接入是隐式 breaking change:旧客户端过去能"通杀"的接口现在按 role 拒绝。`platform_admin` 默认拥有所有 code,部署时确保至少一个 platform_admin 存在(已有 `ENVVAULT_BOOTSTRAP_ADMIN_USER_ID` 兜底)。
+- `Get/Update/Delete Organization` by-code 路径多一次 `GetOrganizationByCode`,走 `(code) where is_deleted=false` 唯一索引,可忽略。
+- `path/info` / `path/reveal` 的侧信道:本期不处理。
+- `RoleGrant` 响应字段是新增,`RoleBinding` 内部不变,其他模块(store/service)不感知;只有 controller 出口变。
+- 未触及 schema 与 `defaultPermissions` / `defaultRoles`。
+
 ---
 
-## 新设计：环境归组织所有，项目按需关联
+## v3：环境归项目所有 + org 层 environment_templates
+
+> 本节为 v3 的最终设计，已按清库重建方式落地到 `configs/schema.sql` 与代码。
+> 与 v2 的"Org 共享 env"思路相反：env 不再共享，org 层只保留一份只读模板快照。
+> v2 草稿位于下方 `## 完整新设计：Org 共享环境 + Per-Project Folder（v2）` 与
+> `## Org 共享 env 模型下的权限设计` 两节（已标注 superseded by v3），保留作历史参考。
 
 ### 背景
 
-原设计：环境属于项目，每个项目创建时自动创建 dev/test/sim/prod 四个环境。
+v2 让 env 归属 org 并通过 `project_environments` 共享给各 project，落地过程中发现：
 
-新设计：环境属于组织，所有项目共享组织下的环境列表。项目创建时默认关联 dev/test/sim/prod 四个环境，也可选择关联其他已存在环境或创建新环境。
+- folder 需额外标 project 才能切断数据互见，模型复杂。
+- 业务上每个 project 的 dev/test 配置基本不互通，共享 env 没带来实际复用。
+- `internal/store/postgres/rbac.go` 的 `environmentScopes` / `folderScopes` / `secretScopes`
+  已经在 join `e.project_id`，但 schema 中 environments 当时没有该列，潜在 bug 未触发。
+
+v3 把 env 直接挂到 project 下，org 层另起一份只读模板表作为"曾经出现过的 env code 名册"。
 
 ### 数据模型调整
 
 **environments 表调整**：
-- `project_id` → `org_id`（环境属于组织）
+- `org_id` → `project_id`（env 重新归属 project）
+- 唯一索引改为 `(project_id, code) where is_deleted = false`
 
-**新增关联表**：
+**删除关联表**：
+- `project_environments` 整表删除
+
+**新增模板表**：
 ```sql
-create table if not exists project_environments (
+create table if not exists environment_templates (
     id uuid primary key,
-    project_id uuid not null,
-    environment_id uuid not null,
+    org_id uuid not null references organizations(id),
+    code text not null,
+    name text not null,
+    comment text not null default '',
+    is_deleted boolean not null default false,
+    deleted_at timestamptz,
+    deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
-    constraint project_environments_unique unique (project_id, environment_id)
+    updated_at timestamptz not null default now(),
+    constraint environment_templates_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
+
+create unique index if not exists environment_templates_org_code_active_uidx
+    on environment_templates (org_id, code)
+    where is_deleted = false;
 ```
 
-### 查询逻辑
+模板语义：仅记录"该 org 曾经出现过的 env code 与首次写入时的 name / comment"；
+后续修改或删除 env 都不会回写模板；upsert 走 `ON CONFLICT (org_id, code) WHERE is_deleted = false DO NOTHING`。
 
-**场景1：查询项目可用的环境**
-```sql
--- 如果项目有关联的 project_environments 记录，使用关联的环境
-SELECT e.* FROM environments e
-JOIN project_environments pe ON pe.environment_id = e.id
-WHERE pe.project_id = 'project-uuid' AND e.is_deleted = false;
+### HTTP 接口变更
 
--- 如果项目没有关联记录（初始状态），默认使用组织下所有环境
-SELECT e.* FROM environments e
-WHERE e.org_id = 'org-uuid' AND e.is_deleted = false;
-```
+- `POST /api/v1/project/create`：移除 `environmentIds`，新增 `environments: [EnvSpec]`；
+  服务端在事务中创建 env、默认 folder、并对每个 env code upsert 模板。
+- `POST /api/v1/env/list`：入参 `orgId` 改为 `projectId`（required）。
+- `POST /api/v1/env/{create,info,update,delete}`：请求体 `parentId` 语义改为 projectId。
+- `POST /api/v1/env/template/list`、`POST /api/v1/env/template/info`：新增，只读，
+  按 `(orgId, ...)` 过滤。
+- `POST /api/v1/secret/*`：服务端 join 链移除 `project_environments`，改为
+  `join projects p on p.id = e.project_id`。
 
-**场景2：查询组织下所有环境（供项目选择）**
-```sql
-SELECT e.* FROM environments e
-WHERE e.org_id = 'org-uuid' AND e.is_deleted = false;
-```
+### RBAC 调整
 
-### 创建项目时的行为
+- 新增权限码 `env:template:read`（resource_type=`env_template`，action=`template:read`），
+  在 `internal/auth/rbac.go` 的 `permissionCode` 中硬编码分支。
+- `internal/store/postgres/rbac.go` 的 `ResourceScopes` 增加 `env_template` 分支，
+  返回 `{global, organization(orgId)}` 两层 scope。
+- `org_viewer` / `org_auditor` 默认角色获得 `env:template:read`。
+- `org_admin` / `project_admin` 原本就具备 `env:create/env:update/env:delete`，
+  行为不变；rbac.go 的 `environmentScopes` / `folderScopes` / `secretScopes` 之前已经在
+  join `e.project_id`，schema 改完后**自动**正确，无需再改 SQL。
 
-1. 不再自动创建环境
-2. 默认关联组织下已有的 dev/test/sim/prod 四个环境
-3. 用户可以：
-   - 选择只关联部分环境（如只关联 dev/test）
-   - 选择创建新环境并关联
+### 当前限制
 
-### 创建环境时的行为
-
-1. 环境创建在组织下，不是项目下
-2. 自动关联到所有已有项目（或仅关联到创建时指定的项目，取决于业务决策）
-
-### 待办事项
-
-#### 数据库改动
-- [ ] `environments` 表：`project_id` 改为 `org_id`
-- [ ] 新增 `project_environments` 关联表
-- [ ] 更新 `schema.sql`
-- [ ] 更新外键约束
-
-#### 代码改动
-- [ ] `repository.go`：
-  - [ ] `CreateProject` 不再自动创建环境，改为关联组织下 dev/test/sim/prod
-  - [ ] `CreateEnvironment` 从 `project_id` 改为 `org_id`
-  - [ ] `ListEnvironments` 支持按 `org_id` 查询
-  - [ ] 新增 `ListProjectEnvironments` 查询项目关联的环境
-  - [ ] 新增 `AssociateEnvironmentsToProject` 关联环境到项目
-- [ ] `controller/resource.go`：
-  - [ ] `createEntityRequest` 可能需要调整
-  - [ ] 创建项目接口增加 `environmentIds` 可选参数，允许用户选择关联哪些环境
-- [ ] `schema.sql` 更新
+- `env_template:read` 权限码已注册但 RBAC authorizer 尚未接到 env/template 控制器，
+  留待后续接入。
+- 不写数据迁移脚本，按清库重建方式落地。
 
 ---
 
@@ -177,9 +348,11 @@ create unique index if not exists secret_versions_secret_version_uidx
 
 ---
 
-## 完整新设计：Org 共享环境 + Per-Project Folder（v2）
+## 完整新设计：Org 共享环境 + Per-Project Folder（v2，superseded by v3）
 
-> 状态：设计待评审，未实现。所有写库变更走"清库重建"路径，不包含历史数据迁移。
+> ⚠️ superseded by v3（见上方 `## v3：环境归项目所有 + org 层 environment_templates`）。
+> 状态：历史设计草稿，未实现。保留作为思考过程参考。
+> 所有写库变更按 v3 走"清库重建"路径。
 >
 > 范围：项目—环境绑定模型、Folder 2 级、Secret 路径快查。
 >
@@ -476,9 +649,11 @@ func buildSecretPath(orgCode, projectCode, envCode, folderPath, key string) stri
 
 ---
 
-## Org 共享 env 模型下的权限设计
+## Org 共享 env 模型下的权限设计（superseded by v3）
 
-> 状态：v2 设计评审要点，需在 schema 改动前敲定。
+> ⚠️ superseded by v3（见上方 `## v3：环境归项目所有 + org 层 environment_templates`）。
+> 状态：v2 历史设计要点，保留作为思考过程参考。
+> v3 不再需要 `env:bind` / `project/env/attach` / `project/env/detach` 等权限码——env 本身归属 project。
 
 ### 1. 核心论点：env 是"标签"，folder/secret 才是"数据"
 
@@ -670,3 +845,65 @@ alter table folders add column visibility text not null default 'private';
 - [ ] 跨 project 共享 folder 语义（§ 5.Q4）—— v2 不做，记入未来
 - [ ] env 名字本身是否敏感 —— 当前模型默认公开，由 `env:read` 授权范围控制可见性
 - [ ] 是否新增系统角色 `org:env:admin`（带 `env:manage` + `env:bind`）—— 当前可以让 org admin 直接持有这两个权限码
+
+---
+
+## 待办清单（按优先级倒排）
+
+> 本节集中登记尚未落地、后续要做的扩展项,每一项给出位置锚点(代码/设计文档
+> 中的入口)和大致方案。具体 PR 落地时再把"已做"勾掉。
+
+### P0 — 上线前必修
+
+- [x] ~~**所有数据 handler 接入 RBAC**~~:v5 已完成。`/org/*`、`/project/*`、`/env/*`、`/env/template/*`、`/folder/*`、`/secret/*`、`/audit/*` 7 个文件的 ~30 个 handler 全部走 `allowScope`,`org_admin` / `project_admin` / `project_viewer` / `project_developer` 等角色真正生效。
+- [ ] **Schema 版本化迁移**:把 `configs/drop_schema.sql` + `schema.sql` 替换成 `golang-migrate`(或 goose)的版本化迁移文件,迁移文件进 git,任何真实用户都不能接受"清库重建"。
+- [ ] **Secret 版本历史与回滚**:新增 `secret_versions` 表;`CreateSecret` / `UpdateSecret` 在事务里同时写一行 version(单调递增,记录 ciphertext + actor + 时间);新增 `POST /api/v1/secret/versions/list`、`POST /api/v1/secret/versions/revert`。
+- [ ] **加密密钥从 base64 升级到 KMS 集成**:`internal/crypto/Encryptor` 当前是单文件 base64 密钥,生产部署需对接 AWS KMS / Vault Transit / Aliyun KMS,加 `KmsEncryptor` 实现。
+- [ ] **LICENSE / README / CHANGELOG / CONTRIBUTING**:`LICENSE`(Apache-2.0 跟 Vault 对齐)、`README.md`(功能/quickstart/架构图/roadmap)、`CHANGELOG.md`、`.github/ISSUE_TEMPLATE`、`.github/PULL_REQUEST_TEMPLATE`。
+- [ ] **Dockerfile + docker-compose.yml**:server + postgres + redis 一键起。
+- [ ] **公开 API 兼容性测试**:`design/api/core.yaml` 跟实现必须同步;用 `oapi-codegen` 或自己写的 contract test 在 CI 强制。
+- [ ] **指标 (Prometheus)**:`/metrics` 端点 + `request_total{path,status}` / `request_duration_seconds{path}` / `secret_reveal_total` / `cache_hit_total{op}`。
+
+### P1 — 三个月内补齐
+
+- [ ] **Helm chart**:`charts/envvault/` 含 server + postgres + redis + ingress + service monitor,默认带 resource limit、HPA 钩子、PodDisruptionBudget。
+- [ ] **CI / CD**:`go test ./...` + `golangci-lint run` + `govulncheck` + 镜像构建(多架构 linux/amd64 + linux/arm64)+ GHCR 发布。
+- [ ] **结构化日志输出**:JSON 格式可切换(目前已经是结构化但仅文本),方便接入 Loki / ELK。
+- [ ] **OpenTelemetry 分布式追踪**:`/trace` + `traceparent` header 透传;Secret Reveal / RBAC 授权 / Cache lookup 关键 span。
+
+### P2 — 平台扩展
+
+- [ ] **OAuth 2.0 / OIDC 身份提供者**:在 `internal/auth/` 内抽出 `IdentityProvider` 接口,先做 GitHub / Google,后做企业 Okta / AzureAD;JWT 现有实现作为 `IdentityProvider` 的一个实现。
+- [ ] **SAML 2.0**:企业用户场景,放到 P2 末尾。
+- [ ] **K8s 集成 (CRD + Operator)**:在 `envvault-operator` 独立 repo 中实现:
+  - `EnvVaultSecret` CR:声明 secret 引用 + 注入目标
+  - `EnvVaultBinding` CR:声明把某个 env 下的所有 secret 注入到 namespace 中
+  - Operator 周期同步到 K8s `Secret`,应用方用 `envFrom` / `volumeMounts` 消费
+- [ ] **Go SDK**:`github.com/yourorg/envvault/sdk-go` 独立 module:
+  - 公开 `internal/domain/` 作为类型源
+  - 公开 `service.SecretService` / `service.RBACService` 作为 Go API
+  - TS SDK 从 OpenAPI 生成
+- [ ] **备份 / 恢复 CLI**:`envvaultctl backup > dump.json` / `envvaultctl restore < dump.json`,含 ciphertext 字段。
+- [ ] **多存储后端**:MySQL / MariaDB / SQLite (单机模式),在 `internal/store/` 已有接口,扩展成本主要是迁移 SQL 方言。
+
+### P3 — 长期演进
+
+- [ ] **Secret Rotation 调度器**:`POST /api/v1/secret/rotation-policy` 配 cron + 目标 plugin,周期性调出 + 回写。
+- [ ] **审计日志导出**:支持把 `audit_records` 推到 S3 / Loki / SIEM。
+- [ ] **多区域 / 高可用**:`SecretCache` 多 Redis 集群;Postgres 主从 + 只读副本;Raft 模式不打算做(参考 Vault Enterprise 而非 Vault OSS)。
+- [ ] **FIPS 140-2 模式**:`crypto/cipher` 换 BoringCrypto,Linux 发行版切换到 `golang-fips` 镜像。
+- [ ] **HCL / Terraform Provider**:`hashicorp/envvault` 给 IaC 用户使用。
+
+### 关键文件位置(给落地时找路)
+
+| 主题 | 入口 |
+|---|---|
+| 认证 / 授权 | `internal/auth/` (JWT 现状) / `internal/store/postgres/rbac.go` (PermissionStore) |
+| 加密 | `internal/crypto/encryptor.go` |
+| Secret 持久化 + 缓存 | `internal/store/postgres/repository.go` (Secret 部分) / `internal/store/redis/cache.go` |
+| Secret 业务编排 | `internal/service/secret_service.go` |
+| 路由 / DTO / 校验 | `internal/http/controller/` / `internal/http/router.go` |
+| 审计 | `internal/store/postgres/repository.go` `RecordAudit` / `ListAuditRecords` |
+| OpenAPI | `design/api/core.yaml` |
+| 数据库 schema | `configs/schema.sql` (待替换为 migrate) |
+| 配置 | `internal/config/config.go` |

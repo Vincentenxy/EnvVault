@@ -10,13 +10,8 @@ func (ctrl *Controller) ListPermissions(c *gin.Context) {
 	if !ctrl.ensureRBAC(c) {
 		return
 	}
-	var req PageRequest
-	if !ctrl.bind(c, &req) {
-		return
-	}
-	pagination := paginationFromRequest(req)
-	result, err := ctrl.rbac.ListPermissions(c.Request.Context(), pagination)
-	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
+	items, err := ctrl.rbac.ListPermissions(c.Request.Context())
+	ctrl.write(c, gin.H{"items": items}, err)
 }
 
 func (ctrl *Controller) GetMyPermissions(c *gin.Context) {

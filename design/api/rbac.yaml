@@ -267,7 +267,7 @@ paths:
                               list:
                                 type: array
                                 items:
-                                  $ref: "#/components/schemas/RoleBinding"
+                                  $ref: "#/components/schemas/RoleGrant"
         "403":
           $ref: "#/components/responses/Forbidden"
 
@@ -294,7 +294,7 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: "#/components/schemas/RoleBinding"
+                        $ref: "#/components/schemas/RoleGrant"
         "400":
           $ref: "#/components/responses/BadRequest"
         "403":
@@ -356,7 +356,7 @@ paths:
                               list:
                                 type: array
                                 items:
-                                  $ref: "#/components/schemas/RoleBinding"
+                                  $ref: "#/components/schemas/RoleGrant"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -428,7 +428,7 @@ paths:
                               list:
                                 type: array
                                 items:
-                                  $ref: "#/components/schemas/RoleBinding"
+                                  $ref: "#/components/schemas/RoleGrant"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -593,12 +593,18 @@ components:
 
     UserLookupRequest:
       type: object
-      required:
-        - externalUserId
+      description: |
+        At least one of `externalUserId` or `userId` must be set. When both are
+        present, `userId` is preferred (SDK-friendly alias). `scopeType` /
+        `resourceType` follow the same alias priority.
       properties:
         externalUserId:
           type: string
           example: user-123
+        userId:
+          type: string
+          example: user-123
+          description: Alias of externalUserId. Preferred when both are set.
 
     PageRequest:
       type: object
@@ -808,16 +814,54 @@ components:
           type: string
           format: date-time
 
+    RoleGrant:
+      type: object
+      description: |
+        SDK-friendly projection of a `RoleBinding`. The four core fields
+        (`userId` / `roleType` / `resourceType` / `resourceId`) follow the
+        "user-role-resource" mental model. The remaining fields
+        (`expiresAt` / `grantedBy` / `grantedAt`) are bookkeeping.
+      properties:
+        userId:
+          type: string
+          example: user-123
+        roleType:
+          type: string
+          example: project_developer
+        resourceType:
+          $ref: "#/components/schemas/ScopeType"
+        resourceId:
+          type: string
+          format: uuid
+          nullable: true
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        grantedBy:
+          type: string
+          example: admin-user
+        grantedAt:
+          type: string
+          format: date-time
+
     RoleGrantRequest:
       type: object
+      description: |
+        For SDK friendliness, every field has a camelCase alias. When both
+        the legacy and alias fields are set, the alias wins. Existing
+        clients using `externalUserId` / `roleCode` / `scopeType` / `scopeId`
+        continue to work unchanged.
       required:
-        - externalUserId
-        - roleCode
         - scopeType
       properties:
         externalUserId:
           type: string
           example: user-123
+        userId:
+          type: string
+          example: user-123
+          description: Alias of externalUserId. Preferred when both are set.
         name:
           type: string
           example: Alice
@@ -827,12 +871,24 @@ components:
         roleCode:
           type: string
           example: project_developer
+        roleType:
+          type: string
+          example: project_developer
+          description: Alias of roleCode. Preferred when both are set.
         scopeType:
           $ref: "#/components/schemas/ScopeType"
+        resourceType:
+          $ref: "#/components/schemas/ScopeType"
+          description: Alias of scopeType. Preferred when both are set.
         scopeId:
           type: string
           format: uuid
           nullable: true
+        resourceId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Alias of scopeId. Preferred when both are set.
         expiresAt:
           type: string
           format: date-time
@@ -841,22 +897,36 @@ components:
     RoleRevokeRequest:
       type: object
       required:
-        - externalUserId
-        - roleCode
         - scopeType
       properties:
         externalUserId:
           type: string
           example: user-123
+        userId:
+          type: string
+          example: user-123
+          description: Alias of externalUserId. Preferred when both are set.
         roleCode:
           type: string
           example: project_developer
+        roleType:
+          type: string
+          example: project_developer
+          description: Alias of roleCode. Preferred when both are set.
         scopeType:
           $ref: "#/components/schemas/ScopeType"
+        resourceType:
+          $ref: "#/components/schemas/ScopeType"
+          description: Alias of scopeType. Preferred when both are set.
         scopeId:
           type: string
           format: uuid
           nullable: true
+        resourceId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Alias of scopeId. Preferred when both are set.
 
     EffectivePermissionResult:
       type: object

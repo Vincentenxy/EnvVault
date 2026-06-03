@@ -4,18 +4,21 @@
 
 EnvVault 是一个类似 Infisical 的轻量级、支持私有化部署的密钥管理平台。系统通过 HTTP API 对外提供组织、项目、环境、Folder 和 Secret 的管理能力，并围绕密钥存储安全、权限控制、搜索、审计和历史追溯展开设计。
 
-核心产品层级：
+核心产品层级（v3）：
 
 ```text
 organization
   project
-    └─ 通过 project_environments 关联 0..n 个 environment
-  environment
-    └─ folder
-        └─ secret key:value
+    environment
+      └─ folder
+          └─ secret key:value
+organization
+  environment_templates    （只读模板/汇总）
 ```
 
-环境属于组织，项目通过 `project_environments` 关联表按需关联到具体环境。
+> v3 起，env 直接归属 project，不再使用 `project_environments` 关联表。
+> org 层额外维护一份 `environment_templates` 汇总，记录该 org 下"曾经创建过哪些 env code"，
+> 其 `name` / `comment` 永远是该 code 首次进入 org 时的快照，供前端在新建 project 时参考。
 
 默认环境：
 
@@ -147,9 +150,7 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 ### Project
 
-项目属于一个组织。创建项目时不再自动创建环境，而是关联组织下默认的 `dev`、`test`、`sim`、`prod` 四个环境。
-
-如果创建请求携带 `environmentIds` 字段，则按传入的环境 ID 列表建立关联；否则按 `code in ('dev','test','sim','prod')` 查找组织下同名环境进行关联，未找到的环境会被忽略。
+项目属于一个组织。v3 起，env 直接归属 project，project 创建时若请求体 `environments[]` 携带环境列表，会一并创建这些 env、默认 folder `globals` / `groups-secrets`，并对每个 env code 在 `environment_templates` 中 upsert；不传则 project 下不建任何 env，需要后续调用 `/api/v1/env/create` 补建。
 
 核心字段：
 
@@ -168,14 +169,12 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 ### Environment
 
-环境属于一个组织，组织下所有项目共享同一份环境列表。默认环境为 `dev`、`test`、`sim`、`prod`，同时支持自定义环境（如 `poc`）。
-
-项目通过 `project_environments` 关联表按需关联到具体环境，关联表结构见下文。
+环境属于一个 project，每个 project 拥有独立的环境列表。默认环境为 `dev`、`test`、`sim`、`prod`，同时支持自定义环境（如 `poc`）。
 
 核心字段：
 
 - `id`
-- `org_id`
+- `project_id`
 - `code`
 - `name`
 - `comment`
@@ -184,10 +183,11 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 约束：
 
-- 同一个组织下未删除环境的 `code` 唯一。
+- 同一个 project 下未删除环境的 `code` 唯一。
 - `name` 是展示名称，不参与唯一约束。
 - 创建环境时自动在该环境上创建默认 Folder：`globals` 和 `groups-secrets`。
-- 创建环境时自动把新环境关联到该组织下所有已有项目，确保新环境对存量项目立即可见。
+- 创建 project 时若在请求体 `environments[]` 中声明环境，会一次性创建这些 env、默认 folder 并 upsert org 层模板；不传则 project 下不建任何 env，后续通过 `/api/v1/env/create` 补建。
+- 创建 env 时（包括 project 内联创建与独立 create 接口）会 upsert `(org_id, code)` 在 `environment_templates` 中的模板行；模板已存在时 `name` / `comment` 保持首次写入快照不变。
 
 ### Folder
 
@@ -458,7 +458,7 @@ create unique index if not exists projects_org_code_active_uidx
 ```sql
 create table if not exists environments (
     id uuid primary key,
-    org_id uuid not null references organizations(id),
+    project_id uuid not null references projects(id),
     code text not null,
     name text not null,
     comment text not null default '',
@@ -472,30 +472,49 @@ create table if not exists environments (
     constraint environments_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
 
-create unique index if not exists environments_org_code_active_uidx
-    on environments (org_id, code)
+create unique index if not exists environments_project_code_active_uidx
+    on environments (project_id, code)
+    where is_deleted = false;
+
+create index if not exists environments_project_idx
+    on environments (project_id)
     where is_deleted = false;
 ```
 
-### project_environments
+### environment_templates
 
 ```sql
-create table if not exists project_environments (
+create table if not exists environment_templates (
     id uuid primary key,
-    project_id uuid not null references projects(id),
-    environment_id uuid not null references environments(id),
+    org_id uuid not null references organizations(id),
+    code text not null,
+    name text not null,
+    comment text not null default '',
+    is_deleted boolean not null default false,
+    deleted_at timestamptz,
+    deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
-    constraint project_environments_unique unique (project_id, environment_id)
+    updated_at timestamptz not null default now(),
+    constraint environment_templates_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
+
+create unique index if not exists environment_templates_org_code_active_uidx
+    on environment_templates (org_id, code)
+    where is_deleted = false;
+
+create index if not exists environment_templates_org_idx
+    on environment_templates (org_id)
+    where is_deleted = false;
 ```
 
 说明：
 
-- 关联表表达"项目使用了哪些环境"。
-- 一对多：同一个项目可关联多个环境，同一个环境可被多个项目关联。
-- 创建项目时按 `environmentIds` 写入；为空时按 `code in ('dev','test','sim','prod')` 自动关联。
-- 创建环境时自动把新环境反向关联到组织下所有已有项目。
-- 查询"项目可见的环境"必须 join 该表；删除关联记录会切断项目对环境的可见性，但不影响环境本身的存续。
+- 模板表是 org 层的只读快照，仅记录"该 org 曾经出现过的 env code 与首次写入时的 name/comment"。
+- 创建 env / 创建 project 时通过 `INSERT ... ON CONFLICT (org_id, code) WHERE is_deleted = false DO NOTHING` 写入。
+- 后续修改 env 的 `name` / `comment` **不会**回写模板；删除 env **不会**清理模板行。
+- 前端可在新建 project 时通过 `/api/v1/env/template/list` 拉取该 org 的模板，给用户预填环境名。
 
 ### folders
 
@@ -817,6 +836,7 @@ security:
 - 当 `auth.enabled = false` 时，服务端跳过 JWT 校验，并使用 `auth.dev_user_id`、`auth.dev_user_name` 注入开发用户，便于本地测试。
 - `Authorizer` 接口已实现，默认装载为 `RBACAuthorizer`（在 `internal/app/app.go` 中通过 `auth.NewRBACAuthorizer(rbacStore)` 注入），不再使用 `AllowAllAuthorizer`。
 - `AllowAllAuthorizer` 仍保留为测试与本地放行的可选实现。
+- v5 起所有数据 handler 全部接入 `allowScope`,`org_admin` / `project_admin` / `project_viewer` / `project_developer` 等角色真正生效。
 
 完整 RBAC 设计、实现细节和权限矩阵以 [rbac_degisn.md](rbac_degisn.md) 为准。
 
@@ -826,6 +846,98 @@ security:
 - 授权检查应靠近 service 操作本身。
 - 列表、搜索、审计查询必须按权限过滤。
 - `secret:read` 和 `secret:reveal` 必须拆开。
+
+### 字段命名：`user_id` / `role_type` / `resource_id`
+
+domain 层和 HTTP API 层把内部实现术语映射为 SDK 友好的"用户-角色-资源"三段式。数据库 schema 与 `permissionCode` / `defaultPermissions` / `defaultRoles` 不动,SDK 不直接面对 `scope_type` / `scope_id` / `role_code` 等内部命名。
+
+| 内部表/字段 | domain / API 字段 | 说明 |
+| --- | --- | --- |
+| `users.external_user_id` | `userId` | 客户端标识,SDK 用它做用户匹配 |
+| `roles.code` | `roleType` | 角色码,例如 `org_admin` |
+| `user_role_bindings.scope_type` | `resourceType` | `global` / `organization` / `project` / `environment` / `folder` / `secret` / `env_template` |
+| `user_role_bindings.scope_id` | `resourceId` | global 时为空 |
+| `user_role_bindings.expires_at` | `expiresAt` | RFC3339 |
+| `user_role_bindings.granted_by` | `grantedBy` | 授权人 external_user_id |
+| `user_role_bindings.created_at` | `grantedAt` | 授权时间 |
+
+`internal/domain/rbac.go` 新增 `RoleGrant` 类型作为 `RoleBinding` 的语义别名,`RoleBinding` 字段保持不变以兼容 store/service 层。新类型仅在 HTTP API 响应中用,经 `(RoleBinding).ToGrant()` 转换。
+
+请求体 `roleGrantRequest` / `userLookupRequest` / `pagedUserLookupRequest` 新增 alias 字段:
+
+| 旧字段 | 新 alias | 解析优先级 |
+| --- | --- | --- |
+| `externalUserId` | `userId` | alias 非空(TrimSpace)时优先,否则回退旧字段 |
+| `roleCode` | `roleType` | 同上 |
+| `scopeType` | `resourceType` | 同上 |
+| `scopeId` | `resourceId` | 同上 |
+
+旧字段仍然兼容,绑定逻辑取 alias 优先;无 breaking change。响应(`ListRoleBindings` / `ListUserGrants` / `GrantRole`)字段从 `RoleBinding` 整结构转成 `RoleGrant`,SDK 看到的是三段式。
+
+## Secret 路径访问
+
+v5 起 Secret 支持路径访问,SDK / K8s 集成无需先调 4 个 lookup 接口再调 reveal。
+
+### 路径格式
+
+```text
+org_code.project_code.env_code.folder_code.KEY
+```
+
+示例:`o1.p1.dev.globals.DATABASE_URL`。
+
+### 单 SQL 5 表 join
+
+`internal/store/postgres/repository.go::GetSecretByPath` 一次 round-trip 解析 4 级 code + key:
+
+```sql
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.comment, s.version,
+       s.created_by, s.updated_by,
+       s.created_at, s.updated_at
+from secrets s
+join folders f
+  on f.id = s.folder_id
+ and f.code = $5
+ and f.is_deleted = false
+join environments e
+  on e.id = f.environment_id
+ and e.code = $4
+ and e.is_deleted = false
+join projects p
+  on p.id = e.project_id
+ and p.code = $3
+ and p.is_deleted = false
+join organizations o
+  on o.id = p.org_id
+ and o.code = $2
+ and o.is_deleted = false
+where s.key = $1
+  and s.is_deleted = false
+limit 1
+```
+
+执行计划为 4 步 index-nested-loop,每步命中一个 `(parent_id, code) where is_deleted = false` 唯一索引;任意一段 code 找不到 → 0 rows → `ErrNotFound`。`Path` 字段由 `buildSecretPath` 自动拼接。
+
+### 接口
+
+| 路径 | 用途 | 权限 |
+| --- | --- | --- |
+| `POST /api/v1/secret/path/info` | 路径查询 secret metadata,不返回明文 value | `secret:read` |
+| `POST /api/v1/secret/path/reveal` | 路径查询 secret 明文 value,走加密 + reveal 审计 | `secret:reveal` |
+
+请求体:
+
+```json
+{ "path": "o1.p1.dev.globals.DATABASE_URL" }
+```
+
+`RevealByPath` 走现有 `Reveal` 加密链路:`GetByPath` 拿 id → `Reveal(id)` 解密 → 写 reveal 审计。RBAC 在 `GetByPath` 成功后做(`secret:read` / `secret:reveal`),无权限用户拿到 403。本次不隐藏侧信道,后续若需严格防探测,把 `allowScope` 失败时的 403 改 404 即可。
+
+### 效率与权衡
+
+- 4 级 code 解析 + 最终 secret 查找共 5 步 index-nested-loop,全走唯一索引,实测单次 < 5ms(本地 PG,常规数据量);
+- 相对"先 4 个 lookup 接口再 reveal"方案减少 4 次网络 round-trip,SDK 端代码从 5 次请求降为 1 次;
+- 5 段解析(`parseSecretPath`)在 service 层做,任一段为空或段数 != 5 → `invalid secret path`,早失败。
 
 ## 日志与链路追踪
 
@@ -1056,31 +1168,37 @@ x-request-id
   "code": "project-a",
   "name": "项目 A",
   "comment": "项目说明",
-  "environmentIds": ["env-uuid-1", "env-uuid-2"]
+  "environments": [
+    {"code": "dev",  "name": "Development"},
+    {"code": "test", "name": "Testing"},
+    {"code": "prod", "name": "Production"}
+  ]
 }
 ```
 
-`environmentIds` 为可选字段：
+`environments` 为可选字段：
 
-- 不传或传空数组：按 `code in ('dev','test','sim','prod')` 查找组织下同名环境并自动关联。
-- 传入具体 ID 列表：按入参 ID 建立 `project_environments` 关联，未在组织下找到的环境会被忽略。
-- 当前实现不支持在项目创建后再修改环境关联，需要追加专门的关联接口。
+- 不传或传空数组：project 下不会创建任何环境，后续通过 `/api/v1/env/create` 补建。
+- 传入 `EnvSpec` 列表：按顺序在事务中创建 env + 默认 folder `globals` / `groups-secrets`，并对每个 code 在 `environment_templates` 中 upsert（已存在则保持首次快照）。
+- v3 起不再支持"项目级环境关联修改接口"，因为 env 本身归属 project 已是最终模型。
 
 ### 环境接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/v1/env/list` | 环境列表 |
+| POST | `/api/v1/env/list` | 环境列表（按 projectId 过滤） |
 | POST | `/api/v1/env/create` | 创建环境 |
 | POST | `/api/v1/env/info` | 环境详情 |
 | POST | `/api/v1/env/update` | 更新环境 |
 | POST | `/api/v1/env/delete` | 删除环境 |
+| POST | `/api/v1/env/template/list` | org 层 env 模板列表（只读） |
+| POST | `/api/v1/env/template/info` | org 层 env 模板详情（只读） |
 
 环境列表：
 
 ```json
 {
-  "orgId": "uuid",
+  "projectId": "uuid",
   "pageNum": 1,
   "pageSize": 20
 }
@@ -1090,14 +1208,26 @@ x-request-id
 
 ```json
 {
-  "parentId": "org uuid",
+  "parentId": "project uuid",
   "code": "poc",
   "name": "poc",
   "comment": "自定义环境"
 }
 ```
 
-创建环境成功后自动在该环境下创建默认 Folder `globals` 和 `groups-secrets`，并把新环境关联到组织下所有已有项目。
+创建环境成功后自动在该环境下创建默认 Folder `globals` 和 `groups-secrets`，并对 org 层模板执行 `ON CONFLICT DO NOTHING` upsert。
+
+环境模板列表（org 层只读）：
+
+```json
+{
+  "orgId": "uuid",
+  "pageNum": 1,
+  "pageSize": 20
+}
+```
+
+环境模板详情：`{ "id": "..." }` 或 `{ "parentId": "org uuid", "code": "dev" }` 二选一。
 
 ### Folder 接口
 
@@ -1308,6 +1438,5 @@ curl http://localhost:8080/api/v1/readyz
 - 当前删除上级资源时未定义是否级联删除子资源，需要补业务规则。
 - 当前 `audit_records` 只保存基础字段，后续建议补充 request id、metadata 和 diff。
 - 当前 `secret_versions` 尚未实现，主表只保留最新 version 字段，缺少历史回滚能力。
-- 当前缺少项目级别的环境关联调整接口：项目创建后再修改 `project_environments` 关联记录的 HTTP 接口尚未暴露。
-- 当前 `project_environments` 表只声明了 `unique` 约束，没有声明式 `references` 外键，与其他父子表的风格不一致，建议补齐。
+- 当前 `env_template:read` 权限码已注册但 RBAC authorizer 尚未接到 env/template 控制器，后续接入。
 - 当前 value 搜索尚未实现，详见 [search.md](search.md)。

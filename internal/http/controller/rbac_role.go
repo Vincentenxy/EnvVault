@@ -2,8 +2,6 @@ package controller
 
 import (
 	"github.com/gin-gonic/gin"
-
-	"envVault/internal/store/postgres"
 )
 
 func (ctrl *Controller) ListRoles(c *gin.Context) {
@@ -48,15 +46,9 @@ func (ctrl *Controller) CreateRole(c *gin.Context) {
 	if !ctrl.allowScope(c, "rbac:role:manage", req.ScopeType, req.ScopeId) {
 		return
 	}
-	item, err := ctrl.rbac.CreateRole(c.Request.Context(), postgres.RoleInput{
-		Code:        req.Code,
-		Name:        req.Name,
-		Description: req.Description,
-		ScopeType:   req.ScopeType,
-		ScopeId:     req.ScopeId,
-		Permissions: req.Permissions,
-		Actor:       ctrl.actor(c),
-	})
+	item, err := ctrl.rbac.CreateRole(c.Request.Context(),
+		req.Code, req.Name, req.Description, req.ScopeType, req.ScopeId, req.Permissions, ctrl.actor(c),
+	)
 	ctrl.write(c, item, err)
 }
 
@@ -71,16 +63,9 @@ func (ctrl *Controller) UpdateRole(c *gin.Context) {
 	if !ctrl.allowScope(c, "rbac:role:manage", req.ScopeType, req.ScopeId) {
 		return
 	}
-	item, err := ctrl.rbac.UpdateRole(c.Request.Context(), postgres.RoleInput{
-		Id:          req.Id,
-		Code:        req.Code,
-		Name:        req.Name,
-		Description: req.Description,
-		ScopeType:   req.ScopeType,
-		ScopeId:     req.ScopeId,
-		Permissions: req.Permissions,
-		Actor:       ctrl.actor(c),
-	})
+	item, err := ctrl.rbac.UpdateRole(c.Request.Context(),
+		req.Id, req.Code, req.Name, req.Description, req.ScopeType, req.ScopeId, req.Permissions, ctrl.actor(c),
+	)
 	ctrl.write(c, item, err)
 }
 

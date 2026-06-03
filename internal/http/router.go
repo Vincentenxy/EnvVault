@@ -7,19 +7,17 @@ import (
 
 	"envVault/internal/auth"
 	"envVault/internal/config"
-	secretcrypto "envVault/internal/crypto"
 	"envVault/internal/http/controller"
 	"envVault/internal/logging"
+	"envVault/internal/service"
 	"envVault/internal/store/postgres"
-	rediscache "envVault/internal/store/redis"
 )
 
 type Dependencies struct {
 	Config     config.Config
-	Store      *postgres.Repository
-	RBAC       *postgres.RBACStore
-	Cache      *rediscache.Cache
-	Encryptor  secretcrypto.Encryptor
+	Repo       *postgres.Repository
+	Secret     service.SecretService
+	RBAC       service.RBACService
 	Authorizer auth.Authorizer
 	Database   interface {
 		PingContext(ctx context.Context) error
@@ -43,10 +41,9 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 	ctrl := controller.New(controller.Dependencies{
 		Config:     deps.Config,
 		Database:   deps.Database,
-		Store:      deps.Store,
+		Repo:       deps.Repo,
+		Secret:     deps.Secret,
 		RBAC:       deps.RBAC,
-		Cache:      deps.Cache,
-		Encryptor:  deps.Encryptor,
 		Authorizer: deps.Authorizer,
 	})
 
@@ -103,6 +100,11 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 					env.POST("/info", ctrl.GetEnvironment)
 					env.POST("/update", ctrl.UpdateEnvironment)
 					env.POST("/delete", ctrl.DeleteEnvironment)
+					template := env.Group("/template")
+					{
+						template.POST("/list", ctrl.ListEnvironmentTemplates)
+						template.POST("/info", ctrl.GetEnvironmentTemplate)
+					}
 				}
 
 				folder := protected.Group("/folder")
@@ -123,6 +125,8 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 					secret.POST("/reveal", ctrl.RevealSecret)
 					secret.POST("/update", ctrl.UpdateSecret)
 					secret.POST("/delete", ctrl.DeleteSecret)
+					secret.POST("/path/info", ctrl.GetSecretByPath)
+					secret.POST("/path/reveal", ctrl.RevealSecretByPath)
 				}
 
 				audit := protected.Group("/audit")

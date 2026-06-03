@@ -7,6 +7,7 @@ drop table if exists permissions;
 drop table if exists users;
 drop table if exists secrets;
 drop table if exists folders;
+drop table if exists environment_templates;
 drop table if exists environments;
 drop table if exists projects;
 drop table if exists audit_records;
@@ -55,9 +56,10 @@ create unique index if not exists projects_org_code_active_uidx
     on projects (org_id, code)
     where is_deleted = false;
 
+-- v3: env 归属 project;org 下不再直接挂 env
 create table if not exists environments (
     id uuid primary key,
-    org_id uuid not null,
+    project_id uuid not null references projects(id),
     code text not null,
     name text not null,
     comment text not null default '',
@@ -71,17 +73,38 @@ create table if not exists environments (
     constraint environments_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
 
-create unique index if not exists environments_org_code_active_uidx
-    on environments (org_id, code)
+create unique index if not exists environments_project_code_active_uidx
+    on environments (project_id, code)
     where is_deleted = false;
 
-create table if not exists project_environments (
+create index if not exists environments_project_idx
+    on environments (project_id)
+    where is_deleted = false;
+
+-- v3: org 层 env 模板汇总,只读快照;以首次写入为准
+create table if not exists environment_templates (
     id uuid primary key,
-    project_id uuid not null,
-    environment_id uuid not null,
+    org_id uuid not null references organizations(id),
+    code text not null,
+    name text not null,
+    comment text not null default '',
+    is_deleted boolean not null default false,
+    deleted_at timestamptz,
+    deleted_by text not null default '',
+    created_by text not null default '',
+    updated_by text not null default '',
     created_at timestamptz not null default now(),
-    constraint project_environments_unique unique (project_id, environment_id)
+    updated_at timestamptz not null default now(),
+    constraint environment_templates_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
+
+create unique index if not exists environment_templates_org_code_active_uidx
+    on environment_templates (org_id, code)
+    where is_deleted = false;
+
+create index if not exists environment_templates_org_idx
+    on environment_templates (org_id)
+    where is_deleted = false;
 
 create table if not exists folders (
     id uuid primary key,

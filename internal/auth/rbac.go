@@ -90,6 +90,10 @@ func permissionCode(action, resourceType string) string {
 	if resourceType == "" {
 		return ""
 	}
+	// env_template 是 org 层只读资源,权限码独立于 env:* 命名空间。
+	if resourceType == "env_template" && action == "read" {
+		return "env:template:read"
+	}
 	return permissionResourceType(resourceType) + ":" + action
 }
 

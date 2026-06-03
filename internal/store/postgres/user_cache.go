@@ -51,7 +51,7 @@ from users
 	return nil
 }
 
-func (c *UserCache) Set(externalUserId, name string) {
+func (c *UserCache) CacheUserLabel(externalUserId, name string) {
 	if c == nil {
 		return
 	}

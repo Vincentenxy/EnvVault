@@ -3,7 +3,7 @@ package controller
 import (
 	"github.com/gin-gonic/gin"
 
-	"envVault/internal/store/postgres"
+	"envVault/internal/domain"
 )
 
 func (ctrl *Controller) ListRoleBindings(c *gin.Context) {
@@ -19,7 +19,7 @@ func (ctrl *Controller) ListRoleBindings(c *gin.Context) {
 	}
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.rbac.ListRoleBindings(c.Request.Context(), req.ScopeType, req.ScopeId, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
+	ctrl.write(c, pageData(toGrants(result.Items), result.Total, pagination), err)
 }
 
 func (ctrl *Controller) GrantRole(c *gin.Context) {
@@ -33,17 +33,16 @@ func (ctrl *Controller) GrantRole(c *gin.Context) {
 	if !ctrl.allowScope(c, "rbac:binding:manage", req.ScopeType, req.ScopeId) {
 		return
 	}
-	item, err := ctrl.rbac.GrantRole(c.Request.Context(), postgres.GrantInput{
-		ExternalUserId: req.ExternalUserId,
-		Name:           req.Name,
-		Email:          req.Email,
-		RoleCode:       req.RoleCode,
-		ScopeType:      req.ScopeType,
-		ScopeId:        req.ScopeId,
-		ExpiresAt:      req.ExpiresAt,
-		Actor:          ctrl.actor(c),
-	})
-	ctrl.write(c, item, err)
+	r := req.resolve()
+	item, err := ctrl.rbac.GrantRole(c.Request.Context(),
+		r.UserId, r.Name, r.Email, r.RoleCode,
+		r.ScopeType, r.ScopeId, r.ExpiresAt, ctrl.actor(c),
+	)
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+	ctrl.write(c, item.ToGrant(), nil)
 }
 
 func (ctrl *Controller) RevokeRole(c *gin.Context) {
@@ -57,12 +56,18 @@ func (ctrl *Controller) RevokeRole(c *gin.Context) {
 	if !ctrl.allowScope(c, "rbac:binding:manage", req.ScopeType, req.ScopeId) {
 		return
 	}
-	err := ctrl.rbac.RevokeRole(c.Request.Context(), postgres.GrantInput{
-		ExternalUserId: req.ExternalUserId,
-		RoleCode:       req.RoleCode,
-		ScopeType:      req.ScopeType,
-		ScopeId:        req.ScopeId,
-		Actor:          ctrl.actor(c),
-	})
+	r := req.resolve()
+	err := ctrl.rbac.RevokeRole(c.Request.Context(),
+		r.UserId, r.RoleCode, r.ScopeType, r.ScopeId, ctrl.actor(c),
+	)
 	ctrl.write(c, gin.H{"deleted": true}, err)
+}
+
+// toGrants 把 RoleBinding 列表转成 RoleGrant 列表,controller 出口字段 SDK 友好。
+func toGrants(bindings []domain.RoleBinding) []domain.RoleGrant {
+	out := make([]domain.RoleGrant, 0, len(bindings))
+	for _, b := range bindings {
+		out = append(out, b.ToGrant())
+	}
+	return out
 }

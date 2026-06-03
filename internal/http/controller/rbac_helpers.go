@@ -9,10 +9,12 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"envVault/internal/auth"
+	"envVault/internal/domain"
 	"envVault/internal/http/response"
 	"envVault/internal/logging"
-	"envVault/internal/store/postgres"
 )
+
+// 通用请求体:RBAC 子树共用
 
 type scopeRequest struct {
 	ScopeType string `json:"scopeType"`
@@ -41,6 +43,7 @@ type roleRequest struct {
 }
 
 type roleGrantRequest struct {
+	// 旧字段(保留兼容)
 	ExternalUserId string     `json:"externalUserId"`
 	Name           string     `json:"name"`
 	Email          string     `json:"email"`
@@ -48,23 +51,70 @@ type roleGrantRequest struct {
 	ScopeType      string     `json:"scopeType"`
 	ScopeId        string     `json:"scopeId"`
 	ExpiresAt      *time.Time `json:"expiresAt"`
+
+	// 新 alias 字段(SDK 友好);非空时优先于旧字段
+	UserId       string `json:"userId,omitempty"`
+	RoleType     string `json:"roleType,omitempty"`
+	ResourceType string `json:"resourceType,omitempty"`
+	ResourceId   string `json:"resourceId,omitempty"`
+}
+
+// resolvedRoleGrant 是 roleGrantRequest 经 alias 解析后的扁平结果。
+type resolvedRoleGrant struct {
+	UserId       string
+	Name         string
+	Email        string
+	RoleCode     string
+	ScopeType    string
+	ScopeId      string
+	ExpiresAt    *time.Time
+	HasExpiresAt bool
+}
+
+func (r roleGrantRequest) resolve() resolvedRoleGrant {
+	return resolvedRoleGrant{
+		UserId:       pickAlias(r.UserId, r.ExternalUserId),
+		Name:         r.Name,
+		Email:        r.Email,
+		RoleCode:     pickAlias(r.RoleType, r.RoleCode),
+		ScopeType:    pickAlias(r.ResourceType, r.ScopeType),
+		ScopeId:      pickAlias(r.ResourceId, r.ScopeId),
+		ExpiresAt:    r.ExpiresAt,
+		HasExpiresAt: r.ExpiresAt != nil,
+	}
 }
 
 type userLookupRequest struct {
 	ExternalUserId string `json:"externalUserId"`
 	ScopeType      string `json:"scopeType"`
 	ScopeId        string `json:"scopeId"`
+
+	// alias
+	UserId string `json:"userId,omitempty"`
 }
 
 type pagedUserLookupRequest struct {
 	PageRequest
 	ExternalUserId string `json:"externalUserId"`
+
+	// alias
+	UserId string `json:"userId,omitempty"`
 }
+
+// pickAlias 在 alias 优先;空时回退到旧字段,空字符串走 TrimSpace 防御。
+func pickAlias(newVal, oldVal string) string {
+	if v := strings.TrimSpace(newVal); v != "" {
+		return v
+	}
+	return strings.TrimSpace(oldVal)
+}
+
+// 通用助手
 
 func (ctrl *Controller) ensureRBAC(c *gin.Context) bool {
 	if ctrl.rbac == nil {
-		logging.Error(c.Request.Context(), "ensureRBAC", "rbac store is not configured")
-		response.Fail(c, http.StatusServiceUnavailable, response.CodeStoreUnavailable, "rbac store is not configured")
+		logging.Error(c.Request.Context(), "ensureRBAC", "rbac service is not configured")
+		response.Fail(c, http.StatusServiceUnavailable, response.CodeStoreUnavailable, "rbac service is not configured")
 		return false
 	}
 	return true
@@ -87,7 +137,7 @@ func (ctrl *Controller) allowScope(c *gin.Context, permission, scopeType, scopeI
 	if err == nil {
 		return true
 	}
-	if errors.Is(err, postgres.ErrNotFound) {
+	if errors.Is(err, domain.ErrNotFound) {
 		logging.Warn(c.Request.Context(), "allowScope", "resource not found", logging.F("scopeType", scopeType), logging.F("scopeId", scopeId))
 		response.Fail(c, http.StatusNotFound, response.CodeNotFound, err.Error())
 		return false
@@ -101,15 +151,11 @@ func (ctrl *Controller) allowScope(c *gin.Context, permission, scopeType, scopeI
 	return false
 }
 
-func paginationFromRequest(req PageRequest) postgres.Pagination {
-	return postgres.Pagination{PageNum: req.PageNum, PageSize: req.PageSize}.Normalize()
+func paginationFromRequest(req PageRequest) domain.Pagination {
+	return domain.Pagination{PageNum: req.PageNum, PageSize: req.PageSize}.Normalize()
 }
 
-func pageData(items any, total int64, pagination postgres.Pagination) PageResp {
-	return paginationData(items, total, pagination)
-}
-
-func paginationData(items any, total int64, pagination postgres.Pagination) PageResp {
+func pageData(items any, total int64, pagination domain.Pagination) PageResp {
 	pagination = pagination.Normalize()
 	return PageResp{
 		PageNum:  pagination.PageNum,

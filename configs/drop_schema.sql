@@ -8,6 +8,8 @@ drop table if exists audit_records cascade;
 drop table if exists deleted_records cascade;
 drop table if exists secrets cascade;
 drop table if exists folders cascade;
+drop table if exists environment_templates cascade;
 drop table if exists environments cascade;
+drop table if exists project_environments cascade;
 drop table if exists projects cascade;
 drop table if exists organizations cascade;

@@ -3,34 +3,8 @@ package controller
 import (
 	"testing"
 
-	"envVault/internal/store/postgres"
+	"envVault/internal/domain"
 )
-
-func TestPaginateSecrets(t *testing.T) {
-	items := []postgres.Secret{
-		{Id: "1"},
-		{Id: "2"},
-		{Id: "3"},
-	}
-
-	got, total := paginateSecrets(items, postgres.Pagination{PageNum: 2, PageSize: 2})
-	if total != 3 {
-		t.Fatalf("total = %d, want 3", total)
-	}
-	if len(got) != 1 || got[0].Id != "3" {
-		t.Fatalf("items = %#v, want only id 3", got)
-	}
-}
-
-func TestPaginateSecretsOutOfRange(t *testing.T) {
-	got, total := paginateSecrets([]postgres.Secret{{Id: "1"}}, postgres.Pagination{PageNum: 3, PageSize: 20})
-	if total != 1 {
-		t.Fatalf("total = %d, want 1", total)
-	}
-	if len(got) != 0 {
-		t.Fatalf("items length = %d, want 0", len(got))
-	}
-}
 
 func TestCodePattern(t *testing.T) {
 	valid := []string{"org-a", "project1", "groups-secrets"}
@@ -65,9 +39,9 @@ func TestSecretKeyPattern(t *testing.T) {
 }
 
 func TestPageDataUsesGenericListShape(t *testing.T) {
-	items := []postgres.Entity{{Id: "org-1"}}
+	items := []domain.Entity{{Id: "org-1"}}
 
-	got := pageData(items, 7, postgres.Pagination{PageNum: 2, PageSize: 5})
+	got := pageData(items, 7, domain.Pagination{PageNum: 2, PageSize: 5})
 
 	if got.PageNum != 2 {
 		t.Fatalf("pageNum = %d, want 2", got.PageNum)
@@ -78,9 +52,9 @@ func TestPageDataUsesGenericListShape(t *testing.T) {
 	if got.Total != 7 {
 		t.Fatalf("total = %d, want 7", got.Total)
 	}
-	list, ok := got.List.([]postgres.Entity)
+	list, ok := got.List.([]domain.Entity)
 	if !ok {
-		t.Fatalf("list type = %T, want []postgres.Entity", got.List)
+		t.Fatalf("list type = %T, want []domain.Entity", got.List)
 	}
 	if len(list) != 1 || list[0].Id != "org-1" {
 		t.Fatalf("list = %#v, want org-1", list)

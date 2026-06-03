@@ -12,6 +12,7 @@ import (
 	secretcrypto "envVault/internal/crypto"
 	httpapi "envVault/internal/http"
 	"envVault/internal/logging"
+	"envVault/internal/service"
 	"envVault/internal/store/postgres"
 	rediscache "envVault/internal/store/redis"
 )
@@ -50,8 +51,14 @@ func Run() error {
 		}
 	}
 
+	// service 层:仅 secret 编排与 RBAC 业务两处需要 service。
+	// 透传型 CRUD(Org/Project/Env/EnvTpl/Folder/Audit)直接 handler→repo。
+	rbacSvc := service.NewRBACService(rbacStore)
+
 	var cache *rediscache.Cache
+	var secretSvc service.SecretService
 	if cfg.Redis.Enabled {
+		var err error
 		cache, err = rediscache.Open(ctx, cfg.Redis)
 		if err != nil {
 			return err
@@ -68,15 +75,17 @@ func Run() error {
 			}
 			logging.Info(ctx, "AppRun", "redis cache warmup completed", logging.F("count", len(records)))
 		}
+		secretSvc = service.NewSecretService(repository, encryptor, cache)
+	} else {
+		secretSvc = service.NewSecretService(repository, encryptor, nil)
 	}
 
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Config:     cfg,
 		Database:   db,
-		Store:      repository,
-		RBAC:       rbacStore,
-		Cache:      cache,
-		Encryptor:  encryptor,
+		Repo:       repository,
+		Secret:     secretSvc,
+		RBAC:       rbacSvc,
 		Authorizer: auth.NewRBACAuthorizer(rbacStore),
 	})
 

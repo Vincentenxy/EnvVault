@@ -156,7 +156,10 @@ paths:
     post:
       tags: [Projects]
       summary: Create project
-      description: Creates default environment associations automatically if environmentIds not provided.
+      description: |
+        Creates the project and, atomically, the listed environments (each with default folders
+        `globals` / `groups-secrets`). For each environment code, an org-level
+        `environment_templates` row is upserted on first write and reused thereafter.
       requestBody:
         required: true
         content:
@@ -166,12 +169,13 @@ paths:
                 - $ref: "#/components/schemas/CreateChildEntityRequest"
                 - type: object
                   properties:
-                    environmentIds:
+                    environments:
                       type: array
                       items:
-                        type: string
-                        format: uuid
-                      description: Optional list of environment IDs to associate. If not provided, associates dev/test/sim/prod.
+                        $ref: "#/components/schemas/EnvSpec"
+                      description: |
+                        Environments to create under the new project. If omitted, no environments
+                        are created and the caller must create them via /api/v1/env/create.
       responses:
         "200":
           $ref: "#/components/responses/Entity"
@@ -218,10 +222,12 @@ paths:
               allOf:
                 - $ref: "#/components/schemas/PageRequest"
                 - type: object
+                  required: [projectId]
                   properties:
-                    orgId:
+                    projectId:
                       type: string
                       format: uuid
+                      description: Project whose environments to list.
       responses:
         "200":
           $ref: "#/components/responses/EnvironmentList"
@@ -230,7 +236,10 @@ paths:
     post:
       tags: [Environments]
       summary: Create environment
-      description: Creates default folders automatically.
+      description: |
+        Creates an environment under the project identified by `parentId`, plus the
+        default folders `globals` / `groups-secrets`. Upserts the org-level
+        `environment_templates` row for the new env code (snapshot on first write only).
       requestBody:
         $ref: "#/components/requestBodies/CreateChildEntity"
       responses:
@@ -266,6 +275,49 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/Deleted"
+
+  /api/v1/env/template/list:
+    post:
+      tags: [Environments]
+      summary: List environment templates for an org
+      description: |
+        Read-only summary of env codes the org has ever instantiated. The template's
+        name/comment is the snapshot from the first write; updating individual
+        environments does not change the template.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/PageRequest"
+                - type: object
+                  required: [orgId]
+                  properties:
+                    orgId:
+                      type: string
+                      format: uuid
+      responses:
+        "200":
+          $ref: "#/components/responses/EnvironmentTemplateList"
+
+  /api/v1/env/template/info:
+    post:
+      tags: [Environments]
+      summary: Get a single environment template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/IdOrCodeRequest"
+                - type: object
+                  description: |
+                    For this endpoint, `parentId` carries the orgId and `code` is the env code.
+      responses:
+        "200":
+          $ref: "#/components/responses/EnvironmentTemplate"
 
   /api/v1/folder/list:
     post:
@@ -407,6 +459,53 @@ paths:
         "200":
           $ref: "#/components/responses/Deleted"
 
+  /api/v1/secret/path/info:
+    post:
+      tags: [Secrets]
+      summary: Get secret metadata by org.proj.env.folder.KEY path
+      description: |
+        Resolves a 4-level code path to the secret metadata via a single 5-table
+        join. RBAC still applies (`secret:read`). Does not return the plaintext
+        `value` field. The path is `org_code.project_code.env_code.folder_code.KEY`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretPathRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Secret"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/secret/path/reveal:
+    post:
+      tags: [Secrets]
+      summary: Reveal secret plaintext by org.proj.env.folder.KEY path
+      description: |
+        Resolves a 4-level code path to the secret, then runs the standard reveal
+        flow (decrypt + reveal audit). RBAC still applies (`secret:reveal`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretPathRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Secret"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /api/v1/audit/list:
     post:
       tags: [Audit]
@@ -502,6 +601,36 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Response"
+    BadRequest:
+      description: Bad request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Response"
+          example:
+            code: 1002
+            msg: invalid request
+            data: null
+    Forbidden:
+      description: Permission denied.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Response"
+          example:
+            code: 1403
+            msg: permission denied
+            data: null
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Response"
+          example:
+            code: 1404
+            msg: record not found
+            data: null
     Entity:
       description: Entity response.
       content:
@@ -546,6 +675,23 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/EnvironmentListResponse"
+    EnvironmentTemplateList:
+      description: Environment template list (org-scoped read-only summary).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/EnvironmentTemplateListResponse"
+    EnvironmentTemplate:
+      description: Environment template detail.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Response"
+              - type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EnvironmentTemplate"
     FolderList:
       description: Folder list.
       content:
@@ -603,7 +749,10 @@ components:
         parentId:
           type: string
           format: uuid
-          description: Required when using code for project/environment/folder
+          description: |
+            Required when using code. For /api/v1/project/* this is the org id; for
+            /api/v1/env/* this is the project id; for /api/v1/folder/* this is the
+            environment id; for /api/v1/env/template/* this is the org id.
         id:
           type: string
           format: uuid
@@ -619,7 +768,10 @@ components:
         parentId:
           type: string
           format: uuid
-          description: Required when using code for project/environment/folder
+          description: |
+            Required when using code. For /api/v1/project/* this is the org id; for
+            /api/v1/env/* this is the project id; for /api/v1/folder/* this is the
+            environment id.
         id:
           type: string
           format: uuid
@@ -689,6 +841,28 @@ components:
             parentId:
               type: string
               format: uuid
+              description: |
+                Parent resource id. For /api/v1/project/create this is the org id; for
+                /api/v1/env/create this is the project id.
+
+    EnvSpec:
+      type: object
+      required: [code, name]
+      properties:
+        code:
+          type: string
+          pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+          example: dev
+        name:
+          type: string
+          example: Development
+        comment:
+          type: string
+          example: shared dev env
+      description: |
+        Inline spec used in /api/v1/project/create to declare an environment to create.
+        The matching `environment_templates` row is upserted on first write only; subsequent
+        project creates with the same code will NOT overwrite the template's name/comment.
 
     UpdateEntityRequest:
       type: object
@@ -782,6 +956,19 @@ components:
         folderId:
           type: string
           format: uuid
+
+    SecretPathRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: |
+            The 4-level code path to the secret in the form
+            `org_code.project_code.env_code.folder_code.KEY`. Must contain
+            exactly 5 dot-separated, non-empty segments.
+          pattern: "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Z][A-Z0-9_]*$"
+          example: o1.p1.dev.globals.DATABASE_URL
 
     SecretUpsertRequest:
       type: object
@@ -922,6 +1109,53 @@ components:
                       type: array
                       items:
                         $ref: "#/components/schemas/Entity"
+
+    EnvironmentTemplate:
+      type: object
+      required: [id, orgId, code, name, createdBy, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        orgId:
+          type: string
+          format: uuid
+        code:
+          type: string
+          pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+        name:
+          type: string
+        comment:
+          type: string
+        createdBy:
+          type: string
+        createdByLabel:
+          type: string
+        updatedBy:
+          type: string
+        updatedByLabel:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    EnvironmentTemplateListResponse:
+      allOf:
+        - $ref: "#/components/schemas/Response"
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: "#/components/schemas/PageResp"
+                - type: object
+                  properties:
+                    list:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/EnvironmentTemplate"
 
     FolderListResponse:
       allOf:

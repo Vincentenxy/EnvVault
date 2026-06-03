@@ -47,26 +47,29 @@ func (ctrl *Controller) GetEnvironment(c *gin.Context) {
 	if !validateIdOrCode(c, req, "environment") {
 		return
 	}
+	rid, useCode := resolveIdOrCode(req.Id, req.Code)
 	var item Entity
 	var err error
-	if req.Code != "" {
+	if useCode {
 		ctrl.log(c, "GetEnvironment", logging.F("project_id", req.ParentId), logging.F("code", req.Code))
 		item, err = ctrl.repo.GetEnvironmentByCode(c.Request.Context(), req.ParentId, req.Code)
 		if err != nil {
 			ctrl.write(c, nil, err)
 			return
 		}
-		if !ctrl.allowScope(c, "env:read", "environment", item.Id) {
-			return
-		}
+		rid = item.Id
 	} else {
-		if !ctrl.allowScope(c, "env:read", "environment", req.Id) {
-			return
-		}
 		ctrl.log(c, "GetEnvironment", logging.F("id", req.Id))
-		item, err = ctrl.repo.GetEnvironment(c.Request.Context(), req.Id)
+		item, err = ctrl.repo.GetEnvironment(c.Request.Context(), rid)
 	}
-	ctrl.write(c, item, err)
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+	if !ctrl.allowScope(c, "env:read", "environment", rid) {
+		return
+	}
+	ctrl.write(c, item, nil)
 }
 
 func (ctrl *Controller) UpdateEnvironment(c *gin.Context) {
@@ -77,26 +80,22 @@ func (ctrl *Controller) UpdateEnvironment(c *gin.Context) {
 	if !validateUpdateIdOrCode(c, req, "environment") {
 		return
 	}
-	var item Entity
-	var err error
-	if req.Code != "" {
+	rid, useCode := resolveIdOrCode(req.Id, req.Code)
+	if useCode {
 		ctrl.log(c, "UpdateEnvironment", logging.F("project_id", req.ParentId), logging.F("code", req.Code), logging.F("name", req.Name))
-		var env Entity
-		if env, err = ctrl.repo.GetEnvironmentByCode(c.Request.Context(), req.ParentId, req.Code); err != nil {
+		env, err := ctrl.repo.GetEnvironmentByCode(c.Request.Context(), req.ParentId, req.Code)
+		if err != nil {
 			ctrl.write(c, nil, err)
 			return
 		}
-		if !ctrl.allowScope(c, "env:update", "environment", env.Id) {
-			return
-		}
-		item, err = ctrl.repo.UpdateEnvironment(c.Request.Context(), env.Id, req.Name, req.Comment, ctrl.actor(c))
+		rid = env.Id
 	} else {
-		if !ctrl.allowScope(c, "env:update", "environment", req.Id) {
-			return
-		}
 		ctrl.log(c, "UpdateEnvironment", logging.F("id", req.Id), logging.F("name", req.Name))
-		item, err = ctrl.repo.UpdateEnvironment(c.Request.Context(), req.Id, req.Name, req.Comment, ctrl.actor(c))
 	}
+	if !ctrl.allowScope(c, "env:update", "environment", rid) {
+		return
+	}
+	item, err := ctrl.repo.UpdateEnvironment(c.Request.Context(), rid, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
@@ -109,22 +108,17 @@ func (ctrl *Controller) DeleteEnvironment(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "DeleteEnvironment")
-	if req.Code != "" {
+	rid, useCode := resolveIdOrCode(req.Id, req.Code)
+	if useCode {
 		env, err := ctrl.repo.GetEnvironmentByCode(c.Request.Context(), req.ParentId, req.Code)
 		if err != nil {
 			ctrl.write(c, nil, err)
 			return
 		}
-		if !ctrl.allowScope(c, "env:delete", "environment", env.Id) {
-			return
-		}
-		err = ctrl.repo.DeleteEnvironment(c.Request.Context(), env.Id, ctrl.actor(c))
-		ctrl.write(c, gin.H{"deleted": true}, err)
+		rid = env.Id
+	}
+	if !ctrl.allowScope(c, "env:delete", "environment", rid) {
 		return
 	}
-	if !ctrl.allowScope(c, "env:delete", "environment", req.Id) {
-		return
-	}
-	err := ctrl.repo.DeleteEnvironment(c.Request.Context(), req.Id, ctrl.actor(c))
-	ctrl.write(c, gin.H{"deleted": true}, err)
+	ctrl.write(c, gin.H{"deleted": true}, ctrl.repo.DeleteEnvironment(c.Request.Context(), rid, ctrl.actor(c)))
 }

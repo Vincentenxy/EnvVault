@@ -32,24 +32,27 @@ func (ctrl *Controller) GetEnvironmentTemplate(c *gin.Context) {
 	if !validateIdOrCode(c, req, "env_template") {
 		return
 	}
+	rid, useCode := resolveIdOrCode(req.Id, req.Code)
 	var item domain.EnvironmentTemplate
 	var err error
-	if req.Code != "" {
+	if useCode {
 		ctrl.log(c, "GetEnvironmentTemplate", logging.F("org_id", req.ParentId), logging.F("code", req.Code))
 		item, err = ctrl.repo.GetEnvironmentTemplateByCode(c.Request.Context(), req.ParentId, req.Code)
 		if err != nil {
 			ctrl.write(c, nil, err)
 			return
 		}
-		if !ctrl.allowScope(c, "env:template:read", "env_template", item.Id) {
-			return
-		}
+		rid = item.Id
 	} else {
-		if !ctrl.allowScope(c, "env:template:read", "env_template", req.Id) {
-			return
-		}
 		ctrl.log(c, "GetEnvironmentTemplate", logging.F("id", req.Id))
-		item, err = ctrl.repo.GetEnvironmentTemplate(c.Request.Context(), req.Id)
+		item, err = ctrl.repo.GetEnvironmentTemplate(c.Request.Context(), rid)
 	}
-	ctrl.write(c, item, err)
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+	if !ctrl.allowScope(c, "env:template:read", "env_template", rid) {
+		return
+	}
+	ctrl.write(c, item, nil)
 }

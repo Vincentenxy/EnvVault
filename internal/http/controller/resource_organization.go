@@ -45,26 +45,29 @@ func (ctrl *Controller) GetOrganization(c *gin.Context) {
 	if !validateIdOrCode(c, req, "organization") {
 		return
 	}
+	rid, useCode := resolveIdOrCode(req.Id, req.Code)
 	var item domain.Entity
 	var err error
-	if req.Code != "" {
+	if useCode {
 		ctrl.log(c, "GetOrganization", logging.F("code", req.Code))
 		item, err = ctrl.repo.GetOrganizationByCode(c.Request.Context(), req.Code)
 		if err != nil {
 			ctrl.write(c, nil, err)
 			return
 		}
-		if !ctrl.allowScope(c, "org:read", "organization", item.Id) {
-			return
-		}
+		rid = item.Id
 	} else {
-		if !ctrl.allowScope(c, "org:read", "organization", req.Id) {
-			return
-		}
 		ctrl.log(c, "GetOrganization", logging.F("id", req.Id))
-		item, err = ctrl.repo.GetOrganization(c.Request.Context(), req.Id)
+		item, err = ctrl.repo.GetOrganization(c.Request.Context(), rid)
 	}
-	ctrl.write(c, item, err)
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+	if !ctrl.allowScope(c, "org:read", "organization", rid) {
+		return
+	}
+	ctrl.write(c, item, nil)
 }
 
 func (ctrl *Controller) UpdateOrganization(c *gin.Context) {
@@ -75,54 +78,56 @@ func (ctrl *Controller) UpdateOrganization(c *gin.Context) {
 	if !validateUpdateIdOrCode(c, req, "organization") {
 		return
 	}
-	var item domain.Entity
-	var err error
-	if req.Code != "" {
+	rid, useCode := resolveIdOrCode(req.Id, req.Code)
+	if useCode {
 		ctrl.log(c, "UpdateOrganization", logging.F("code", req.Code), logging.F("name", req.Name))
-		var org domain.Entity
-		if org, err = ctrl.repo.GetOrganizationByCode(c.Request.Context(), req.Code); err != nil {
-			ctrl.write(c, nil, err)
-			return
-		}
-		if !ctrl.allowScope(c, "org:update", "organization", org.Id) {
-			return
-		}
-		item, err = ctrl.repo.UpdateOrganization(c.Request.Context(), org.Id, req.Name, req.Comment, ctrl.actor(c))
-	} else {
-		if !ctrl.allowScope(c, "org:update", "organization", req.Id) {
-			return
-		}
-		ctrl.log(c, "UpdateOrganization", logging.F("id", req.Id), logging.F("name", req.Name))
-		item, err = ctrl.repo.UpdateOrganization(c.Request.Context(), req.Id, req.Name, req.Comment, ctrl.actor(c))
-	}
-	ctrl.write(c, item, err)
-}
-
-func (ctrl *Controller) DeleteOrganization(c *gin.Context) {
-	var req idOrCodeRequest
-	if !ctrl.bind(c, &req) {
-		return
-	}
-	if !validateIdOrCode(c, req, "organization") {
-		return
-	}
-	ctrl.log(c, "DeleteOrganization")
-	if req.Code != "" {
 		org, err := ctrl.repo.GetOrganizationByCode(c.Request.Context(), req.Code)
 		if err != nil {
 			ctrl.write(c, nil, err)
 			return
 		}
-		if !ctrl.allowScope(c, "org:delete", "organization", org.Id) {
+		rid = org.Id
+	} else {
+		ctrl.log(c, "UpdateOrganization", logging.F("id", req.Id), logging.F("name", req.Name))
+	}
+	if !ctrl.allowScope(c, "org:update", "organization", rid) {
+		return
+	}
+	item, err := ctrl.repo.UpdateOrganization(c.Request.Context(), rid, req.Name, req.Comment, ctrl.actor(c))
+	ctrl.write(c, item, err)
+}
+
+// deleteOrganizationRequest 在 idOrCodeRequest 基础上加 force 字段。
+// force=true 时触发 4 级级联软删(必须额外拥有 org:force_delete 权限)。
+type deleteOrganizationRequest struct {
+	idOrCodeRequest
+	Force bool `json:"force"`
+}
+
+func (ctrl *Controller) DeleteOrganization(c *gin.Context) {
+	var req deleteOrganizationRequest
+	if !ctrl.bind(c, &req) {
+		return
+	}
+	if !validateIdOrCode(c, req.idOrCodeRequest, "organization") {
+		return
+	}
+	ctrl.log(c, "DeleteOrganization", logging.F("force", req.Force))
+	rid, useCode := resolveIdOrCode(req.Id, req.Code)
+	if useCode {
+		org, err := ctrl.repo.GetOrganizationByCode(c.Request.Context(), req.Code)
+		if err != nil {
+			ctrl.write(c, nil, err)
 			return
 		}
-		err = ctrl.repo.DeleteOrganization(c.Request.Context(), org.Id, ctrl.actor(c))
-		ctrl.write(c, gin.H{"deleted": true}, err)
+		rid = org.Id
+	}
+	// 删除权限是基础门槛;force 路径再额外校验 org:force_delete。
+	if !ctrl.allowScope(c, "org:delete", "organization", rid) {
 		return
 	}
-	if !ctrl.allowScope(c, "org:delete", "organization", req.Id) {
+	if req.Force && !ctrl.allowScope(c, "org:force_delete", "organization", rid) {
 		return
 	}
-	err := ctrl.repo.DeleteOrganization(c.Request.Context(), req.Id, ctrl.actor(c))
-	ctrl.write(c, gin.H{"deleted": true}, err)
+	ctrl.write(c, gin.H{"deleted": true}, ctrl.repo.DeleteOrganization(c.Request.Context(), rid, ctrl.actor(c), req.Force))
 }

@@ -195,19 +195,20 @@ user-1 -> org_viewer -> organization:O2
 | `org:create` | 创建组织 |
 | `org:read` | 查看组织 |
 | `org:update` | 更新组织 |
-| `org:delete` | 删除组织 |
+| `org:delete` | 删除组织（无子资源或子资源已全部软删时直接走） |
+| `org:force_delete` | **强制级联软删组织**：携带 `force=true` 时会级联软删该 org 下所有 project → env → folder → secret。需同时拥有 `org:delete` 与 `org:force_delete` |
 | `project:create` | 创建项目 |
 | `project:read` | 查看项目 |
 | `project:update` | 更新项目 |
-| `project:delete` | 删除项目 |
+| `project:delete` | 删除项目（已自动级联软删其下 env/folder/secret） |
 | `env:create` | 创建环境 |
 | `env:read` | 查看环境 |
 | `env:update` | 更新环境 |
-| `env:delete` | 删除环境 |
+| `env:delete` | 删除环境（已自动级联软删其下 folder/secret） |
 | `folder:create` | 创建 Folder |
 | `folder:read` | 查看 Folder |
 | `folder:update` | 更新 Folder |
-| `folder:delete` | 删除 Folder |
+| `folder:delete` | 删除 Folder（已自动级联软删其下 secret） |
 
 ### Secret 权限
 
@@ -240,9 +241,9 @@ user-1 -> org_viewer -> organization:O2
 
 | 角色 | 主要权限 |
 | --- | --- |
-| `platform_admin` | 全部权限 |
-| `org_owner` | 组织内全部权限，包含 `rbac:*` 和 `audit:read` |
-| `org_admin` | 组织内资源管理和 Secret 管理，不包含组织删除和 RBAC 角色管理 |
+| `platform_admin` | 全部权限（含 `org:force_delete`） |
+| `org_owner` | 组织内全部权限，包含 `rbac:*`、`audit:read` 和 `org:force_delete` |
+| `org_admin` | 组织内资源管理和 Secret 管理，**不包含** `org:delete` / `org:force_delete` / RBAC 角色管理 |
 | `org_viewer` | `org:read`、`project:read`、`env:read`、`folder:read`、`secret:list`、`secret:search`、`secret:read` |
 | `org_auditor` | 组织内资源只读、`audit:read` |
 | `project_admin` | 项目内环境、Folder、Secret 管理，项目内成员绑定管理 |
@@ -252,6 +253,8 @@ user-1 -> org_viewer -> organization:O2
 | `folder_admin` | Folder 内 Secret 全部管理 |
 | `folder_editor` | Folder 内 Secret 查看、创建、更新 |
 | `folder_viewer` | Folder 内 Secret 元数据只读 |
+
+> **设计要点**：`org:force_delete` **只授予** `platform_admin` / `org_owner`，**不给** `org_admin`。原因：org 管理员自删所在 org 是高破坏性操作，应该由全局/所有权级角色兜底。
 
 第一阶段建议 `secret:reveal` 只分配给 `org_owner`、`org_admin`、`project_admin`、`project_developer`、`folder_admin`、`folder_editor`。审计员和 viewer 不允许查看明文。
 

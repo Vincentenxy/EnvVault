@@ -13,11 +13,27 @@ import (
 // been soft-deleted. Layers above use errors.Is to map it to 404 responses.
 var ErrNotFound = errors.New("record not found")
 
+// ErrConflict is returned by repositories when a write would violate a
+// uniqueness or referential constraint (e.g. duplicate code within the
+// same parent scope). Layers above use errors.Is to map it to 409 responses.
+var ErrConflict = errors.New("resource already exists")
+
 // Entity is the canonical shape for the four basic CRUD resources
 // (organization, project, environment, folder). All share the same audit
 // fields and lifecycle (code is immutable, name/comment editable).
+//
+// ParentId 字段多态,语义按 entity 类别变化:
+//
+//   - organization:空(顶层,无父)
+//   - project:ParentId = org_id
+//   - environment:ParentId = project_id
+//   - folder level=1:ParentId = environment_id(env 是父)
+//   - folder level=2:ParentId = parent folder id(父 folder 是父)
+//
+// 字段为顶层实体(organization)时为空,JSON 标签 omitempty 隐藏。
 type Entity struct {
 	Id             string    `json:"id"`
+	ParentId       string    `json:"parentId,omitempty"`
 	Code           string    `json:"code"`
 	Name           string    `json:"name"`
 	Comment        string    `json:"comment,omitempty"`
@@ -106,10 +122,12 @@ type AuditRecord struct {
 	CreatedAt      time.Time       `json:"createdAt"`
 }
 
-// ListFilter is the criteria for ListSecrets / SearchSecrets.
+// ListFilter 是 ListSecrets / SearchSecrets 的过滤条件。
+//
+// OrgId / ProjectId 不在此处:folder_id 已经是最细粒度的资源定位,
+// env_id 是次细粒度。"按 org 列全部 secret" 等同于安全事件级别的危险操作,
+// 不应该通过一个普通 list 接口暴露;由专门的"审计导出"接口另说。
 type ListFilter struct {
-	OrgId         string
-	ProjectId     string
 	EnvironmentId string
 	FolderId      string
 	Keyword       string

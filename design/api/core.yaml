@@ -126,11 +126,54 @@ paths:
     post:
       tags: [Organizations]
       summary: Delete organization
+      description: |
+        Soft-deletes the organization. Behavior depends on the `force` flag:
+
+        - `force=false` (default): if the org has any **active** (non-soft-deleted) project,
+          returns 409 Conflict without touching any data.
+        - `force=true`: cascades the soft-delete to **all** child resources
+          (projects → environments → folders → secrets). Requires both
+          `org:delete` and `org:force_delete` permissions.
+
+        All deletions are soft (`is_deleted = true`); rows are retained in the
+        database. The deletion is atomic: a failure mid-cascade rolls back
+        everything in the same transaction.
       requestBody:
-        $ref: "#/components/requestBodies/IdOrCode"
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/IdOrCodeRequest"
+                - type: object
+                  properties:
+                    force:
+                      type: boolean
+                      default: false
+                      description: |
+                        When `true`, cascades the soft-delete to all child resources
+                        (projects, environments, folders, secrets) atomically.
+                        Requires the `org:force_delete` permission in addition to `org:delete`.
+                      example: false
       responses:
         "200":
           $ref: "#/components/responses/Deleted"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Organization has active child resources. Caller must pass `force=true`
+            to cascade, or remove the child resources first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
+              example:
+                code: 1409
+                msg: organization has 3 active project(s); pass force=true to cascade delete
+                data: null
 
   /api/v1/project/list:
     post:
@@ -157,8 +200,9 @@ paths:
       tags: [Projects]
       summary: Create project
       description: |
-        Creates the project and, atomically, the listed environments (each with default folders
-        `globals` / `groups-secrets`). For each environment code, an org-level
+        Creates the project and, atomically, the listed environments. Folders under
+        each environment are NOT auto-created — call /api/v1/folder/create explicitly
+        for each folder you need. For each environment code, an org-level
         `environment_templates` row is upserted on first write and reused thereafter.
       requestBody:
         required: true
@@ -204,6 +248,10 @@ paths:
     post:
       tags: [Projects]
       summary: Delete project
+      description: |
+        Soft-deletes the project **and** all child environments, folders, and secrets
+        under it, in a single transaction. Child resources are filtered out of
+        subsequent list/info responses.
       requestBody:
         $ref: "#/components/requestBodies/IdOrCode"
       responses:
@@ -237,9 +285,10 @@ paths:
       tags: [Environments]
       summary: Create environment
       description: |
-        Creates an environment under the project identified by `parentId`, plus the
-        default folders `globals` / `groups-secrets`. Upserts the org-level
-        `environment_templates` row for the new env code (snapshot on first write only).
+        Creates an environment under the project identified by `parentId`. **No
+        default folders are created** — call /api/v1/folder/create explicitly for
+        each folder you need. Upserts the org-level `environment_templates` row for
+        the new env code (snapshot on first write only).
       requestBody:
         $ref: "#/components/requestBodies/CreateChildEntity"
       responses:
@@ -270,6 +319,9 @@ paths:
     post:
       tags: [Environments]
       summary: Delete environment
+      description: |
+        Soft-deletes the environment **and** all child folders and secrets under it,
+        in a single transaction.
       requestBody:
         $ref: "#/components/requestBodies/IdOrCode"
       responses:
@@ -323,6 +375,17 @@ paths:
     post:
       tags: [Folders]
       summary: List folders
+      description: |
+        Lists folders under either an environment (level=1 folders) or under a specific
+        parent folder (level=2 folders). The two modes are mutually exclusive:
+
+        - `environmentId` set: returns all `level=1` folders directly under that
+          environment (`parent_id IS NULL`).
+        - `folderParentId` set: returns all `level=2` folders under that parent
+          folder. The environment is inferred from the parent folder server-side.
+
+        `folder:read` RBAC is checked against the resolved environment in both
+        modes.
       requestBody:
         required: true
         content:
@@ -335,19 +398,69 @@ paths:
                     environmentId:
                       type: string
                       format: uuid
+                      description: List level=1 folders under this environment.
+                    folderParentId:
+                      type: string
+                      format: uuid
+                      description: List level=2 folders under this parent folder.
+                  description: Exactly one of environmentId or folderParentId is required.
       responses:
         "200":
           $ref: "#/components/responses/FolderList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
 
   /api/v1/folder/create:
     post:
       tags: [Folders]
       summary: Create folder
+      description: |
+        Creates a folder under an environment, supporting up to 2 levels:
+
+        - `level=1` (top-level): `parentId` carries the **environment id**; the folder
+          sits directly under that environment.
+        - `level=2` (sub-folder): `parentId` carries the **parent folder id**; the
+          parent must be a `level=1` folder. The environment is inferred from the
+          parent folder on the server side — clients do not (and should not) pass it.
+
+        The `Entity.parentId` field in the response is polymorphic: for `level=1`
+        it is the environment id; for `level=2` it is the parent folder id.
       requestBody:
-        $ref: "#/components/requestBodies/CreateChildEntity"
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateFolderRequest"
+            examples:
+              topLevel:
+                value:
+                  level: 1
+                  parentId: "11111111-1111-1111-1111-111111111111"
+                  code: globals
+                  name: Globals
+              subFolder:
+                value:
+                  level: 2
+                  parentId: "22222222-2222-2222-2222-222222222222"
+                  code: payment
+                  name: Payment Providers
       responses:
         "200":
           $ref: "#/components/responses/Entity"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            Returned when the level/parent combination is invalid, e.g. a `level=2`
+            folder with a `level=2` parent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
 
   /api/v1/folder/info:
     post:
@@ -373,6 +486,8 @@ paths:
     post:
       tags: [Folders]
       summary: Delete folder
+      description: |
+        Soft-deletes the folder **and** all secrets under it, in a single transaction.
       requestBody:
         $ref: "#/components/requestBodies/IdOrCode"
       responses:
@@ -505,6 +620,53 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /api/v1/search/global:
+    post:
+      tags: [Search]
+      summary: Global search across org / project / env / folder / secret
+      description: |
+        Cross-resource keyword search. Matched fields (per resource type):
+
+        - org / project / env / folder: `code`, `name`, `comment`
+        - secret: `key`, `comment`, plus decrypted `value`
+
+        The search runs entirely against Redis with 5 concurrent goroutines
+        (one per resource type). The DB is not hit on the hot path; the cache
+        is warmed at startup. Per-type result counts are capped by `limit`
+        (default 50, max 200).
+
+        RBAC: each candidate is filtered by the corresponding `:read` permission
+        for the current user. The user only sees resources within their scope.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GlobalSearchRequest"
+            examples:
+              keywordOnly:
+                value:
+                  keyword: aaa
+              withTypeLimit:
+                value:
+                  keyword: database
+                  types: ["secret", "env"]
+                  limit: 20
+      responses:
+        "200":
+          description: Aggregated matches per resource type.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/GlobalSearchResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
 
   /api/v1/audit/list:
     post:
@@ -845,6 +1007,34 @@ components:
                 Parent resource id. For /api/v1/project/create this is the org id; for
                 /api/v1/env/create this is the project id.
 
+    CreateFolderRequest:
+      type: object
+      required: [level, parentId, code, name]
+      properties:
+        level:
+          type: integer
+          enum: [1, 2]
+          description: |
+            1 = top-level folder (parent is the environment).
+            2 = sub-folder (parent is another folder, which must be `level=1`).
+        parentId:
+          type: string
+          format: uuid
+          description: |
+            For `level=1`: the environment id (the folder's direct parent).
+            For `level=2`: the parent folder id (must be a `level=1` folder in the
+            same environment). The environment is inferred from the parent on the
+            server side, so the client does not need to pass it.
+        code:
+          type: string
+          pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+          example: globals
+        name:
+          type: string
+          example: Globals
+        comment:
+          type: string
+
     EnvSpec:
       type: object
       required: [code, name]
@@ -885,6 +1075,16 @@ components:
         id:
           type: string
           format: uuid
+        parentId:
+          type: string
+          format: uuid
+          description: |
+            Direct parent's id. Omitted for top-level entities (organizations).
+            Set to org_id for projects, project_id for environments,
+            environment_id for folders.
+        code:
+          type: string
+          pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
         name:
           type: string
         comment:
@@ -943,17 +1143,21 @@ components:
 
     SecretFilter:
       type: object
+      description: |
+        Filter for /api/v1/secret/list and /api/v1/secret/search. Only `folderId`
+        and `environmentId` are accepted — `orgId` and `projectId` were removed
+        because they correspond to "list every secret in the org/project" which
+        is a security-tier operation and shouldn't be exposed through a regular
+        list endpoint. Exactly one of `folderId` or `environmentId` is required.
       properties:
-        orgId:
-          type: string
-          format: uuid
-        projectId:
-          type: string
-          format: uuid
         environmentId:
           type: string
           format: uuid
+          description: List secrets in this env (across all folders).
         folderId:
+          type: string
+          format: uuid
+          description: List secrets in this specific folder.
           type: string
           format: uuid
 
@@ -1043,6 +1247,88 @@ components:
         updatedAt:
           type: string
           format: date-time
+
+    GlobalSearchRequest:
+      type: object
+      required: [keyword]
+      properties:
+        keyword:
+          type: string
+          minLength: 1
+          description: Substring to match. Case-insensitive.
+          example: aaa
+        types:
+          type: array
+          items:
+            type: string
+            enum: [org, project, env, folder, secret]
+          description: |
+            Subset of resource types to search. Empty = all 5 types.
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+          description: Per-type result cap.
+
+    GlobalSearchResult:
+      type: object
+      properties:
+        orgs:
+          type: array
+          items: { $ref: "#/components/schemas/GlobalSearchHit" }
+        projects:
+          type: array
+          items: { $ref: "#/components/schemas/GlobalSearchHit" }
+        envs:
+          type: array
+          items: { $ref: "#/components/schemas/GlobalSearchHit" }
+        folders:
+          type: array
+          items: { $ref: "#/components/schemas/GlobalSearchHit" }
+        secrets:
+          type: array
+          items: { $ref: "#/components/schemas/GlobalSearchHit" }
+
+    GlobalSearchHit:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        name:
+          type: string
+        comment:
+          type: string
+        matchField:
+          type: string
+          description: |
+            Which field matched the keyword: `code` / `name` / `comment` / `value`
+            (the latter only for secret type).
+        key:
+          type: string
+          description: Only set for secret hits.
+        path:
+          type: string
+          description: Only set for secret hits.
+        folderId:
+          type: string
+          format: uuid
+          description: Only set for secret hits.
+        envId:
+          type: string
+          format: uuid
+          description: Set for env / folder / secret hits.
+        projectId:
+          type: string
+          format: uuid
+          description: Set for project / env / folder / secret hits.
+        orgId:
+          type: string
+          format: uuid
+          description: Set for org / project / env / folder / secret hits.
 
     AuditRecord:
       type: object

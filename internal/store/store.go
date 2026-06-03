@@ -29,7 +29,7 @@ type ResourceRepository interface {
 	GetOrganization(ctx context.Context, id string) (domain.Entity, error)
 	GetOrganizationByCode(ctx context.Context, code string) (domain.Entity, error)
 	UpdateOrganization(ctx context.Context, id, name, comment, actor string) (domain.Entity, error)
-	DeleteOrganization(ctx context.Context, id, actor string) error
+	DeleteOrganization(ctx context.Context, id, actor string, force bool) error
 
 	// ---- Project ----
 	CreateProject(ctx context.Context, orgId, code, name, comment, actor string, envs []domain.EnvSpec) (domain.Entity, error)
@@ -53,8 +53,8 @@ type ResourceRepository interface {
 	GetEnvironmentTemplateByCode(ctx context.Context, orgId, code string) (domain.EnvironmentTemplate, error)
 
 	// ---- Folder ----
-	CreateFolder(ctx context.Context, environmentId, code, name, comment, actor string) (domain.Entity, error)
-	ListFolders(ctx context.Context, environmentId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
+	CreateFolder(ctx context.Context, environmentId, parentFolderId, code, name, comment, actor string, level int) (domain.Entity, error)
+	ListFolders(ctx context.Context, envId, parentId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
 	GetFolder(ctx context.Context, id string) (domain.Entity, error)
 	GetFolderByCode(ctx context.Context, environmentId, code string) (domain.Entity, error)
 	UpdateFolder(ctx context.Context, id, name, comment, actor string) (domain.Entity, error)

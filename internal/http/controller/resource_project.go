@@ -57,26 +57,29 @@ func (ctrl *Controller) GetProject(c *gin.Context) {
 	if !validateIdOrCode(c, req, "project") {
 		return
 	}
+	rid, useCode := resolveIdOrCode(req.Id, req.Code)
 	var item domain.Entity
 	var err error
-	if req.Code != "" {
+	if useCode {
 		ctrl.log(c, "GetProject", logging.F("org_id", req.ParentId), logging.F("code", req.Code))
 		item, err = ctrl.repo.GetProjectByCode(c.Request.Context(), req.ParentId, req.Code)
 		if err != nil {
 			ctrl.write(c, nil, err)
 			return
 		}
-		if !ctrl.allowScope(c, "project:read", "project", item.Id) {
-			return
-		}
+		rid = item.Id
 	} else {
-		if !ctrl.allowScope(c, "project:read", "project", req.Id) {
-			return
-		}
 		ctrl.log(c, "GetProject", logging.F("id", req.Id))
-		item, err = ctrl.repo.GetProject(c.Request.Context(), req.Id)
+		item, err = ctrl.repo.GetProject(c.Request.Context(), rid)
 	}
-	ctrl.write(c, item, err)
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+	if !ctrl.allowScope(c, "project:read", "project", rid) {
+		return
+	}
+	ctrl.write(c, item, nil)
 }
 
 func (ctrl *Controller) UpdateProject(c *gin.Context) {
@@ -87,26 +90,22 @@ func (ctrl *Controller) UpdateProject(c *gin.Context) {
 	if !validateUpdateIdOrCode(c, req, "project") {
 		return
 	}
-	var item domain.Entity
-	var err error
-	if req.Code != "" {
+	rid, useCode := resolveIdOrCode(req.Id, req.Code)
+	if useCode {
 		ctrl.log(c, "UpdateProject", logging.F("org_id", req.ParentId), logging.F("code", req.Code), logging.F("name", req.Name))
-		var proj domain.Entity
-		if proj, err = ctrl.repo.GetProjectByCode(c.Request.Context(), req.ParentId, req.Code); err != nil {
+		proj, err := ctrl.repo.GetProjectByCode(c.Request.Context(), req.ParentId, req.Code)
+		if err != nil {
 			ctrl.write(c, nil, err)
 			return
 		}
-		if !ctrl.allowScope(c, "project:update", "project", proj.Id) {
-			return
-		}
-		item, err = ctrl.repo.UpdateProject(c.Request.Context(), proj.Id, req.Name, req.Comment, ctrl.actor(c))
+		rid = proj.Id
 	} else {
-		if !ctrl.allowScope(c, "project:update", "project", req.Id) {
-			return
-		}
 		ctrl.log(c, "UpdateProject", logging.F("id", req.Id), logging.F("name", req.Name))
-		item, err = ctrl.repo.UpdateProject(c.Request.Context(), req.Id, req.Name, req.Comment, ctrl.actor(c))
 	}
+	if !ctrl.allowScope(c, "project:update", "project", rid) {
+		return
+	}
+	item, err := ctrl.repo.UpdateProject(c.Request.Context(), rid, req.Name, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
@@ -119,22 +118,17 @@ func (ctrl *Controller) DeleteProject(c *gin.Context) {
 		return
 	}
 	ctrl.log(c, "DeleteProject")
-	if req.Code != "" {
+	rid, useCode := resolveIdOrCode(req.Id, req.Code)
+	if useCode {
 		proj, err := ctrl.repo.GetProjectByCode(c.Request.Context(), req.ParentId, req.Code)
 		if err != nil {
 			ctrl.write(c, nil, err)
 			return
 		}
-		if !ctrl.allowScope(c, "project:delete", "project", proj.Id) {
-			return
-		}
-		err = ctrl.repo.DeleteProject(c.Request.Context(), proj.Id, ctrl.actor(c))
-		ctrl.write(c, gin.H{"deleted": true}, err)
+		rid = proj.Id
+	}
+	if !ctrl.allowScope(c, "project:delete", "project", rid) {
 		return
 	}
-	if !ctrl.allowScope(c, "project:delete", "project", req.Id) {
-		return
-	}
-	err := ctrl.repo.DeleteProject(c.Request.Context(), req.Id, ctrl.actor(c))
-	ctrl.write(c, gin.H{"deleted": true}, err)
+	ctrl.write(c, gin.H{"deleted": true}, ctrl.repo.DeleteProject(c.Request.Context(), rid, ctrl.actor(c)))
 }

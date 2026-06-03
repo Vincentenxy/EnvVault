@@ -88,11 +88,9 @@ func (ctrl *Controller) ListSecrets(c *gin.Context) {
 	if !ctrl.secretListAllowScope(c, req) {
 		return
 	}
-	ctrl.log(c, "ListSecrets", logging.F("org_id", req.OrgId), logging.F("project_id", req.ProjectId), logging.F("environment_id", req.EnvironmentId), logging.F("folder_id", req.FolderId))
+	ctrl.log(c, "ListSecrets", logging.F("environment_id", req.EnvironmentId), logging.F("folder_id", req.FolderId))
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.secret.List(c.Request.Context(), domain.ListFilter{
-		OrgId:         req.OrgId,
-		ProjectId:     req.ProjectId,
 		EnvironmentId: req.EnvironmentId,
 		FolderId:      req.FolderId,
 	}, pagination)
@@ -110,11 +108,9 @@ func (ctrl *Controller) SearchSecrets(c *gin.Context) {
 	if !ctrl.secretListAllowScope(c, req) {
 		return
 	}
-	ctrl.log(c, "SearchSecrets", logging.F("org_id", req.OrgId), logging.F("project_id", req.ProjectId), logging.F("environment_id", req.EnvironmentId), logging.F("folder_id", req.FolderId), logging.F("keyword", req.Keyword))
+	ctrl.log(c, "SearchSecrets", logging.F("environment_id", req.EnvironmentId), logging.F("folder_id", req.FolderId), logging.F("keyword", req.Keyword))
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.secret.Search(c.Request.Context(), domain.ListFilter{
-		OrgId:         req.OrgId,
-		ProjectId:     req.ProjectId,
 		EnvironmentId: req.EnvironmentId,
 		FolderId:      req.FolderId,
 		Keyword:       req.Keyword,

@@ -106,9 +106,30 @@ create index if not exists environment_templates_org_idx
     on environment_templates (org_id)
     where is_deleted = false;
 
+-- folders:支持 2 级层级(顶级 / 子级)。
+--
+-- 【字段语义:environment_id vs parent_id 不能互相替代,看似冗余其实不然】
+--
+--   environment_id  答"这个 folder 属于哪个 env"   ← 顶层 + 子级都必填
+--   parent_id       答"这个 folder 的父 folder 是谁" ← 只有子级(level=2)填
+--   level           答"它是顶级还是子级"             ← 1 = 顶层,2 = 子级
+--
+-- 顶层(level=1)folder 的 parent_id 永远是 NULL(父是 env 而不是 folder),
+-- 所以必须靠 environment_id 才能定位到 env——environment_id 不是冗余的。
+-- 子级(level=2)folder 的 environment_id 确实可以从 parent.environment_id 推出,
+-- 但保留它(反范式)换来 O(1) 的 env 范围查询,代价仅 16 字节/行,值得。
+--
+-- 历史上有人尝试把 environment_id 砍掉、把 parent_id 改成"多态"(level=1 指向 env、
+-- level=2 指向 folder),会同时丢掉:
+--   - FK 约束(parent_id 不知道指向 env 还是 folder)
+--   - 简单索引(只能上递归 CTE)
+--   - 应用层"我手里这个 uuid 到底是不是 env"的判别负担
+-- 故维持两列各司其职,不要合并。
 create table if not exists folders (
     id uuid primary key,
     environment_id uuid not null,
+    parent_id uuid references folders(id) on delete cascade,
+    level int not null default 1,
     code text not null,
     name text not null,
     comment text not null default '',
@@ -119,11 +140,24 @@ create table if not exists folders (
     updated_by text not null default '',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
-    constraint folders_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
+    constraint folders_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
+    constraint folders_level_chk check (level in (1, 2)),
+    -- 1 级 folder 不能有 parent,2 级 folder 必须有 parent(且 parent 必须是 1 级)
+    constraint folders_level_parent_chk check (
+        (level = 1 and parent_id is null)
+        or (level = 2 and parent_id is not null)
+    )
 );
 
-create unique index if not exists folders_environment_code_active_uidx
-    on folders (environment_id, code)
+-- 唯一索引按 (env, parent 域, code) 取域。
+-- 对 level=1,parent 域 = 空串;对 level=2,parent 域 = 父 folder id。
+-- 这样同一 env 下顶层 code="globals" 和子级 code="globals" 不冲突。
+create unique index if not exists folders_env_parent_code_active_uidx
+    on folders (environment_id, coalesce(parent_id::text, ''), code)
+    where is_deleted = false;
+
+create index if not exists folders_parent_idx
+    on folders (parent_id)
     where is_deleted = false;
 
 create table if not exists secrets (

@@ -1042,6 +1042,7 @@ func defaultPermissions() []systemPermission {
 		{Code: "org:read", Resource: "org", Action: "read", Description: "Read organization"},
 		{Code: "org:update", Resource: "org", Action: "update", Description: "Update organization"},
 		{Code: "org:delete", Resource: "org", Action: "delete", Description: "Delete organization"},
+		{Code: "org:force_delete", Resource: "org", Action: "force_delete", Description: "Force cascade-delete an organization including all child projects, environments, folders, and secrets"},
 		{Code: "project:create", Resource: "project", Action: "create", Description: "Create project"},
 		{Code: "project:read", Resource: "project", Action: "read", Description: "Read project"},
 		{Code: "project:update", Resource: "project", Action: "update", Description: "Update project"},

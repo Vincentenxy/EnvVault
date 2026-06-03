@@ -11,6 +11,7 @@ import (
 	"envVault/internal/logging"
 	"envVault/internal/service"
 	"envVault/internal/store/postgres"
+	"envVault/internal/store/redis"
 )
 
 type Dependencies struct {
@@ -19,6 +20,7 @@ type Dependencies struct {
 	Secret     service.SecretService
 	RBAC       service.RBACService
 	Authorizer auth.Authorizer
+	Cache      *redis.Cache
 	Database   interface {
 		PingContext(ctx context.Context) error
 	}
@@ -45,6 +47,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 		Secret:     deps.Secret,
 		RBAC:       deps.RBAC,
 		Authorizer: deps.Authorizer,
+		Cache:      deps.Cache,
 	})
 
 	pub := r.Group("")
@@ -169,6 +172,11 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 						user.POST("/grants", ctrl.ListUserGrants)
 						user.POST("/permissions", ctrl.GetUserEffectivePermissions)
 					}
+				}
+
+				search := protected.Group("/search")
+				{
+					search.POST("/global", ctrl.GlobalSearch)
 				}
 			}
 		}

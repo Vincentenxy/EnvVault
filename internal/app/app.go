@@ -59,7 +59,7 @@ func Run() error {
 	var secretSvc service.SecretService
 	if cfg.Redis.Enabled {
 		var err error
-		cache, err = rediscache.Open(ctx, cfg.Redis)
+		cache, err = rediscache.Open(ctx, cfg.Redis, encryptor)
 		if err != nil {
 			return err
 		}
@@ -87,6 +87,7 @@ func Run() error {
 		Secret:     secretSvc,
 		RBAC:       rbacSvc,
 		Authorizer: auth.NewRBACAuthorizer(rbacStore),
+		Cache:      cache,
 	})
 
 	server := &http.Server{

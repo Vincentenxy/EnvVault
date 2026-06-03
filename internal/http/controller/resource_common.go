@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -56,13 +57,14 @@ type updateEntityRequest struct {
 
 type listRequest struct {
 	PageRequest
-	OrgId         string `json:"orgId,omitempty"`
-	ProjectId     string `json:"projectId,omitempty"`
-	EnvironmentId string `json:"environmentId,omitempty"`
-	FolderId      string `json:"folderId,omitempty"`
-	ResourceType  string `json:"resourceType,omitempty"`
-	ResourceId    string `json:"resourceId,omitempty"`
-	Keyword       string `json:"keyword,omitempty"`
+	OrgId          string `json:"orgId,omitempty"`
+	ProjectId      string `json:"projectId,omitempty"`
+	EnvironmentId  string `json:"environmentId,omitempty"`
+	FolderId       string `json:"folderId,omitempty"`
+	FolderParentId string `json:"folderParentId,omitempty"`
+	ResourceType   string `json:"resourceType,omitempty"`
+	ResourceId     string `json:"resourceId,omitempty"`
+	Keyword        string `json:"keyword,omitempty"`
 }
 
 type PageRequest struct {
@@ -121,6 +123,10 @@ func (ctrl *Controller) write(c *gin.Context, data any, err error) {
 		response.Fail(c, http.StatusNotFound, response.CodeNotFound, err.Error())
 		return
 	}
+	if errors.Is(err, domain.ErrConflict) {
+		response.Fail(c, http.StatusConflict, response.CodeConflict, err.Error())
+		return
+	}
 	response.FailWithMsg(c, err.Error())
 }
 
@@ -163,11 +169,7 @@ func validateIdOrCode(c *gin.Context, req idOrCodeRequest, resourceType string) 
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, resourceType+" id or code is required")
 		return false
 	}
-	if req.Id != "" && req.Code != "" {
-		logging.Warn(c.Request.Context(), "validateIdOrCode", resourceType+" id and code are mutually exclusive")
-		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, resourceType+" id and code are mutually exclusive")
-		return false
-	}
+	// id 与 code 同时给时,id 优先,code 忽略;由 resolveIdOrCode 在 handler 中落地。
 	return true
 }
 
@@ -177,12 +179,21 @@ func validateUpdateIdOrCode(c *gin.Context, req updateByIdOrCodeRequest, resourc
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, resourceType+" id or code is required")
 		return false
 	}
-	if req.Id != "" && req.Code != "" {
-		logging.Warn(c.Request.Context(), "validateUpdateIdOrCode", resourceType+" id and code are mutually exclusive")
-		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, resourceType+" id and code are mutually exclusive")
-		return false
-	}
+	// id 与 code 同时给时,id 优先,code 忽略;由 resolveIdOrCode 在 handler 中落地。
 	return true
+}
+
+// resolveIdOrCode 决定 handler 实际用哪个字段定位资源。
+// 规则:id 优先,code 仅在 id 缺失时使用,否则被忽略——code 不可改,只用于 lookup。
+// 校验器 validateIdOrCode / validateUpdateIdOrCode 已保证至少一个非空。
+// 返回 lookupId 与 useCode:
+//   - lookupId 非空时,handler 直接用 lookupId 走更新/删除;
+//   - useCode 为 true 时,handler 用 code 二次查询得到 id,再继续。
+func resolveIdOrCode(id, code string) (lookupId string, useCode bool) {
+	if id != "" {
+		return id, false
+	}
+	return "", true
 }
 
 func validateSecretKey(c *gin.Context, key string) bool {
@@ -222,9 +233,16 @@ func validateListEnvironmentTemplates(c *gin.Context, req listRequest) bool {
 }
 
 func validateListFolders(c *gin.Context, req listRequest) bool {
-	if req.EnvironmentId == "" {
-		logging.Warn(c.Request.Context(), "validateListFolders", "environmentId is required")
-		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "environmentId is required")
+	envId := strings.TrimSpace(req.EnvironmentId)
+	parentId := strings.TrimSpace(req.FolderParentId)
+	if envId == "" && parentId == "" {
+		logging.Warn(c.Request.Context(), "validateListFolders", "environmentId or folderParentId is required")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "environmentId or folderParentId is required")
+		return false
+	}
+	if envId != "" && parentId != "" {
+		logging.Warn(c.Request.Context(), "validateListFolders", "environmentId and folderParentId are mutually exclusive")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "environmentId and folderParentId are mutually exclusive")
 		return false
 	}
 	return true

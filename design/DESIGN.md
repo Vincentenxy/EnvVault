@@ -191,21 +191,33 @@ ENVVAULT_HTTP_ADDR=:9090 go run .
 
 ### Folder
 
-Folder 属于一个环境，当前只支持一级目录。默认 Folder 为 `globals` 和 `groups-secrets`。
+Folder 属于一个环境，支持最多两级目录（顶级 + 一层子级）。默认 Folder 为 `globals` 和 `groups-secrets`，由调用方按需显式创建（不再随 env 自动建）。
 
 核心字段：
 
 - `id`
-- `environment_id`
+- `environment_id`  答"属于哪个 env",level=1 与 level=2 都必填
+- `parent_id`       答"父 folder 是谁",仅 level=2 填写,level=1 必为 NULL
+- `level`           1=顶级,2=子级
 - `code`
 - `name`
 - `comment`
 - 删除元数据
 - 创建和更新时间
 
+**字段语义不重叠**：`environment_id` 和 `parent_id` 看似冗余,实际回答的是不同问题:
+
+- `environment_id`:这个 folder 属于哪个 env(level=1 时父是 env 不是 folder,只能靠它定位)
+- `parent_id`:这个 folder 的父 folder 是谁(仅 level=2 有)
+
+历史上有人想合并两列让 `parent_id` 多态(level=1 指向 env、level=2 指向 folder),会同时丢失 FK 约束、简单索引,得不偿失。当前两列各司其职,**不要合并**。
+
 约束：
 
-- 同一个环境下未删除 Folder 的 `code` 唯一。
+- 同一个环境下未删除 Folder 的 `(parent 域, code)` 唯一,即:
+  - level=1:同一 env 下顶层 `code` 唯一
+  - level=2:同一 env 下同一父 folder 下 `code` 唯一
+  - 顶层和子级可以同名（如 env 下有顶层 `globals`,子级下也可以有 `globals`,不冲突)
 - `name` 是展示名称，不参与唯一约束。
 
 ### Secret
@@ -837,6 +849,7 @@ security:
 - `Authorizer` 接口已实现，默认装载为 `RBACAuthorizer`（在 `internal/app/app.go` 中通过 `auth.NewRBACAuthorizer(rbacStore)` 注入），不再使用 `AllowAllAuthorizer`。
 - `AllowAllAuthorizer` 仍保留为测试与本地放行的可选实现。
 - v5 起所有数据 handler 全部接入 `allowScope`,`org_admin` / `project_admin` / `project_viewer` / `project_developer` 等角色真正生效。
+- v6 起所有 delete 操作按"父 → 子"级联软删,避免孤儿行;`org` 级删除需 `force=true` 触发 4 级级联,需要额外 `org:force_delete` 权限。
 
 完整 RBAC 设计、实现细节和权限矩阵以 [rbac_degisn.md](rbac_degisn.md) 为准。
 

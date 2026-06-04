@@ -23,6 +23,6 @@ func (ctrl *Controller) GetMyPermissions(c *gin.Context) {
 		return
 	}
 	user := auth.UserFromContext(c)
-	result, err := ctrl.rbac.EffectivePermissions(c.Request.Context(), user.UserId, req.ScopeType, req.ScopeId)
+	result, err := ctrl.rbac.EffectivePermissions(c.Request.Context(), user, user.UserId, req.ScopeType, req.ScopeId)
 	ctrl.write(c, gin.H{"permissions": result.Permissions}, err)
 }

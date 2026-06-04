@@ -82,6 +82,21 @@ paths:
     post:
       tags: [Organizations]
       summary: List organizations
+      description: |
+        Lists organizations the caller has access to, narrowed by the caller's
+        active `user_role_bindings` (v7+). The result is a subset of the org
+        hierarchy:
+
+        - `platform_admin` (bound at `global`): returns all non-deleted orgs.
+        - `org_admin` / `org_owner` / `org_viewer` / `org_auditor` bound at
+          `(organization, X)`: returns org X (and any cascaded children if
+          relevant).
+        - A caller with no active binding for `org:read`: returns an empty
+          list (implicit 200, no 403).
+
+        The list is no longer gated by an `allowScope` against a fixed scope;
+        the SQL itself filters by `(scope_type, scope_id)` derived from the
+        caller's bindings. See `design/DESIGN.md` §"List 接口按 caller 权限收窄（v7）".
       requestBody:
         required: true
         content:
@@ -179,6 +194,21 @@ paths:
     post:
       tags: [Projects]
       summary: List projects
+      description: |
+        Lists projects under `orgId` that the caller has access to, narrowed by
+        the caller's active `user_role_bindings` (v7+). The org parent filter
+        (`orgId`) is still required and applied first; the narrowing then
+        trims further:
+
+        - `platform_admin` (bound at `global`): returns all non-deleted
+          projects under `orgId`.
+        - Caller with `project:read` at `(project, P_i)` under `orgId`:
+          returns `P_i`.
+        - Caller with `project:read` at `(organization, orgId)` (e.g.
+          `org_admin`): returns all projects under `orgId` (cascading).
+        - Caller with no active binding: returns an empty list.
+
+        See `design/DESIGN.md` §"List 接口按 caller 权限收窄（v7）".
       requestBody:
         required: true
         content:
@@ -262,6 +292,24 @@ paths:
     post:
       tags: [Environments]
       summary: List environments
+      description: |
+        Lists environments under `projectId` that the caller has access to,
+        narrowed by the caller's active `user_role_bindings` (v7+). The
+        project parent filter (`projectId`) is still required and applied
+        first; the narrowing then trims further:
+
+        - `platform_admin`: returns all environments under `projectId`.
+        - Caller with `env:read` at `(environment, E_i)` under `projectId`:
+          returns `E_i`.
+        - Caller with `env:read` at `(project, projectId)` (e.g.
+          `project_admin`): returns all environments under `projectId`
+          (cascading).
+        - Caller with `env:read` at `(organization, org)` that owns
+          `projectId` (e.g. `org_admin`): returns all environments under
+          `projectId` (cascading).
+        - Caller with no active binding: returns an empty list.
+
+        See `design/DESIGN.md` §"List 接口按 caller 权限收窄（v7）".
       requestBody:
         required: true
         content:
@@ -336,6 +384,16 @@ paths:
         Read-only summary of env codes the org has ever instantiated. The template's
         name/comment is the snapshot from the first write; updating individual
         environments does not change the template.
+
+        Narrowed by the caller's active `user_role_bindings` (v7+):
+
+        - `platform_admin`: returns all non-deleted templates under `orgId`.
+        - Caller with `env:template:read` at `(organization, orgId)` (e.g.
+          `org_admin` / `org_viewer` / `org_auditor`): returns all
+          templates under `orgId`.
+        - Caller with no active binding: returns an empty list.
+
+        See `design/DESIGN.md` §"List 接口按 caller 权限收窄（v7）".
       requestBody:
         required: true
         content:
@@ -384,8 +442,20 @@ paths:
         - `folderParentId` set: returns all `level=2` folders under that parent
           folder. The environment is inferred from the parent folder server-side.
 
-        `folder:read` RBAC is checked against the resolved environment in both
-        modes.
+        Narrowed by the caller's active `user_role_bindings` (v7+):
+
+        - `platform_admin`: returns all matching folders.
+        - Caller with `folder:read` at `(folder, F_i)`: returns `F_i` if it
+          matches the parent filter.
+        - Caller with `folder:read` at `(environment, E)` and parent filter
+          is `environmentId == E`: returns all `level=1` folders under `E`
+          (cascading).
+        - Caller with `folder:read` at `(project, P)` or `(organization, O)`
+          that owns the resolved environment: returns matching folders
+          (cascading across the 4-level chain folder → env → project → org).
+        - Caller with no active binding: returns an empty list.
+
+        See `design/DESIGN.md` §"List 接口按 caller 权限收窄（v7）".
       requestBody:
         required: true
         content:
@@ -498,6 +568,29 @@ paths:
     post:
       tags: [Secrets]
       summary: List secrets without plaintext values
+      description: |
+        Lists secrets matching the optional `environmentId` / `folderId` filters,
+        narrowed by the caller's active `user_role_bindings` (v7+). Plaintext
+        values are not returned.
+
+        Requires `secret:list`. Narrowing chain:
+        `secret → folder → environment → project → organization`. A binding
+        at any of these scopes automatically extends visibility to its
+        descendants:
+
+        - `platform_admin`: returns all matching secrets.
+        - Caller with `secret:list` at `(secret, S)`: returns `S` if it
+          matches the filters.
+        - Caller with `secret:list` at `(folder, F)`: returns all secrets
+          under `F` (cascading).
+        - Caller with `secret:list` at `(environment, E)` and
+          `environmentId == E`: returns all secrets under `E`.
+        - Caller with `secret:list` at `(project, P)` that owns the resolved
+          environment, or at `(organization, O)` that owns `P`: returns all
+          matching secrets in the resolved environment (cascading).
+        - Caller with no active binding: returns an empty list.
+
+        See `design/DESIGN.md` §"List 接口按 caller 权限收窄（v7）".
       requestBody:
         $ref: "#/components/requestBodies/SecretList"
       responses:
@@ -508,6 +601,18 @@ paths:
     post:
       tags: [Secrets]
       summary: Search secrets by key without plaintext values
+      description: |
+        Search secrets by `key` (case-insensitive substring) under the optional
+        `environmentId` / `folderId` filters, narrowed by the caller's active
+        `user_role_bindings` (v7+). Requires `secret:search` (one permission
+        tier above `secret:list`).
+
+        The narrowing rules are identical to `/api/v1/secret/list`, but the
+        permission code is `secret:search` instead of `secret:list`. The
+        Redis secret cache is **not** consulted for this endpoint (cache
+        cannot be narrowed per-caller); results come directly from PostgreSQL.
+
+        See `design/DESIGN.md` §"List 接口按 caller 权限收窄（v7）".
       requestBody:
         $ref: "#/components/requestBodies/SecretSearch"
       responses:
@@ -621,6 +726,64 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/secret/path/batchReveal:
+    post:
+      tags: [Secrets]
+      summary: Batch reveal secrets by folder path and optional key list
+      description: |
+        Resolves a 4-level code path to a folder, then reveals the plaintext of every
+        secret under it in one round-trip. Designed for SDK / K8s integrations that
+        need to pull several keys (e.g. `DATABASE_URL`, `API_KEY`, `REDIS_URL`) at
+        once without making N serial `/secret/path/reveal` calls.
+
+        - `path`: 4-segment code path of the folder (`org_code.project_code.env_code.folder_code`).
+        - `keys`: optional list of secret keys to reveal. Empty / omitted = all secrets in the folder.
+
+        RBAC still applies (`secret:reveal`) with the v7 cascade narrowing chain
+        (`secret → folder → environment → project → organization`). The endpoint
+        reuses the same `user_read_scopes` CTE as `ListSecrets` / `SearchSecrets`,
+        so a binding at any of these scopes automatically extends visibility to
+        the folder.
+
+        Behavior:
+
+        - No pagination / no upper bound (a folder can have arbitrarily many secrets;
+          this is a deliberate trade-off, see `design/todo.md` §"v8").
+        - `list` is ordered by secret `key` ASC.
+        - Each item's `value` field is the plaintext (same as `/secret/reveal`).
+        - `notFound` is the set of request keys that did not match any secret in
+          the folder. Only present when `keys` is non-empty; absent when `keys` is
+          omitted / empty (no comparison possible).
+        - **One** audit record is written per call, with `action="reveal_batch"`,
+          `resource_type="folder"`, `resource_id=<folder.id>`, and
+          `encrypted_value=jsonb(["KEY1", "KEY2", ...])` recording the keys that
+          were actually revealed (request keys when supplied, otherwise the
+          keys that hit). If no key matches, no audit is written.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretPathBatchRevealRequest"
+      responses:
+        "200":
+          description: Batch reveal response.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/SecretPathBatchRevealResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /api/v1/search/global:
     post:
       tags: [Search]
@@ -672,6 +835,15 @@ paths:
     post:
       tags: [Audit]
       summary: List audit records
+      description: |
+        Lists audit records. **Not narrowed by caller's `user_role_bindings`
+        in v7**: `resource_type` is polymorphic across 6 ancestry paths
+        (organization / project / environment / folder / secret /
+        env_template), each requiring a case-by-case join to the
+        corresponding resource table. To audit a specific resource, pass
+        `resourceType` + `resourceId` and rely on the existing
+        `audit:read` permission check; full list narrowing is on the
+        roadmap (P1). See `design/todo.md` §"v7 不做的项（留 todo）".
       requestBody:
         required: true
         content:
@@ -1174,6 +1346,54 @@ components:
           pattern: "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Z][A-Z0-9_]*$"
           example: o1.p1.dev.globals.DATABASE_URL
 
+    SecretPathBatchRevealRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: |
+            4-level code path of the folder in the form
+            `org_code.project_code.env_code.folder_code` (no KEY segment).
+            Must contain exactly 4 dot-separated, non-empty segments.
+          pattern: "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
+          example: o1.p1.dev.globals
+        keys:
+          type: array
+          description: |
+            Optional list of secret keys to reveal. Empty / omitted = reveal every
+            secret in the folder (no pagination, no upper bound).
+          items:
+            type: string
+            pattern: "^[A-Z][A-Z0-9_]*$"
+          example: ["DATABASE_URL", "API_KEY"]
+
+    SecretPathBatchRevealResponse:
+      type: object
+      required: [path, list]
+      properties:
+        path:
+          type: string
+          description: The folder path the request was resolved against (echoed back).
+          example: o1.p1.dev.globals
+        list:
+          type: array
+          description: |
+            Revealed secrets ordered by `key` ASC. Each item follows the same
+            `Secret` schema as `/secret/reveal` / `/secret/path/reveal`, with
+            `value` populated to the plaintext.
+          items:
+            $ref: "#/components/schemas/Secret"
+        notFound:
+          type: array
+          description: |
+            Request keys that did not match any secret in the folder (in request
+            order). Only present when the request supplied a non-empty `keys`
+            list; absent when `keys` was empty / omitted (no comparison possible).
+          items:
+            type: string
+          example: ["MISSING_KEY"]
+
     SecretUpsertRequest:
       type: object
       required: [folderId, key, value]
@@ -1224,7 +1444,10 @@ components:
           example: org-a.project-a.dev.globals.DATABASE_URL
         value:
           type: string
-          description: Only returned by /api/v1/secret/reveal.
+          description: |
+            Plaintext value. Only returned by `/api/v1/secret/reveal`,
+            `/api/v1/secret/path/reveal`, and items in the `list` array of
+            `/api/v1/secret/path/batchReveal` responses.
         comment:
           type: string
         createdBy:

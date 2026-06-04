@@ -130,6 +130,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 					secret.POST("/delete", ctrl.DeleteSecret)
 					secret.POST("/path/info", ctrl.GetSecretByPath)
 					secret.POST("/path/reveal", ctrl.RevealSecretByPath)
+					secret.POST("/path/batchReveal", ctrl.BatchRevealSecretByPath)
 				}
 
 				audit := protected.Group("/audit")

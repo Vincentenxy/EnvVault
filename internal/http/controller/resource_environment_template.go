@@ -3,10 +3,13 @@ package controller
 import (
 	"github.com/gin-gonic/gin"
 
+	"envVault/internal/auth"
 	"envVault/internal/domain"
 	"envVault/internal/logging"
 )
 
+// ListEnvironmentTemplates v7 起不再走 allowScope 入口;repo SQL 按 caller.UserId 自动收窄可见 env_template。
+// parent 过滤(同 org 内)继续保留,orgId 入参仍由 validateListEnvironmentTemplates 校验非空。
 func (ctrl *Controller) ListEnvironmentTemplates(c *gin.Context) {
 	var req listRequest
 	if !ctrl.bind(c, &req) {
@@ -15,12 +18,10 @@ func (ctrl *Controller) ListEnvironmentTemplates(c *gin.Context) {
 	if !validateListEnvironmentTemplates(c, req) {
 		return
 	}
-	if !ctrl.allowScope(c, "env:template:read", "organization", req.OrgId) {
-		return
-	}
 	ctrl.log(c, "ListEnvironmentTemplates", logging.F("org_id", req.OrgId))
 	pagination := paginationFromRequest(req.PageRequest)
-	result, err := ctrl.repo.ListEnvironmentTemplates(c.Request.Context(), req.OrgId, pagination)
+	userId := auth.UserFromContext(c).UserId
+	result, err := ctrl.repo.ListEnvironmentTemplates(c.Request.Context(), userId, req.OrgId, pagination)
 	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 

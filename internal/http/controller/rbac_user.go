@@ -15,12 +15,12 @@ func (ctrl *Controller) GetCurrentRBACUser(c *gin.Context) {
 		return
 	}
 	user := auth.UserFromContext(c)
-	if _, err := ctrl.rbac.SyncUser(c.Request.Context(), user.UserId, user.Name, ""); err != nil {
+	if _, err := ctrl.rbac.SyncUser(c.Request.Context(), user, user.UserId, user.Name, ""); err != nil {
 		ctrl.write(c, nil, err)
 		return
 	}
 	pagination := paginationFromRequest(req)
-	grants, err := ctrl.rbac.ListUserGrants(c.Request.Context(), user.UserId, pagination)
+	grants, err := ctrl.rbac.ListUserGrants(c.Request.Context(), user, user.UserId, pagination)
 	if err != nil {
 		ctrl.write(c, nil, err)
 		return
@@ -36,11 +36,9 @@ func (ctrl *Controller) ListRBACUsers(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "rbac:binding:read", req.ScopeType, req.ScopeId) {
-		return
-	}
+	user := auth.UserFromContext(c)
 	pagination := paginationFromRequest(req.PageRequest)
-	result, err := ctrl.rbac.ListUsers(c.Request.Context(), req.ScopeType, req.ScopeId, pagination)
+	result, err := ctrl.rbac.ListUsers(c.Request.Context(), user, req.ScopeType, req.ScopeId, pagination)
 	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
@@ -52,12 +50,10 @@ func (ctrl *Controller) ListUserGrants(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "rbac:binding:read", "global", "") {
-		return
-	}
+	user := auth.UserFromContext(c)
 	pagination := paginationFromRequest(req.PageRequest)
 	externalUserId := pickAlias(req.UserId, req.ExternalUserId)
-	result, err := ctrl.rbac.ListUserGrants(c.Request.Context(), externalUserId, pagination)
+	result, err := ctrl.rbac.ListUserGrants(c.Request.Context(), user, externalUserId, pagination)
 	if err != nil {
 		ctrl.write(c, nil, err)
 		return
@@ -73,10 +69,8 @@ func (ctrl *Controller) GetUserEffectivePermissions(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "rbac:binding:read", req.ScopeType, req.ScopeId) {
-		return
-	}
+	user := auth.UserFromContext(c)
 	externalUserId := pickAlias(req.UserId, req.ExternalUserId)
-	item, err := ctrl.rbac.EffectivePermissions(c.Request.Context(), externalUserId, req.ScopeType, req.ScopeId)
+	item, err := ctrl.rbac.EffectivePermissions(c.Request.Context(), user, externalUserId, req.ScopeType, req.ScopeId)
 	ctrl.write(c, item, err)
 }

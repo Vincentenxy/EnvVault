@@ -79,8 +79,44 @@ func (r *Repository) CreateOrganization(ctx context.Context, code, name, comment
 	return r.createEntity(ctx, "organizations", "", "", code, name, comment, actor, "organization")
 }
 
-func (r *Repository) ListOrganizations(ctx context.Context, pagination Pagination) (domain.PaginatedResult[Entity], error) {
-	return r.listEntities(ctx, "organizations", "", pagination)
+func (r *Repository) ListOrganizations(ctx context.Context, callerUserId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
+	cte := userReadScopeCTE()
+	cols, scanInto := entityReadColumns(parentColumn("organizations"))
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "organization", column: "t.id"},
+	})
+	var total int64
+	countQuery := cte + fmt.Sprintf(`
+select count(*) from organizations t
+where t.is_deleted = false%s
+`, narrow)
+	if err := r.db.QueryRowContext(ctx, countQuery, callerUserId, "org:read").Scan(&total); err != nil {
+		return domain.PaginatedResult[Entity]{}, err
+	}
+	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
+select %s
+from organizations t
+where t.is_deleted = false%s
+order by t.name asc
+limit $3 offset $4
+`, cols, narrow), callerUserId, "org:read", pagination.Limit(), pagination.Offset())
+	if err != nil {
+		return domain.PaginatedResult[Entity]{}, err
+	}
+	defer rows.Close()
+	var items []Entity
+	for rows.Next() {
+		var entity Entity
+		if err := rows.Scan(scanInto(&entity)...); err != nil {
+			return domain.PaginatedResult[Entity]{}, err
+		}
+		r.fillEntityLabels(&entity)
+		items = append(items, entity)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.PaginatedResult[Entity]{}, err
+	}
+	return domain.PaginatedResult[Entity]{Items: items, Total: total}, nil
 }
 
 func (r *Repository) GetOrganization(ctx context.Context, id string) (Entity, error) {
@@ -190,8 +226,46 @@ func (r *Repository) CreateProject(ctx context.Context, orgId, code, name, comme
 	return project, tx.Commit()
 }
 
-func (r *Repository) ListProjects(ctx context.Context, orgId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
-	return r.listEntities(ctx, "projects", orgId, pagination)
+func (r *Repository) ListProjects(ctx context.Context, callerUserId, orgId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
+	cte := userReadScopeCTE()
+	cols, scanInto := entityReadColumns(parentColumn("projects"))
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "project", column: "t.id"},
+		{scopeType: "organization", column: "t.org_id"},
+	})
+	var total int64
+	if err := r.db.QueryRowContext(ctx, cte+fmt.Sprintf(`
+select count(*) from projects t
+where t.is_deleted = false
+  and t.org_id = $3::uuid%s
+`, narrow), callerUserId, "project:read", orgId).Scan(&total); err != nil {
+		return domain.PaginatedResult[Entity]{}, err
+	}
+	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
+select %s
+from projects t
+where t.is_deleted = false
+  and t.org_id = $3::uuid%s
+order by t.name asc
+limit $4 offset $5
+`, cols, narrow), callerUserId, "project:read", orgId, pagination.Limit(), pagination.Offset())
+	if err != nil {
+		return domain.PaginatedResult[Entity]{}, err
+	}
+	defer rows.Close()
+	var items []Entity
+	for rows.Next() {
+		var entity Entity
+		if err := rows.Scan(scanInto(&entity)...); err != nil {
+			return domain.PaginatedResult[Entity]{}, err
+		}
+		r.fillEntityLabels(&entity)
+		items = append(items, entity)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.PaginatedResult[Entity]{}, err
+	}
+	return domain.PaginatedResult[Entity]{Items: items, Total: total}, nil
 }
 
 func (r *Repository) GetProject(ctx context.Context, id string) (Entity, error) {
@@ -272,8 +346,53 @@ select org_id from projects where id = $1::uuid and is_deleted = false
 	return env, tx.Commit()
 }
 
-func (r *Repository) ListEnvironments(ctx context.Context, projectId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
-	return r.listEntities(ctx, "environments", projectId, pagination)
+func (r *Repository) ListEnvironments(ctx context.Context, callerUserId, projectId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
+	cte := userReadScopeCTE()
+	cols, scanInto := entityReadColumns(parentColumn("environments"))
+	// environments 表不持 org_id,需要 join projects 暴露 p.org_id。
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "environment", column: "t.id"},
+		{scopeType: "project", column: "t.project_id"},
+		{scopeType: "organization", column: "p.org_id"},
+	})
+	var total int64
+	if err := r.db.QueryRowContext(ctx, cte+fmt.Sprintf(`
+select count(*)
+from environments t
+join projects p on p.id = t.project_id
+where t.is_deleted = false
+  and p.is_deleted = false
+  and t.project_id = $3::uuid%s
+`, narrow), callerUserId, "env:read", projectId).Scan(&total); err != nil {
+		return domain.PaginatedResult[Entity]{}, err
+	}
+	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
+select %s
+from environments t
+join projects p on p.id = t.project_id
+where t.is_deleted = false
+  and p.is_deleted = false
+  and t.project_id = $3::uuid%s
+order by t.name asc
+limit $4 offset $5
+`, cols, narrow), callerUserId, "env:read", projectId, pagination.Limit(), pagination.Offset())
+	if err != nil {
+		return domain.PaginatedResult[Entity]{}, err
+	}
+	defer rows.Close()
+	var items []Entity
+	for rows.Next() {
+		var entity Entity
+		if err := rows.Scan(scanInto(&entity)...); err != nil {
+			return domain.PaginatedResult[Entity]{}, err
+		}
+		r.fillEntityLabels(&entity)
+		items = append(items, entity)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.PaginatedResult[Entity]{}, err
+	}
+	return domain.PaginatedResult[Entity]{Items: items, Total: total}, nil
 }
 
 func (r *Repository) GetEnvironment(ctx context.Context, id string) (Entity, error) {
@@ -327,22 +446,27 @@ on conflict (org_id, code) where is_deleted = false do nothing
 	return err
 }
 
-func (r *Repository) ListEnvironmentTemplates(ctx context.Context, orgId string, pagination Pagination) (domain.PaginatedResult[EnvironmentTemplate], error) {
+func (r *Repository) ListEnvironmentTemplates(ctx context.Context, callerUserId, orgId string, pagination Pagination) (domain.PaginatedResult[EnvironmentTemplate], error) {
+	cte := userReadScopeCTE()
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "env_template", column: "t.id"},
+		{scopeType: "organization", column: "t.org_id"},
+	})
 	var total int64
-	if err := r.db.QueryRowContext(ctx, `
-select count(*) from environment_templates
-where org_id = $1::uuid and is_deleted = false
-`, orgId).Scan(&total); err != nil {
+	if err := r.db.QueryRowContext(ctx, cte+fmt.Sprintf(`
+select count(*) from environment_templates t
+where t.org_id = $3::uuid and t.is_deleted = false%s
+`, narrow), callerUserId, "env:template:read", orgId).Scan(&total); err != nil {
 		return domain.PaginatedResult[EnvironmentTemplate]{}, err
 	}
 
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
 select id, org_id::text, code, name, comment, created_by, updated_by, created_at, updated_at
-from environment_templates
-where org_id = $1::uuid and is_deleted = false
-order by name asc
-limit $2 offset $3
-`, orgId, pagination.Limit(), pagination.Offset())
+from environment_templates t
+where t.org_id = $3::uuid and t.is_deleted = false%s
+order by t.name asc
+limit $4 offset $5
+`, narrow), callerUserId, "env:template:read", orgId, pagination.Limit(), pagination.Offset())
 	if err != nil {
 		return domain.PaginatedResult[EnvironmentTemplate]{}, err
 	}
@@ -429,7 +553,7 @@ where org_id = $1::uuid and code = $2 and is_deleted = false
 // 入参语义:
 //   - level=1:environmentId 是 env id,parentFolderId 忽略。
 //   - level=2:environmentId 是 env id(由 controller 从父 folder 反查后传入),
-//             parentFolderId 必须是同 env 下 level=1 folder 的 id。
+//     parentFolderId 必须是同 env 下 level=1 folder 的 id。
 //
 // 返回的 Entity.ParentId 字段多态,反映"父":
 //   - level=1:ParentId = environmentId(env 是父)
@@ -510,7 +634,9 @@ returning id, code, name, comment, created_by, updated_by, created_at, updated_a
 //
 // 两路 SELECT 复用 entityReadColumns,但 ParentId 列分别取 environment_id / parent_id,
 // 与 CreateFolder 的 Entity.ParentId 多态语义保持一致(level=1 父=env,level=2 父=folder)。
-func (r *Repository) ListFolders(ctx context.Context, envId, parentId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
+//
+// v7:caller 通过 user.UserId 透传,SQL 在 WHERE 末尾追加 narrowing 子句,按 (folder, env, project, org) 链收窄。
+func (r *Repository) ListFolders(ctx context.Context, callerUserId, envId, parentId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
 	if envId == "" && parentId == "" {
 		return domain.PaginatedResult[Entity]{}, errors.New("ListFolders requires envId or parentId")
 	}
@@ -518,30 +644,74 @@ func (r *Repository) ListFolders(ctx context.Context, envId, parentId string, pa
 		return domain.PaginatedResult[Entity]{}, errors.New("ListFolders accepts only one of envId or parentId")
 	}
 
+	cte := userReadScopeCTE()
+	// folder 表不持 project_id / org_id,需要 join env + project 暴露层级。
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "folder", column: "t.id"},
+		{scopeType: "environment", column: "t.environment_id"},
+		{scopeType: "project", column: "e.project_id"},
+		{scopeType: "organization", column: "p.org_id"},
+	})
+
 	var (
 		countQuery, query string
 		cols              string
 		scanInto          func(*Entity) []any
 		args              []any
 	)
+	// 注意:CTE 占用 $1=callerUserId, $2=permissionCode,后续占位从 $3 开始。
 	if envId != "" {
 		cols, scanInto = entityReadColumns("environment_id")
-		countQuery = `select count(*) from folders where environment_id = $1::uuid and parent_id is null and is_deleted = false`
-		query = fmt.Sprintf(`
+		countQuery = cte + fmt.Sprintf(`
+select count(*)
+from folders t
+join environments e on e.id = t.environment_id
+join projects p on p.id = e.project_id
+where t.environment_id = $3::uuid
+  and t.parent_id is null
+  and t.is_deleted = false
+  and e.is_deleted = false
+  and p.is_deleted = false%s
+`, narrow)
+		query = cte + fmt.Sprintf(`
 select %s
 from folders t
-where t.environment_id = $1::uuid and t.parent_id is null and t.is_deleted = false
-`, cols)
-		args = []any{envId}
+join environments e on e.id = t.environment_id
+join projects p on p.id = e.project_id
+where t.environment_id = $3::uuid
+  and t.parent_id is null
+  and t.is_deleted = false
+  and e.is_deleted = false
+  and p.is_deleted = false%s
+order by t.name asc
+limit $4 offset $5
+`, cols, narrow)
+		args = []any{callerUserId, "folder:read", envId}
 	} else {
 		cols, scanInto = entityReadColumns("parent_id")
-		countQuery = `select count(*) from folders where parent_id = $1::uuid and is_deleted = false`
-		query = fmt.Sprintf(`
+		countQuery = cte + fmt.Sprintf(`
+select count(*)
+from folders t
+join environments e on e.id = t.environment_id
+join projects p on p.id = e.project_id
+where t.parent_id = $3::uuid
+  and t.is_deleted = false
+  and e.is_deleted = false
+  and p.is_deleted = false%s
+`, narrow)
+		query = cte + fmt.Sprintf(`
 select %s
 from folders t
-where t.parent_id = $1::uuid and t.is_deleted = false
-`, cols)
-		args = []any{parentId}
+join environments e on e.id = t.environment_id
+join projects p on p.id = e.project_id
+where t.parent_id = $3::uuid
+  and t.is_deleted = false
+  and e.is_deleted = false
+  and p.is_deleted = false%s
+order by t.name asc
+limit $4 offset $5
+`, cols, narrow)
+		args = []any{callerUserId, "folder:read", parentId}
 	}
 
 	var total int64
@@ -550,7 +720,6 @@ where t.parent_id = $1::uuid and t.is_deleted = false
 	}
 
 	args = append(args, pagination.Limit(), pagination.Offset())
-	query += fmt.Sprintf(" order by t.name asc limit $%d offset $%d", len(args)-1, len(args))
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -826,23 +995,39 @@ where s.id = $1 and s.is_deleted = false
 	return secret, ciphertext, nil
 }
 
-func (r *Repository) ListSecrets(ctx context.Context, filter ListFilter, pagination Pagination) (domain.PaginatedResult[Secret], error) {
+func (r *Repository) ListSecrets(ctx context.Context, callerUserId, action string, filter ListFilter, pagination Pagination) (domain.PaginatedResult[Secret], error) {
+	cte := userReadScopeCTE()
+	// secret 表不持 project_id / org_id,需 join 4 张表暴露完整 ancestor 链。
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "secret", column: "s.id"},
+		{scopeType: "folder", column: "s.folder_id"},
+		{scopeType: "environment", column: "e.id"},
+		{scopeType: "project", column: "p.id"},
+		{scopeType: "organization", column: "o.id"},
+	})
+
 	var total int64
-	err := r.db.QueryRowContext(ctx, `
+	err := r.db.QueryRowContext(ctx, cte+fmt.Sprintf(`
 select count(*)
 from secrets s
 join folders f on f.id = s.folder_id
 join environments e on e.id = f.environment_id
+join projects p on p.id = e.project_id
+join organizations o on o.id = p.org_id
 where s.is_deleted = false
-  and ($1 = '' or e.id = $1::uuid)
-  and ($2 = '' or s.folder_id = $2::uuid)
-  and ($3 = '' or s.key ilike '%' || $3 || '%')
-`, filter.EnvironmentId, filter.FolderId, filter.Keyword).Scan(&total)
+  and f.is_deleted = false
+  and e.is_deleted = false
+  and p.is_deleted = false
+  and o.is_deleted = false
+  and ($3 = '' or e.id = $3::uuid)
+  and ($4 = '' or s.folder_id = $4::uuid)
+  and ($5 = '' or s.key ilike '%%' || $5 || '%%')%s
+`, narrow), callerUserId, action, filter.EnvironmentId, filter.FolderId, filter.Keyword).Scan(&total)
 	if err != nil {
 		return domain.PaginatedResult[Secret]{}, err
 	}
 
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
 select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.comment, s.version,
        s.created_by, s.updated_by,
        s.created_at, s.updated_at
@@ -852,12 +1037,16 @@ join environments e on e.id = f.environment_id
 join projects p on p.id = e.project_id
 join organizations o on o.id = p.org_id
 where s.is_deleted = false
-  and ($1 = '' or e.id = $1::uuid)
-  and ($2 = '' or s.folder_id = $2::uuid)
-  and ($3 = '' or s.key ilike '%' || $3 || '%')
+  and f.is_deleted = false
+  and e.is_deleted = false
+  and p.is_deleted = false
+  and o.is_deleted = false
+  and ($3 = '' or e.id = $3::uuid)
+  and ($4 = '' or s.folder_id = $4::uuid)
+  and ($5 = '' or s.key ilike '%%' || $5 || '%%')%s
 order by s.key asc
-limit $4 offset $5
-`, filter.EnvironmentId, filter.FolderId, filter.Keyword, pagination.Limit(), pagination.Offset())
+limit $6 offset $7
+`, narrow), callerUserId, action, filter.EnvironmentId, filter.FolderId, filter.Keyword, pagination.Limit(), pagination.Offset())
 	if err != nil {
 		return domain.PaginatedResult[Secret]{}, err
 	}
@@ -880,6 +1069,83 @@ limit $4 offset $5
 		return domain.PaginatedResult[Secret]{}, err
 	}
 	return domain.PaginatedResult[Secret]{Items: items, Total: total}, nil
+}
+
+// BatchRevealSecretsByPath 一次性按 folder 路径 + 可选 keys 拉取 secret 明文所需的 metadata + ciphertext。
+// 复用 v7 的 userReadScopeCTE + narrowingPredicate + scopeNarrowingWhere,做 secret:reveal 权限的 cascade narrowing。
+// keys 为空时返回 folder 下所有 secret(无分页、无上限);返回顺序按 s.key ASC,方便 service 端做 notFound diff。
+// 返回 ([]Secret, [][]byte) 两个等长切片:Secret 不含 value,ciphertext 让 service 层解密后填 Secret.Value。
+func (r *Repository) BatchRevealSecretsByPath(
+	ctx context.Context,
+	callerUserId, action, orgCode, projectCode, envCode, folderCode string,
+	keys []string,
+) ([]Secret, [][]byte, error) {
+	cte := userReadScopeCTE()
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "secret", column: "s.id"},
+		{scopeType: "folder", column: "s.folder_id"},
+		{scopeType: "environment", column: "e.id"},
+		{scopeType: "project", column: "p.id"},
+		{scopeType: "organization", column: "o.id"},
+	})
+	// 4 段 code 解析(secret:reveal 不走 GetSecretByPath 的 5 表 join,而是 4 表 join + 1 个 WHERE 过滤),
+	// 用 4 步 index-nested-loop 走 (parent_id, code) 唯一索引。
+	query := cte + fmt.Sprintf(`
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.value_ciphertext, s.comment, s.version,
+       s.created_by, s.updated_by,
+       s.created_at, s.updated_at
+from secrets s
+join folders f
+  on f.id = s.folder_id
+ and f.code = $5
+ and f.is_deleted = false
+join environments e
+  on e.id = f.environment_id
+ and e.code = $4
+ and e.is_deleted = false
+join projects p
+  on p.id = e.project_id
+ and p.code = $3
+ and p.is_deleted = false
+join organizations o
+  on o.id = p.org_id
+ and o.code = $2
+ and o.is_deleted = false
+where s.is_deleted = false
+  and (cardinality($6::text[]) = 0 or s.key = any($6::text[]))%s
+order by s.key asc
+`, narrow)
+	rows, err := r.db.QueryContext(ctx, query, callerUserId, action, orgCode, projectCode, envCode, folderCode, keys)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var (
+		items      []Secret
+		ciphertext [][]byte
+	)
+	for rows.Next() {
+		var (
+			secret  Secret
+			payload []byte
+		)
+		if err := rows.Scan(
+			&secret.Id, &secret.OrgId, &secret.OrgCode, &secret.ProjectId, &secret.ProjectCode, &secret.EnvironmentId, &secret.EnvironmentCode, &secret.FolderId, &secret.FolderCode, &secret.Key, &payload, &secret.Comment, &secret.Version,
+			&secret.CreatedBy, &secret.UpdatedBy,
+			&secret.CreatedAt, &secret.UpdatedAt,
+		); err != nil {
+			return nil, nil, err
+		}
+		r.fillSecretLabels(&secret)
+		secret.Path = buildSecretPath(secret)
+		items = append(items, secret)
+		ciphertext = append(ciphertext, payload)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return items, ciphertext, nil
 }
 
 func (r *Repository) ListSecretCacheRecords(ctx context.Context) ([]SecretCacheRecord, error) {
@@ -1141,9 +1407,10 @@ func (r *Repository) deleteEntity(ctx context.Context, table, id, actor, resourc
 }
 
 // snapshotAndSoftDeleteTx 在调用方事务内:
-//   1. 拍快照(to_jsonb)到 deleted_records;
-//   2. 软删目标行;
-//   3. 写 audit_records。
+//  1. 拍快照(to_jsonb)到 deleted_records;
+//  2. 软删目标行;
+//  3. 写 audit_records。
+//
 // 用于 Delete* 级联场景:父行先按此函数处理,再在同事务里级联软删子行。
 func (r *Repository) snapshotAndSoftDeleteTx(ctx context.Context, tx *sql.Tx, table, id, actor, resourceType string) error {
 	snapshot, err := snapshotTx(ctx, tx, table, id)
@@ -1345,3 +1612,89 @@ func entityReturning(parentCol string) (cols string, scan func(*Entity) []any) {
 
 // Compile-time guard:确保 Repository 满足 store.ResourceRepository 接口。
 var _ store.ResourceRepository = (*Repository)(nil)
+
+// ============================================================
+// v7: list 接口按 caller 权限自动收窄可见作用域
+// ============================================================
+//
+// 6 个 list 方法统一在 WHERE 末尾追加一段 narrowing 谓词:
+//   1. CTE `user_read_scopes` 算出 caller 持有 `permissionCode` 的所有 (scope_type, scope_id) 对
+//   2. 主 WHERE 末尾追加 `AND (EXISTS (global allow) OR <cascade narrowing>)`
+//
+// narrowing 谓词按资源祖先链 OR 拼接:
+//   - org 自己               : t.id IN (... 'organization')
+//   - project (含 org cascade): t.id IN (... 'project') OR t.org_id IN (... 'organization')
+//   - env (含 project/org 链) : t.id IN (... 'environment') OR t.project_id IN (... 'project') OR t.project.org_id IN (... 'organization')
+//   - folder (含 env/project/org 链) ... 以此类推
+//
+// 行为:无 binding / 空 user_id → CTE 返空 → 全部 list 返空(不 403、不 500,符合"我看的就是我能看的")。
+// `secret` / `env_template` 这两种 scope_type 当前没有任何 role 会绑在这两个层级,
+// 谓词保留为 false 但不写死,支持未来扩展"对单个 secret/env_template 授权"。
+//
+// helper 假设:
+//   - 调用方已经把 callerUserId 放在 args[0],permissionCode 放在 args[1](secret:list 路径)
+//     或写死成权限码(其他 5 个 list 方法用各自的 permission code 文本)。
+//   - 主查询 SELECT 列、order/limit/offset 在 helper 之外的 caller 控制。
+//   - `$1` 已被 caller 占用于 callerUserId(以及 permissionCode),所以后续 narrowing 中的
+//     引用从 `$%d` 自增。
+
+// userReadScopeCTE 返回 WITH 子句 + 内部 SELECT 模板,要求调用方传入 callerUserId ($1)
+// 和 permissionCode ($2)。CTE 列名 (scope_type, scope_id) 与 narrowingPredicate 配合。
+func userReadScopeCTE() string {
+	return `with user_read_scopes as (
+  select distinct urb.scope_type, urb.scope_id
+  from user_role_bindings urb
+  join users u on u.id = urb.user_id
+  join roles r on r.id = urb.role_id
+  join role_permissions rp on rp.role_id = r.id
+  join permissions p on p.id = rp.permission_id
+  where u.external_user_id = $1
+    and p.code = $2
+    and (urb.expires_at is null or urb.expires_at > now())
+    and urb.is_deleted = false
+    and r.is_deleted = false
+    and u.is_disabled = false
+) `
+}
+
+// narrowingPredicate 生成 "OR" 串联的 narrowing 谓词。
+// entries 顺序即谓词顺序;每个 entry 给出 (scope_type, 该 scope_type 在主表/join 链上的列)。
+// 例如 ListProjects 传 {{"project", "t.id"}, {"organization", "t.org_id"}},
+// 展开为:
+//
+//	t.id IN (select scope_id from user_read_scopes where scope_type = 'project')
+//	OR t.org_id IN (select scope_id from user_read_scopes where scope_type = 'organization')
+//
+// caller's binding chain 自动 cascade,无需 caller 端额外逻辑。
+func narrowingPredicate(entries []narrowingEntry) string {
+	if len(entries) == 0 {
+		return "false"
+	}
+	parts := make([]string, 0, len(entries))
+	for _, e := range entries {
+		parts = append(parts, fmt.Sprintf(
+			"%s in (select scope_id from user_read_scopes where scope_type = '%s')",
+			e.column, e.scopeType,
+		))
+	}
+	return strings.Join(parts, " or ")
+}
+
+// narrowingEntry 单个 (scope_type, column) 对。
+type narrowingEntry struct {
+	scopeType string
+	column    string
+}
+
+// scopeNarrowingWhere 返回主 WHERE 子句末尾应追加的 narrowing 片段:
+//
+//	AND (
+//	  EXISTS (SELECT 1 FROM user_read_scopes WHERE scope_type = 'global')
+//	  OR <narrowingPredicate(entries)>
+//	)
+//
+// callerUserId 与 permissionCode 已在 userReadScopeCTE 的 $1/$2 中绑定。
+// 返回的字符串以 " and (" 开头,直接拼接到现有 WHERE 末尾。
+func scopeNarrowingWhere(entries []narrowingEntry) string {
+	return " and (\n          exists (select 1 from user_read_scopes where scope_type = 'global')\n          or " + narrowingPredicate(entries) + "\n        )"
+}

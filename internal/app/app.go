@@ -53,7 +53,12 @@ func Run() error {
 
 	// service 层:仅 secret 编排与 RBAC 业务两处需要 service。
 	// 透传型 CRUD(Org/Project/Env/EnvTpl/Folder/Audit)直接 handler→repo。
-	rbacSvc := service.NewRBACService(rbacStore)
+	//
+	// v6 起,所有 service 入口都注入 auth.Authorizer 做权限判定。
+	// 控制器(handler)只做认证拦截(JWT 解析 + 用户身份),
+	// 不再调 allowScope,所有 authz.Allow 都下沉到 service。
+	authorizer := auth.NewRBACAuthorizer(rbacStore)
+	rbacSvc := service.NewRBACService(rbacStore, authorizer)
 
 	var cache *rediscache.Cache
 	var secretSvc service.SecretService
@@ -75,9 +80,9 @@ func Run() error {
 			}
 			logging.Info(ctx, "AppRun", "redis cache warmup completed", logging.F("count", len(records)))
 		}
-		secretSvc = service.NewSecretService(repository, encryptor, cache)
+		secretSvc = service.NewSecretService(repository, encryptor, cache, authorizer)
 	} else {
-		secretSvc = service.NewSecretService(repository, encryptor, nil)
+		secretSvc = service.NewSecretService(repository, encryptor, nil, authorizer)
 	}
 
 	router := httpapi.NewRouter(httpapi.Dependencies{
@@ -86,7 +91,7 @@ func Run() error {
 		Repo:       repository,
 		Secret:     secretSvc,
 		RBAC:       rbacSvc,
-		Authorizer: auth.NewRBACAuthorizer(rbacStore),
+		Authorizer: authorizer,
 		Cache:      cache,
 	})
 

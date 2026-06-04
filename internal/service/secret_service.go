@@ -7,42 +7,73 @@ import (
 	"fmt"
 	"strings"
 
+	"envVault/internal/auth"
 	secretcrypto "envVault/internal/crypto"
 	"envVault/internal/domain"
 	"envVault/internal/logging"
 	"envVault/internal/store"
 )
 
-// SecretService 集中 secret 的业务编排:值加密、Redis 缓存、reveal 审计。
-// 持久化(写 DB)由 store.ResourceRepository 完成,本服务只补"业务胶水"。
+// SecretService 集中 secret 的业务编排:值加密、Redis 缓存、reveal 审计、
+// **权限检查**(v6 起)。持久化(写 DB)由 store.ResourceRepository 完成,本服务
+// 只补"业务胶水"。
+//
+// 权限判定统一走 auth.Authorizer.Allow,scope 取请求体中最深的可用字段:
+//
+//	secret:create  → folder:{folderId}
+//	secret:read    → secret:{id}
+//	secret:reveal  → secret:{id}(独立码,与 secret:read 不复用)
+//	secret:update  → secret:{id}
+//	secret:delete  → secret:{id}
+//	secret:list    → folder:{folderId} 或 environment:{environmentId}(FolderId 优先)
+//	secret:search  → 同 list
 type SecretService interface {
-	Create(ctx context.Context, folderId, key, value, comment, actor string) (domain.Secret, error)
-	Update(ctx context.Context, id, key, value, comment, actor string) (domain.Secret, error)
-	Delete(ctx context.Context, id, actor string) error
+	Create(ctx context.Context, user auth.UserInfo, folderId, key, value, comment, actor string) (domain.Secret, error)
+	Update(ctx context.Context, user auth.UserInfo, id, key, value, comment, actor string) (domain.Secret, error)
+	Delete(ctx context.Context, user auth.UserInfo, id, actor string) error
 
-	Get(ctx context.Context, id string) (domain.Secret, error)
-	Reveal(ctx context.Context, id, actor string) (domain.Secret, error)
+	Get(ctx context.Context, user auth.UserInfo, id string) (domain.Secret, error)
+	Reveal(ctx context.Context, user auth.UserInfo, id, actor string) (domain.Secret, error)
 
 	// 路径访问:解析 "org.proj.env.folder.KEY" 后查 secret metadata。
 	// 不返回 value;需要明文走 RevealByPath。
-	GetByPath(ctx context.Context, path string) (domain.Secret, error)
-	RevealByPath(ctx context.Context, path, actor string) (domain.Secret, error)
+	GetByPath(ctx context.Context, user auth.UserInfo, path string) (domain.Secret, error)
+	RevealByPath(ctx context.Context, user auth.UserInfo, path, actor string) (domain.Secret, error)
 
-	List(ctx context.Context, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
-	Search(ctx context.Context, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
+	// 批量路径 reveal:解析 "org.proj.env.folder" 4 段路径 + 可选 keys 列表,
+	// 一次性返回所有命中 key 的明文。keys 为空/缺省 = 该 folder 下所有 secret。
+	// 不分页,整批 1 条 audit(action=reveal_batch, resource_type=folder)。
+	BatchRevealByPath(ctx context.Context, user auth.UserInfo, path string, keys []string, actor string) ([]domain.Secret, []string, error)
+
+	List(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
+	Search(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
 }
 
 type secretService struct {
-	repo      store.ResourceRepository
-	encryptor secretcrypto.Encryptor
-	cache     store.SecretCache // 可为 nil
+	repo       store.ResourceRepository
+	encryptor  secretcrypto.Encryptor
+	cache      store.SecretCache // 可为 nil
+	authorizer auth.Authorizer
 }
 
-func NewSecretService(repo store.ResourceRepository, encryptor secretcrypto.Encryptor, cache store.SecretCache) SecretService {
-	return &secretService{repo: repo, encryptor: encryptor, cache: cache}
+func NewSecretService(repo store.ResourceRepository, encryptor secretcrypto.Encryptor, cache store.SecretCache, authorizer auth.Authorizer) SecretService {
+	return &secretService{repo: repo, encryptor: encryptor, cache: cache, authorizer: authorizer}
 }
 
-func (s *secretService) Create(ctx context.Context, folderId, key, value, comment, actor string) (domain.Secret, error) {
+// secretFolderScope / secretSecretScope 帮 service 内生成 auth.Resource,
+// 避免每个方法都写 `auth.Resource{Type: "secret", Id: id}` 的样板。
+func secretFolderScope(folderId string) auth.Resource {
+	return auth.Resource{Type: "folder", Id: folderId}
+}
+func secretEnvironmentScope(envId string) auth.Resource {
+	return auth.Resource{Type: "environment", Id: envId}
+}
+func secretSecretScope(id string) auth.Resource { return auth.Resource{Type: "secret", Id: id} }
+
+func (s *secretService) Create(ctx context.Context, user auth.UserInfo, folderId, key, value, comment, actor string) (domain.Secret, error) {
+	if err := s.authorizer.Allow(ctx, user, "secret:create", secretFolderScope(folderId)); err != nil {
+		return domain.Secret{}, err
+	}
 	ciphertext, err := s.encrypt(ctx, value)
 	if err != nil {
 		return domain.Secret{}, err
@@ -55,7 +86,10 @@ func (s *secretService) Create(ctx context.Context, folderId, key, value, commen
 	return secret, nil
 }
 
-func (s *secretService) Update(ctx context.Context, id, key, value, comment, actor string) (domain.Secret, error) {
+func (s *secretService) Update(ctx context.Context, user auth.UserInfo, id, key, value, comment, actor string) (domain.Secret, error) {
+	if err := s.authorizer.Allow(ctx, user, "secret:update", secretSecretScope(id)); err != nil {
+		return domain.Secret{}, err
+	}
 	ciphertext, err := s.encrypt(ctx, value)
 	if err != nil {
 		return domain.Secret{}, err
@@ -68,7 +102,10 @@ func (s *secretService) Update(ctx context.Context, id, key, value, comment, act
 	return secret, nil
 }
 
-func (s *secretService) Delete(ctx context.Context, id, actor string) error {
+func (s *secretService) Delete(ctx context.Context, user auth.UserInfo, id, actor string) error {
+	if err := s.authorizer.Allow(ctx, user, "secret:delete", secretSecretScope(id)); err != nil {
+		return err
+	}
 	if err := s.repo.DeleteSecret(ctx, id, actor); err != nil {
 		return err
 	}
@@ -80,11 +117,17 @@ func (s *secretService) Delete(ctx context.Context, id, actor string) error {
 	return nil
 }
 
-func (s *secretService) Get(ctx context.Context, id string) (domain.Secret, error) {
+func (s *secretService) Get(ctx context.Context, user auth.UserInfo, id string) (domain.Secret, error) {
+	if err := s.authorizer.Allow(ctx, user, "secret:read", secretSecretScope(id)); err != nil {
+		return domain.Secret{}, err
+	}
 	return s.repo.GetSecret(ctx, id)
 }
 
-func (s *secretService) Reveal(ctx context.Context, id, actor string) (domain.Secret, error) {
+func (s *secretService) Reveal(ctx context.Context, user auth.UserInfo, id, actor string) (domain.Secret, error) {
+	if err := s.authorizer.Allow(ctx, user, "secret:reveal", secretSecretScope(id)); err != nil {
+		return domain.Secret{}, err
+	}
 	secret, ciphertext, err := s.repo.GetSecretCiphertext(ctx, id)
 	if err != nil {
 		return domain.Secret{}, err
@@ -102,21 +145,39 @@ func (s *secretService) Reveal(ctx context.Context, id, actor string) (domain.Se
 }
 
 // GetByPath 解析 "org.proj.env.folder.KEY" 后查 secret metadata,不返回 value。
-func (s *secretService) GetByPath(ctx context.Context, path string) (domain.Secret, error) {
+//
+// 注意:先 GetByPath 拿到 secret.id,再走 secret:read 校验。
+// 侧信道:无权限用户可以通过 200/403 时延差推断存在性(与 /secret/info 一致),
+// 后续若要严格防探测,可在 allowScope 失败时把 403 改 404。
+func (s *secretService) GetByPath(ctx context.Context, user auth.UserInfo, path string) (domain.Secret, error) {
 	orgCode, projectCode, envCode, folderCode, key, err := parseSecretPath(path)
 	if err != nil {
 		return domain.Secret{}, err
 	}
-	return s.repo.GetSecretByPath(ctx, orgCode, projectCode, envCode, folderCode, key)
-}
-
-// RevealByPath 先按路径解析拿 id,再走现有 Reveal 加密 + 审计链路。
-func (s *secretService) RevealByPath(ctx context.Context, path, actor string) (domain.Secret, error) {
-	secret, err := s.GetByPath(ctx, path)
+	secret, err := s.repo.GetSecretByPath(ctx, orgCode, projectCode, envCode, folderCode, key)
 	if err != nil {
 		return domain.Secret{}, err
 	}
-	return s.Reveal(ctx, secret.Id, actor)
+	if err := s.authorizer.Allow(ctx, user, "secret:read", secretSecretScope(secret.Id)); err != nil {
+		return domain.Secret{}, err
+	}
+	return secret, nil
+}
+
+// RevealByPath 先按路径解析拿 id,再走 secret:reveal 校验 + 现有 Reveal 加密 + 审计链路。
+func (s *secretService) RevealByPath(ctx context.Context, user auth.UserInfo, path, actor string) (domain.Secret, error) {
+	orgCode, projectCode, envCode, folderCode, key, err := parseSecretPath(path)
+	if err != nil {
+		return domain.Secret{}, err
+	}
+	secret, err := s.repo.GetSecretByPath(ctx, orgCode, projectCode, envCode, folderCode, key)
+	if err != nil {
+		return domain.Secret{}, err
+	}
+	if err := s.authorizer.Allow(ctx, user, "secret:reveal", secretSecretScope(secret.Id)); err != nil {
+		return domain.Secret{}, err
+	}
+	return s.Reveal(ctx, user, secret.Id, actor)
 }
 
 // parseSecretPath 把 "org.project.env.folder.KEY" 拆成 5 段,任一段为空或段数不对都报错。
@@ -133,20 +194,138 @@ func parseSecretPath(path string) (org, proj, env, folder, key string, err error
 	return parts[0], parts[1], parts[2], parts[3], parts[4], nil
 }
 
-func (s *secretService) List(ctx context.Context, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error) {
-	return s.repo.ListSecrets(ctx, filter, pagination)
+// parseFolderPath 把 "org.project.env.folder" 拆成 4 段(无 KEY),任一段为空或段数不对都报错。
+// 与 parseSecretPath 共享同样的校验规则(非空 / trim / 全段必填)。
+func parseFolderPath(path string) (org, proj, env, folder string, err error) {
+	parts := strings.Split(strings.TrimSpace(path), ".")
+	if len(parts) != 4 {
+		return "", "", "", "", fmt.Errorf("invalid folder path: expected org.project.env.folder, got %q", path)
+	}
+	for _, p := range parts {
+		if strings.TrimSpace(p) == "" {
+			return "", "", "", "", fmt.Errorf("invalid folder path: empty segment in %q", path)
+		}
+	}
+	return parts[0], parts[1], parts[2], parts[3], nil
 }
 
-func (s *secretService) Search(ctx context.Context, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error) {
-	// 优先走 Redis 缓存;失败回落到 DB,避免缓存抖动阻塞业务。
-	if s.cache != nil {
-		items, err := s.cache.SearchSecrets(ctx, filter)
-		if err == nil {
-			return paginateSecrets(items, pagination), nil
-		}
-		logging.Warn(ctx, "SecretService.Search", "redis search failed, fallback to postgres", logging.F("error", err))
+// BatchRevealByPath 按 folder 路径 + 可选 keys 列表批量 reveal。
+//
+// - 空 user.UserId → ErrPermissionDenied(service 防御,同 List/Search);
+// - 空 path / 段数错 → parseFolderPath 错误;
+// - 走 v7 cascade narrowing(secret:reveal):repo SQL 一次性按 (secret, folder, env, project, org) 链收窄;
+// - 解密后填 Secret.Value;
+// - 整批 1 条 audit(resource_type=folder, action=reveal_batch, encrypted_value=keys 列表);
+//
+// 返回 (secrets, notFound, err):
+//   - secrets: 命中并解密的 secret 列表(按 key ASC);
+//   - notFound: 当 request keys 非空时,request keys ∖ 命中 keys(顺序按 request 出现顺序);
+//
+// request keys 为空时 notFound 一定为 nil(无对照,避免误导调用方)。
+func (s *secretService) BatchRevealByPath(ctx context.Context, user auth.UserInfo, path string, keys []string, actor string) ([]domain.Secret, []string, error) {
+	if strings.TrimSpace(user.UserId) == "" {
+		return nil, nil, auth.ErrPermissionDenied
 	}
-	return s.repo.ListSecrets(ctx, filter, pagination)
+	orgCode, projectCode, envCode, folderCode, err := parseFolderPath(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	// 兜底:keys 为 nil 时传空 slice 给 repo,避免 SQL 中 cardinality(NULL::text[]) 返 NULL 导致整批空返。
+	// 空 slice 走 `cardinality('{}'::text[]) = 0` 真值,SQL 走「不限」分支。
+	if keys == nil {
+		keys = []string{}
+	}
+	secrets, ciphertexts, err := s.repo.BatchRevealSecretsByPath(ctx, user.UserId, "secret:reveal", orgCode, projectCode, envCode, folderCode, keys)
+	if err != nil {
+		return nil, nil, err
+	}
+	// 解密 + 填 Value
+	results := make([]domain.Secret, 0, len(secrets))
+	for i, secret := range secrets {
+		var ciphertext domain.SecretCiphertext
+		if err := json.Unmarshal(ciphertexts[i], &ciphertext); err != nil {
+			return nil, nil, fmt.Errorf("decode secret ciphertext: %w", err)
+		}
+		plaintext, err := s.decrypt(ctx, ciphertext)
+		if err != nil {
+			return nil, nil, err
+		}
+		secret.Value = plaintext
+		results = append(results, secret)
+	}
+
+	// 整批 1 条 audit;无命中(空 results)时不写。
+	if len(results) > 0 {
+		// 记录「实际命中的 keys」,keys 请求为空时填实际命中的 keys 列表(便于审计反查)。
+		auditKeys := keys
+		if len(auditKeys) == 0 {
+			auditKeys = make([]string, 0, len(results))
+			for _, sec := range results {
+				auditKeys = append(auditKeys, sec.Key)
+			}
+		}
+		// 任意一个命中 secret 共享同一个 folder,取第一个的 FolderId 作为 audit resource。
+		payload, err := json.Marshal(auditKeys)
+		if err != nil {
+			return nil, nil, fmt.Errorf("marshal audit keys: %w", err)
+		}
+		if err := s.repo.RecordAudit(ctx, actor, "folder", results[0].FolderId, "reveal_batch", payload); err != nil {
+			return nil, nil, fmt.Errorf("record reveal_batch audit: %w", err)
+		}
+	}
+
+	// 计算 notFound:request keys ∖ 命中 keys(只在 request keys 非空时计算)
+	var notFound []string
+	if len(keys) > 0 {
+		hit := make(map[string]struct{}, len(results))
+		for _, sec := range results {
+			hit[sec.Key] = struct{}{}
+		}
+		for _, k := range keys {
+			if _, ok := hit[k]; !ok {
+				notFound = append(notFound, k)
+			}
+		}
+	}
+	return results, notFound, nil
+}
+
+// listScope 实现 List / Search 共享的"最深 scope"策略:
+// FolderId 优先 → folder scope;否则 EnvironmentId → environment scope。
+// RBAC 走 folder/secret 继承链(folder → env → project → org),由 ResourceScopes 自行展开。
+// "search" 权限码比 "list" 权限码高一档(跨 folder 检索,语义更宽),
+// 所以由 caller 显式选择。
+//
+// v7 起,list/search 的"入口"权限判定已下沉到 repo SQL narrowing 自身;
+// 这里仍保留 helper 给其他单点路径(目前没有 caller),若未来需要可重新启用。
+// 已不再被 List / Search 调用。
+func (s *secretService) listScope(ctx context.Context, user auth.UserInfo, action string, filter domain.ListFilter) error {
+	if filter.FolderId != "" {
+		return s.authorizer.Allow(ctx, user, action, secretFolderScope(filter.FolderId))
+	}
+	if filter.EnvironmentId != "" {
+		return s.authorizer.Allow(ctx, user, action, secretEnvironmentScope(filter.EnvironmentId))
+	}
+	return errors.New("listScope: either FolderId or EnvironmentId is required")
+}
+
+// List 按 caller 的 user_role_bindings 自动收窄可见 secret(scope 链:
+// secret > folder > env > project > org);caller 无 binding → 返空 list。
+// cache 不感知 user,无法收窄,List 走 repo 直查。
+func (s *secretService) List(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error) {
+	if strings.TrimSpace(user.UserId) == "" {
+		return domain.PaginatedResult[domain.Secret]{}, auth.ErrPermissionDenied
+	}
+	return s.repo.ListSecrets(ctx, user.UserId, "secret:list", filter, pagination)
+}
+
+// Search 同 List,差别只在 action("secret:search")。
+// 同样不走 cache(cache 不感知 user);keyword 模糊搜索本就走 DB 索引,影响可控。
+func (s *secretService) Search(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error) {
+	if strings.TrimSpace(user.UserId) == "" {
+		return domain.PaginatedResult[domain.Secret]{}, auth.ErrPermissionDenied
+	}
+	return s.repo.ListSecrets(ctx, user.UserId, "secret:search", filter, pagination)
 }
 
 func (s *secretService) encrypt(ctx context.Context, value string) (domain.SecretCiphertext, error) {

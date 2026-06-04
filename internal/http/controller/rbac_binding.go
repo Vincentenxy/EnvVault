@@ -3,6 +3,7 @@ package controller
 import (
 	"github.com/gin-gonic/gin"
 
+	"envVault/internal/auth"
 	"envVault/internal/domain"
 )
 
@@ -14,11 +15,9 @@ func (ctrl *Controller) ListRoleBindings(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "rbac:binding:read", req.ScopeType, req.ScopeId) {
-		return
-	}
+	user := auth.UserFromContext(c)
 	pagination := paginationFromRequest(req.PageRequest)
-	result, err := ctrl.rbac.ListRoleBindings(c.Request.Context(), req.ScopeType, req.ScopeId, pagination)
+	result, err := ctrl.rbac.ListRoleBindings(c.Request.Context(), user, req.ScopeType, req.ScopeId, pagination)
 	ctrl.write(c, pageData(toGrants(result.Items), result.Total, pagination), err)
 }
 
@@ -30,11 +29,9 @@ func (ctrl *Controller) GrantRole(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "rbac:binding:manage", req.ScopeType, req.ScopeId) {
-		return
-	}
 	r := req.resolve()
-	item, err := ctrl.rbac.GrantRole(c.Request.Context(),
+	user := auth.UserFromContext(c)
+	item, err := ctrl.rbac.GrantRole(c.Request.Context(), user,
 		r.UserId, r.Name, r.Email, r.RoleCode,
 		r.ScopeType, r.ScopeId, r.ExpiresAt, ctrl.actor(c),
 	)
@@ -53,11 +50,9 @@ func (ctrl *Controller) RevokeRole(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "rbac:binding:manage", req.ScopeType, req.ScopeId) {
-		return
-	}
 	r := req.resolve()
-	err := ctrl.rbac.RevokeRole(c.Request.Context(),
+	user := auth.UserFromContext(c)
+	err := ctrl.rbac.RevokeRole(c.Request.Context(), user,
 		r.UserId, r.RoleCode, r.ScopeType, r.ScopeId, ctrl.actor(c),
 	)
 	ctrl.write(c, gin.H{"deleted": true}, err)

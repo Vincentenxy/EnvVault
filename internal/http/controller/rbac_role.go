@@ -2,6 +2,8 @@ package controller
 
 import (
 	"github.com/gin-gonic/gin"
+
+	"envVault/internal/auth"
 )
 
 func (ctrl *Controller) ListRoles(c *gin.Context) {
@@ -12,11 +14,9 @@ func (ctrl *Controller) ListRoles(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "rbac:role:read", req.ScopeType, req.ScopeId) {
-		return
-	}
+	user := auth.UserFromContext(c)
 	pagination := paginationFromRequest(req.PageRequest)
-	result, err := ctrl.rbac.ListRoles(c.Request.Context(), req.ScopeType, req.ScopeId, pagination)
+	result, err := ctrl.rbac.ListRoles(c.Request.Context(), user, req.ScopeType, req.ScopeId, pagination)
 	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 
@@ -28,10 +28,8 @@ func (ctrl *Controller) GetRole(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "rbac:role:read", "global", "") {
-		return
-	}
-	item, err := ctrl.rbac.GetRole(c.Request.Context(), req.Id, req.Code)
+	user := auth.UserFromContext(c)
+	item, err := ctrl.rbac.GetRole(c.Request.Context(), user, req.Id, req.Code)
 	ctrl.write(c, item, err)
 }
 
@@ -43,10 +41,8 @@ func (ctrl *Controller) CreateRole(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "rbac:role:manage", req.ScopeType, req.ScopeId) {
-		return
-	}
-	item, err := ctrl.rbac.CreateRole(c.Request.Context(),
+	user := auth.UserFromContext(c)
+	item, err := ctrl.rbac.CreateRole(c.Request.Context(), user,
 		req.Code, req.Name, req.Description, req.ScopeType, req.ScopeId, req.Permissions, ctrl.actor(c),
 	)
 	ctrl.write(c, item, err)
@@ -60,10 +56,8 @@ func (ctrl *Controller) UpdateRole(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "rbac:role:manage", req.ScopeType, req.ScopeId) {
-		return
-	}
-	item, err := ctrl.rbac.UpdateRole(c.Request.Context(),
+	user := auth.UserFromContext(c)
+	item, err := ctrl.rbac.UpdateRole(c.Request.Context(), user,
 		req.Id, req.Code, req.Name, req.Description, req.ScopeType, req.ScopeId, req.Permissions, ctrl.actor(c),
 	)
 	ctrl.write(c, item, err)
@@ -77,8 +71,6 @@ func (ctrl *Controller) DeleteRole(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "rbac:role:manage", "global", "") {
-		return
-	}
-	ctrl.write(c, gin.H{"deleted": true}, ctrl.rbac.DeleteRole(c.Request.Context(), req.Id, ctrl.actor(c)))
+	user := auth.UserFromContext(c)
+	ctrl.write(c, gin.H{"deleted": true}, ctrl.rbac.DeleteRole(c.Request.Context(), user, req.Id, ctrl.actor(c)))
 }

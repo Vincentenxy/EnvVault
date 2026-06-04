@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"envVault/internal/auth"
 	"envVault/internal/http/response"
 	"envVault/internal/logging"
 )
@@ -76,6 +77,9 @@ func (ctrl *Controller) CreateFolder(c *gin.Context) {
 	ctrl.write(c, item, err)
 }
 
+// ListFolders v7 起不再走 allowScope 入口;repo SQL 按 caller.UserId 自动收窄可见 folder。
+// envId/parentId 的「父 folder 反查 env」逻辑保留(GetFolderEnvId 仍然需要),
+// 因为 level=2 list 时父 folder.id 是路径定位的关键,不是 authz。
 func (ctrl *Controller) ListFolders(c *gin.Context) {
 	var req listRequest
 	if !ctrl.bind(c, &req) {
@@ -91,22 +95,19 @@ func (ctrl *Controller) ListFolders(c *gin.Context) {
 	// 两种模式:
 	//   - environmentId 非空:列 env 下所有 level=1 (parent_id IS NULL) folder
 	//   - folderParentId 非空:列该父 folder 下所有 level=2 folder;env 由后端从父 folder 反查
-	scopeEnvId := envId
+	// (反查是路径定位,不是 authz)
+	_ = envId
 	if parentId != "" {
-		envOfParent, err := ctrl.repo.GetFolderEnvId(c.Request.Context(), parentId)
-		if err != nil {
+		if _, err := ctrl.repo.GetFolderEnvId(c.Request.Context(), parentId); err != nil {
 			ctrl.write(c, nil, err)
 			return
 		}
-		scopeEnvId = envOfParent
 	}
 
-	if !ctrl.allowScope(c, "folder:read", "environment", scopeEnvId) {
-		return
-	}
 	ctrl.log(c, "ListFolders", logging.F("environment_id", envId), logging.F("folder_parent_id", parentId))
 	pagination := paginationFromRequest(req.PageRequest)
-	result, err := ctrl.repo.ListFolders(c.Request.Context(), envId, parentId, pagination)
+	userId := auth.UserFromContext(c).UserId
+	result, err := ctrl.repo.ListFolders(c.Request.Context(), userId, envId, parentId, pagination)
 	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 

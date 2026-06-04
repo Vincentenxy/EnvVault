@@ -25,7 +25,9 @@ import (
 type ResourceRepository interface {
 	// ---- Organization ----
 	CreateOrganization(ctx context.Context, code, name, comment, actor string) (domain.Entity, error)
-	ListOrganizations(ctx context.Context, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
+	// ListOrganizations 按 caller 的 user_role_bindings 自动收窄可见 org(scope 链:global > organization);
+	// 无 binding 的 user 拿到空 list,不返 403(隐式空 list 语义)。
+	ListOrganizations(ctx context.Context, callerUserId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
 	GetOrganization(ctx context.Context, id string) (domain.Entity, error)
 	GetOrganizationByCode(ctx context.Context, code string) (domain.Entity, error)
 	UpdateOrganization(ctx context.Context, id, name, comment, actor string) (domain.Entity, error)
@@ -33,7 +35,8 @@ type ResourceRepository interface {
 
 	// ---- Project ----
 	CreateProject(ctx context.Context, orgId, code, name, comment, actor string, envs []domain.EnvSpec) (domain.Entity, error)
-	ListProjects(ctx context.Context, orgId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
+	// ListProjects 按 caller 在 (project, organization) 层的 binding 收窄;chain 向上 cascade。
+	ListProjects(ctx context.Context, callerUserId, orgId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
 	GetProject(ctx context.Context, id string) (domain.Entity, error)
 	GetProjectByCode(ctx context.Context, orgId, code string) (domain.Entity, error)
 	UpdateProject(ctx context.Context, id, name, comment, actor string) (domain.Entity, error)
@@ -41,20 +44,23 @@ type ResourceRepository interface {
 
 	// ---- Environment ----
 	CreateEnvironment(ctx context.Context, projectId, code, name, comment, actor string) (domain.Entity, error)
-	ListEnvironments(ctx context.Context, projectId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
+	// ListEnvironments 按 caller 在 (environment, project, organization) 层的 binding 收窄。
+	ListEnvironments(ctx context.Context, callerUserId, projectId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
 	GetEnvironment(ctx context.Context, id string) (domain.Entity, error)
 	GetEnvironmentByCode(ctx context.Context, projectId, code string) (domain.Entity, error)
 	UpdateEnvironment(ctx context.Context, id, name, comment, actor string) (domain.Entity, error)
 	DeleteEnvironment(ctx context.Context, id, actor string) error
 
 	// ---- Environment Template (org 层只读快照) ----
-	ListEnvironmentTemplates(ctx context.Context, orgId string, pagination domain.Pagination) (domain.PaginatedResult[domain.EnvironmentTemplate], error)
+	// ListEnvironmentTemplates 按 caller 在 (env_template, organization) 层的 binding 收窄。
+	ListEnvironmentTemplates(ctx context.Context, callerUserId, orgId string, pagination domain.Pagination) (domain.PaginatedResult[domain.EnvironmentTemplate], error)
 	GetEnvironmentTemplate(ctx context.Context, id string) (domain.EnvironmentTemplate, error)
 	GetEnvironmentTemplateByCode(ctx context.Context, orgId, code string) (domain.EnvironmentTemplate, error)
 
 	// ---- Folder ----
 	CreateFolder(ctx context.Context, environmentId, parentFolderId, code, name, comment, actor string, level int) (domain.Entity, error)
-	ListFolders(ctx context.Context, envId, parentId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
+	// ListFolders 按 caller 在 (folder, environment, project, organization) 层的 binding 收窄。
+	ListFolders(ctx context.Context, callerUserId, envId, parentId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
 	GetFolder(ctx context.Context, id string) (domain.Entity, error)
 	GetFolderByCode(ctx context.Context, environmentId, code string) (domain.Entity, error)
 	UpdateFolder(ctx context.Context, id, name, comment, actor string) (domain.Entity, error)
@@ -66,7 +72,14 @@ type ResourceRepository interface {
 	GetSecretByKey(ctx context.Context, folderId, key string) (domain.Secret, error)
 	GetSecretByPath(ctx context.Context, orgCode, projectCode, envCode, folderCode, key string) (domain.Secret, error)
 	GetSecretCiphertext(ctx context.Context, id string) (domain.Secret, domain.SecretCiphertext, error)
-	ListSecrets(ctx context.Context, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
+	// ListSecrets 按 caller 在 (secret, folder, environment, project, organization) 层的 binding 收窄;
+	// action 是 caller 调的权限码("secret:list" 或 "secret:search"),用于 CTE 内匹配 role_permissions.code。
+	ListSecrets(ctx context.Context, callerUserId, action string, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
+	// BatchRevealSecretsByPath 一次性按 folder 路径 + 可选 keys 列表拉取 secret 明文。
+	// caller 需持有 secret:reveal 权限(v7 cascade narrowing: secret / folder / env / project / org);
+	// keys 为空时返回 folder 下所有 secret(无分页、无上限)。
+	// 返回 (Secret, ciphertext json) 对,长度一致;ciphertext 由 service 端解密填 Secret.Value。
+	BatchRevealSecretsByPath(ctx context.Context, callerUserId, action, orgCode, projectCode, envCode, folderCode string, keys []string) ([]domain.Secret, [][]byte, error)
 	UpdateSecret(ctx context.Context, id, key, comment, actor string, ciphertext domain.SecretCiphertext) (domain.Secret, error)
 	DeleteSecret(ctx context.Context, id, actor string) error
 	ListSecretCacheRecords(ctx context.Context) ([]domain.SecretCacheRecord, error)

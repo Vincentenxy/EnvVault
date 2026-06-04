@@ -3,6 +3,7 @@ package controller
 import (
 	"github.com/gin-gonic/gin"
 
+	"envVault/internal/auth"
 	"envVault/internal/logging"
 )
 
@@ -22,6 +23,8 @@ func (ctrl *Controller) CreateEnvironment(c *gin.Context) {
 	ctrl.write(c, item, err)
 }
 
+// ListEnvironments v7 起不再走 allowScope 入口;repo SQL 按 caller.UserId 自动收窄可见 env。
+// parent 过滤(同 project 内)继续保留,projectId 入参仍由 validateListEnvironments 校验非空。
 func (ctrl *Controller) ListEnvironments(c *gin.Context) {
 	var req listRequest
 	if !ctrl.bind(c, &req) {
@@ -30,12 +33,10 @@ func (ctrl *Controller) ListEnvironments(c *gin.Context) {
 	if !validateListEnvironments(c, req) {
 		return
 	}
-	if !ctrl.allowScope(c, "env:read", "project", req.ProjectId) {
-		return
-	}
 	ctrl.log(c, "ListEnvironments", logging.F("project_id", req.ProjectId))
 	pagination := paginationFromRequest(req.PageRequest)
-	result, err := ctrl.repo.ListEnvironments(c.Request.Context(), req.ProjectId, pagination)
+	userId := auth.UserFromContext(c).UserId
+	result, err := ctrl.repo.ListEnvironments(c.Request.Context(), userId, req.ProjectId, pagination)
 	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 

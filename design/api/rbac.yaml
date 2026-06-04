@@ -81,6 +81,11 @@ paths:
       tags:
         - RBAC Roles
       summary: List roles in a scope
+      description: |
+        Caller must have `rbac:role:read` in the requested scope (via the
+        resource-scope ancestor chain: folder → environment → project → organization → global).
+        `platform_admin` is allowed in any scope; non-platform callers are
+        restricted to scopes where they hold the permission.
       operationId: listRoles
       requestBody:
         required: true
@@ -117,6 +122,9 @@ paths:
       tags:
         - RBAC Roles
       summary: Get role detail
+      description: |
+        Caller must have `rbac:role:read` in the global scope (the lookup is
+        by id/code and does not carry scope context).
       operationId: getRole
       requestBody:
         required: true
@@ -146,6 +154,17 @@ paths:
       tags:
         - RBAC Roles
       summary: Create a custom role
+      description: |
+        Caller authorization — all four must hold:
+        1. `rbac:role:manage` in the target `scopeType` / `scopeId` (via ancestor chain).
+        2. Caller's effective permission set (in the target scope) must be a superset
+           of the new role's `permissions` array. (You cannot grant a permission
+           you do not yourself possess.)
+        3. If `scopeType = "global"`, caller must be `platform_admin`.
+        4. If `code = "platform_admin"`, caller must be `platform_admin`.
+
+        On success the role is persisted; existing system roles (code prefix `default`)
+        cannot be modified through this endpoint.
       operationId: createRole
       requestBody:
         required: true
@@ -177,6 +196,14 @@ paths:
       tags:
         - RBAC Roles
       summary: Update a custom role
+      description: |
+        Same authorization rules as `POST /rbac/role/create`:
+        1. `rbac:role:manage` in target scope.
+        2. Caller's effective permission set must be a superset of the updated `permissions`.
+        3. `global` scope → caller must be `platform_admin`.
+        4. Updating `code = "platform_admin"` → caller must be `platform_admin`.
+
+        System roles (read-only) cannot be updated.
       operationId: updateRole
       requestBody:
         required: true
@@ -218,6 +245,9 @@ paths:
       tags:
         - RBAC Roles
       summary: Delete a custom role
+      description: |
+        Caller must have `rbac:role:manage` in the global scope.
+        System roles cannot be deleted (409 Conflict).
       operationId: deleteRole
       requestBody:
         required: true
@@ -240,6 +270,9 @@ paths:
       tags:
         - RBAC Bindings
       summary: List role bindings in a scope
+      description: |
+        Caller must have `rbac:binding:read` in the requested scope (via the
+        resource-scope ancestor chain).
       operationId: listRoleBindings
       requestBody:
         required: true
@@ -276,6 +309,17 @@ paths:
       tags:
         - RBAC Bindings
       summary: Grant a role to a user in a scope
+      description: |
+        Caller authorization — all four must hold:
+        1. `rbac:binding:manage` in the target `scopeType` / `scopeId` (via ancestor chain).
+        2. Caller's effective permission set (in the target scope) must be a superset
+           of the role's permission set. (You cannot grant a permission you do
+           not yourself possess.)
+        3. If `scopeType = "global"`, caller must be `platform_admin`.
+        4. If `roleCode = "platform_admin"`, caller must be `platform_admin`.
+
+        Audit: each grant writes a row to `role_binding_audit_records`
+        (`action = grant_role`, `actor` = caller's external user id).
       operationId: grantRole
       requestBody:
         required: true
@@ -307,6 +351,19 @@ paths:
       tags:
         - RBAC Bindings
       summary: Revoke a role from a user in a scope
+      description: |
+        Caller authorization:
+        1. `rbac:binding:manage` in the target scope.
+        2. If `scopeType = "global"`, caller must be `platform_admin`.
+
+        Last-owner protection: revoking an `org_owner` binding that would
+        leave the target organization with zero active `org_owner` bindings
+        is rejected with 409 Conflict. (A non-platform caller can still
+        revoke other roles, including `platform_admin` in non-global scopes,
+        provided they otherwise pass the superset check at grant time.)
+
+        Audit: each revoke writes a row to `role_binding_audit_records`
+        (`action = revoke_role`).
       operationId: revokeRole
       requestBody:
         required: true

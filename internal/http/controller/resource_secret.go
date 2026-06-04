@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"envVault/internal/auth"
 	"envVault/internal/domain"
 	"envVault/internal/http/response"
 	"envVault/internal/logging"
@@ -13,6 +14,11 @@ import (
 
 type secretPathRequest struct {
 	Path string `json:"path"`
+}
+
+type secretPathBatchRevealRequest struct {
+	Path string   `json:"path"`
+	Keys []string `json:"keys,omitempty"`
 }
 
 func (ctrl *Controller) CreateSecret(c *gin.Context) {
@@ -23,11 +29,9 @@ func (ctrl *Controller) CreateSecret(c *gin.Context) {
 	if !validateSecretKey(c, req.Key) {
 		return
 	}
-	if !ctrl.allowScope(c, "secret:create", "folder", req.FolderId) {
-		return
-	}
 	ctrl.log(c, "CreateSecret", logging.F("folder_id", req.FolderId), logging.F("key", req.Key))
-	item, err := ctrl.secret.Create(c.Request.Context(), req.FolderId, req.Key, req.Value, req.Comment, ctrl.actor(c))
+	user := auth.UserFromContext(c)
+	item, err := ctrl.secret.Create(c.Request.Context(), user, req.FolderId, req.Key, req.Value, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
@@ -39,11 +43,9 @@ func (ctrl *Controller) UpdateSecret(c *gin.Context) {
 	if !validateSecretKey(c, req.Key) {
 		return
 	}
-	if !ctrl.allowScope(c, "secret:update", "secret", req.Id) {
-		return
-	}
 	ctrl.log(c, "UpdateSecret", logging.F("id", req.Id), logging.F("key", req.Key))
-	item, err := ctrl.secret.Update(c.Request.Context(), req.Id, req.Key, req.Value, req.Comment, ctrl.actor(c))
+	user := auth.UserFromContext(c)
+	item, err := ctrl.secret.Update(c.Request.Context(), user, req.Id, req.Key, req.Value, req.Comment, ctrl.actor(c))
 	ctrl.write(c, item, err)
 }
 
@@ -52,11 +54,9 @@ func (ctrl *Controller) RevealSecret(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "secret:reveal", "secret", req.Id) {
-		return
-	}
 	ctrl.log(c, "RevealSecret", logging.F("id", req.Id))
-	secret, err := ctrl.secret.Reveal(c.Request.Context(), req.Id, ctrl.actor(c))
+	user := auth.UserFromContext(c)
+	secret, err := ctrl.secret.Reveal(c.Request.Context(), user, req.Id, ctrl.actor(c))
 	if err != nil {
 		ctrl.write(c, nil, err)
 		return
@@ -69,11 +69,9 @@ func (ctrl *Controller) GetSecret(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "secret:read", "secret", req.Id) {
-		return
-	}
 	ctrl.log(c, "GetSecret", logging.F("id", req.Id))
-	item, err := ctrl.secret.Get(c.Request.Context(), req.Id)
+	user := auth.UserFromContext(c)
+	item, err := ctrl.secret.Get(c.Request.Context(), user, req.Id)
 	ctrl.write(c, item, err)
 }
 
@@ -85,12 +83,10 @@ func (ctrl *Controller) ListSecrets(c *gin.Context) {
 	if !validateListSecrets(c, req) {
 		return
 	}
-	if !ctrl.secretListAllowScope(c, req) {
-		return
-	}
 	ctrl.log(c, "ListSecrets", logging.F("environment_id", req.EnvironmentId), logging.F("folder_id", req.FolderId))
+	user := auth.UserFromContext(c)
 	pagination := paginationFromRequest(req.PageRequest)
-	result, err := ctrl.secret.List(c.Request.Context(), domain.ListFilter{
+	result, err := ctrl.secret.List(c.Request.Context(), user, domain.ListFilter{
 		EnvironmentId: req.EnvironmentId,
 		FolderId:      req.FolderId,
 	}, pagination)
@@ -105,12 +101,10 @@ func (ctrl *Controller) SearchSecrets(c *gin.Context) {
 	if !validateSearchSecrets(c, req) {
 		return
 	}
-	if !ctrl.secretListAllowScope(c, req) {
-		return
-	}
 	ctrl.log(c, "SearchSecrets", logging.F("environment_id", req.EnvironmentId), logging.F("folder_id", req.FolderId), logging.F("keyword", req.Keyword))
+	user := auth.UserFromContext(c)
 	pagination := paginationFromRequest(req.PageRequest)
-	result, err := ctrl.secret.Search(c.Request.Context(), domain.ListFilter{
+	result, err := ctrl.secret.Search(c.Request.Context(), user, domain.ListFilter{
 		EnvironmentId: req.EnvironmentId,
 		FolderId:      req.FolderId,
 		Keyword:       req.Keyword,
@@ -123,11 +117,9 @@ func (ctrl *Controller) DeleteSecret(c *gin.Context) {
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "secret:delete", "secret", req.Id) {
-		return
-	}
 	ctrl.log(c, "DeleteSecret", logging.F("id", req.Id))
-	ctrl.write(c, gin.H{"deleted": true}, ctrl.secret.Delete(c.Request.Context(), req.Id, ctrl.actor(c)))
+	user := auth.UserFromContext(c)
+	ctrl.write(c, gin.H{"deleted": true}, ctrl.secret.Delete(c.Request.Context(), user, req.Id, ctrl.actor(c)))
 }
 
 func (ctrl *Controller) GetSecretByPath(c *gin.Context) {
@@ -139,16 +131,9 @@ func (ctrl *Controller) GetSecretByPath(c *gin.Context) {
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "path is required")
 		return
 	}
-	// 先解析拿 id,再走 secret:read 校验(沿 secret 继承链 org→project→env→folder)。
-	item, err := ctrl.secret.GetByPath(c.Request.Context(), req.Path)
-	if err != nil {
-		ctrl.write(c, nil, err)
-		return
-	}
-	if !ctrl.allowScope(c, "secret:read", "secret", item.Id) {
-		return
-	}
-	ctrl.write(c, item, nil)
+	user := auth.UserFromContext(c)
+	item, err := ctrl.secret.GetByPath(c.Request.Context(), user, req.Path)
+	ctrl.write(c, item, err)
 }
 
 func (ctrl *Controller) RevealSecretByPath(c *gin.Context) {
@@ -160,15 +145,8 @@ func (ctrl *Controller) RevealSecretByPath(c *gin.Context) {
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "path is required")
 		return
 	}
-	item, err := ctrl.secret.GetByPath(c.Request.Context(), req.Path)
-	if err != nil {
-		ctrl.write(c, nil, err)
-		return
-	}
-	if !ctrl.allowScope(c, "secret:reveal", "secret", item.Id) {
-		return
-	}
-	secret, err := ctrl.secret.Reveal(c.Request.Context(), item.Id, ctrl.actor(c))
+	user := auth.UserFromContext(c)
+	secret, err := ctrl.secret.RevealByPath(c.Request.Context(), user, req.Path, ctrl.actor(c))
 	if err != nil {
 		ctrl.write(c, nil, err)
 		return
@@ -176,17 +154,29 @@ func (ctrl *Controller) RevealSecretByPath(c *gin.Context) {
 	ctrl.write(c, secret, nil)
 }
 
-// secretListAllowScope 实现 ListSecrets / SearchSecrets 的"最深 scope"策略:
-// FolderId 优先 → folder scope;否则 EnvironmentId → environment scope。
-// RBAC 走 secret scope 继承链(folder → env → project → org),由 ResourceScopes 自行展开。
-func (ctrl *Controller) secretListAllowScope(c *gin.Context, req listRequest) bool {
-	if strings.TrimSpace(req.FolderId) != "" {
-		return ctrl.allowScope(c, "secret:list", "folder", req.FolderId)
+// BatchRevealSecretByPath 批量按 folder 路径 + 可选 keys 列表 reveal。
+// 请求体: { "path": "o1.p1.dev.globals", "keys": ["DATABASE_URL", "API_KEY"] }
+// 响应: { "path": ..., "list": [Secret...], "notFound": [...] }
+// keys 缺省/空数组 = 该 folder 下所有 secret(无分页)。
+func (ctrl *Controller) BatchRevealSecretByPath(c *gin.Context) {
+	var req secretPathBatchRevealRequest
+	if !ctrl.bind(c, &req) {
+		return
 	}
-	if strings.TrimSpace(req.EnvironmentId) != "" {
-		return ctrl.allowScope(c, "secret:list", "environment", req.EnvironmentId)
+	if strings.TrimSpace(req.Path) == "" {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "path is required")
+		return
 	}
-	// 校验已经保证至少有一个非空,这里走不到。
-	response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "environmentId or folderId is required")
-	return false
+	ctrl.log(c, "BatchRevealSecretByPath", logging.F("path", req.Path), logging.F("keys_count", len(req.Keys)))
+	user := auth.UserFromContext(c)
+	items, notFound, err := ctrl.secret.BatchRevealByPath(c.Request.Context(), user, req.Path, req.Keys, ctrl.actor(c))
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+	ctrl.write(c, gin.H{
+		"path":     req.Path,
+		"list":     items,
+		"notFound": notFound,
+	}, nil)
 }

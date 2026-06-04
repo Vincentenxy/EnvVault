@@ -3,6 +3,7 @@ package controller
 import (
 	"github.com/gin-gonic/gin"
 
+	"envVault/internal/auth"
 	"envVault/internal/domain"
 	"envVault/internal/logging"
 )
@@ -32,6 +33,8 @@ func (ctrl *Controller) CreateProject(c *gin.Context) {
 	ctrl.write(c, item, err)
 }
 
+// ListProjects v7 起不再走 allowScope 入口;repo SQL 按 caller.UserId 自动收窄可见 project。
+// parent 过滤(同 org 内)继续保留,org_id 入参仍由 validateListProjects 校验非空。
 func (ctrl *Controller) ListProjects(c *gin.Context) {
 	var req listRequest
 	if !ctrl.bind(c, &req) {
@@ -40,12 +43,10 @@ func (ctrl *Controller) ListProjects(c *gin.Context) {
 	if !validateListProjects(c, req) {
 		return
 	}
-	if !ctrl.allowScope(c, "project:read", "organization", req.OrgId) {
-		return
-	}
 	ctrl.log(c, "ListProjects", logging.F("org_id", req.OrgId))
 	pagination := paginationFromRequest(req.PageRequest)
-	result, err := ctrl.repo.ListProjects(c.Request.Context(), req.OrgId, pagination)
+	userId := auth.UserFromContext(c).UserId
+	result, err := ctrl.repo.ListProjects(c.Request.Context(), userId, req.OrgId, pagination)
 	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 

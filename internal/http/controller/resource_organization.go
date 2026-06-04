@@ -3,6 +3,7 @@ package controller
 import (
 	"github.com/gin-gonic/gin"
 
+	"envVault/internal/auth"
 	"envVault/internal/domain"
 	"envVault/internal/logging"
 )
@@ -23,17 +24,17 @@ func (ctrl *Controller) CreateOrganization(c *gin.Context) {
 	ctrl.write(c, item, err)
 }
 
+// ListOrganizations v7 起不再走 allowScope 入口;repo SQL 按 caller.UserId 自动收窄可见 org。
+// 入口校验剔除后,`org_admin` 绑在 (org, X) 的 caller 也能 ListOrganizations 看到 X。
 func (ctrl *Controller) ListOrganizations(c *gin.Context) {
 	var req PageRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !ctrl.allowScope(c, "org:read", "global", "") {
-		return
-	}
 	ctrl.log(c, "ListOrganizations")
 	pagination := paginationFromRequest(req)
-	result, err := ctrl.repo.ListOrganizations(c.Request.Context(), pagination)
+	userId := auth.UserFromContext(c).UserId
+	result, err := ctrl.repo.ListOrganizations(c.Request.Context(), userId, pagination)
 	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 

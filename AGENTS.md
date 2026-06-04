@@ -149,3 +149,30 @@ go fmt ./...
 - 如果确实需要新增依赖，优先选择成熟、维护活跃的库，并在变更说明中解释原因。
 - 代码变更后，在可行时运行 `go test ./...`。
 - 不要提交生成的二进制文件、本地 IDE 配置、环境文件或任何密钥材料。
+
+## 资源分级树(tree)接口
+
+新增 `POST /api/v1/tree/get`,一次性返回 org → project → env → folder(l1) → folder(l2) 的完整树,供前端做分级筛选。
+
+### 数据流
+
+- **读**:TreeService.GetTree 优先读 Redis(4 类散装 HASH),cache miss 或 cache 不可用时 fallback 到 DB,通过 `ListAll*ForTree` 4 个不带分页的 repo 方法拉全集,顺手异步 `WarmTree` 回填 cache。
+- **写**:16 个 CRUD 端点(org/project/env/folder 的 create/update/delete)在 handler 调完 repo 后,统一通过 `Controller.cacheUpsert` / `cacheDelete` 集中 helper 同步维护 cache。级联软删返回 `domain.CascadeScope`,handler 遍历 `Controller.cacheInvalidateCascade` 逐类 delete。
+- **字段约定**:tree 节点用 `TreeNode`(id/type/parentId/code/name/comment/level/children),`level` 只对 folder 有意义(1 或 2),`children` 强制输出 `[]` 而非 `null`。
+
+### 权限
+
+不新增 `tree:read` 权限码。入口仅要求 JWT,可见范围由 `org:read` / `project:read` / `env:read` / `folder:read` 4 个权限码在 SQL narrowing + service 二次收窄处自然收敛,与 ListXxx 行为对齐。
+
+### 孤儿处理
+
+"父不可见但子可见"是合法态(caller 拿到 folder 直接 grant,无 env grant)。`includeOrphans=true`(默认)时挂到虚拟根 `Id="__orphans__"`,`Stats.Orphans` 记录数量;`includeOrphans=false` 时丢弃但 `Orphans` 仍记数。
+
+### 关键文件
+
+- `internal/domain/tree.go` — TreeNode / ResourceTree / TreeStats / CascadeScope / TreeRequest / FolderTreeEntry
+- `internal/store/postgres/repository_tree.go` — 4 个 ListAll*ForTree
+- `internal/store/redis/cache.go` — TreeWarmSnapshot / WarmTree / ListAllMeta
+- `internal/service/tree_service.go` — TreeService 业务编排 + RBAC 收窄 + 组装
+- `internal/http/controller/tree.go` — GetResourceTree handler
+- `internal/http/router.go` — `POST /api/v1/tree/get` 路由

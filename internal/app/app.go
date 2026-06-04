@@ -62,6 +62,7 @@ func Run() error {
 
 	var cache *rediscache.Cache
 	var secretSvc service.SecretService
+	var treeSvc service.TreeService
 	if cfg.Redis.Enabled {
 		var err error
 		cache, err = rediscache.Open(ctx, cfg.Redis, encryptor)
@@ -81,8 +82,10 @@ func Run() error {
 			logging.Info(ctx, "AppRun", "redis cache warmup completed", logging.F("count", len(records)))
 		}
 		secretSvc = service.NewSecretService(repository, encryptor, cache, authorizer)
+		treeSvc = service.NewTreeService(repository, cache, authorizer)
 	} else {
 		secretSvc = service.NewSecretService(repository, encryptor, nil, authorizer)
+		treeSvc = service.NewTreeService(repository, nil, authorizer)
 	}
 
 	router := httpapi.NewRouter(httpapi.Dependencies{
@@ -91,6 +94,7 @@ func Run() error {
 		Repo:       repository,
 		Secret:     secretSvc,
 		RBAC:       rbacSvc,
+		Tree:       treeSvc,
 		Authorizer: authorizer,
 		Cache:      cache,
 	})

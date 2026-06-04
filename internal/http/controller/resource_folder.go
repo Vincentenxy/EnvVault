@@ -9,6 +9,7 @@ import (
 	"envVault/internal/auth"
 	"envVault/internal/http/response"
 	"envVault/internal/logging"
+	rediscache "envVault/internal/store/redis"
 )
 
 // createFolderRequest 显式表达 level 与 parent 关系:
@@ -74,6 +75,17 @@ func (ctrl *Controller) CreateFolder(c *gin.Context) {
 	}
 	ctrl.log(c, "CreateFolder", logging.F("level", req.Level), logging.F("parent_id", parentId), logging.F("environment_id", envId), logging.F("code", req.Code), logging.F("name", req.Name))
 	item, err := ctrl.repo.CreateFolder(c.Request.Context(), envId, parentId, req.Code, req.Name, req.Comment, ctrl.actor(c), req.Level)
+	if err == nil {
+		// folder cache 写需要 projectId/parentId/level(除 envId 外) 3 个额外字段,
+		// Entity 不携带,因此 CreateFolder 之后再走一次 GetFolderContext 拿全量上下文。
+		// 失败仅 warn 不抛。
+		_, projectId, parentFolderId, level, ctxErr := ctrl.repo.GetFolderContext(c.Request.Context(), item.Id)
+		if ctxErr == nil {
+			ctrl.cacheUpsert(c, func(rc *rediscache.Cache) error {
+				return rc.UpsertFolder(c.Request.Context(), item, envId, projectId, parentFolderId, level)
+			})
+		}
+	}
 	ctrl.write(c, item, err)
 }
 
@@ -168,6 +180,14 @@ func (ctrl *Controller) UpdateFolder(c *gin.Context) {
 		return
 	}
 	item, err := ctrl.repo.UpdateFolder(c.Request.Context(), rid, req.Name, req.Comment, ctrl.actor(c))
+	if err == nil {
+		envId, projectId, parentFolderId, level, ctxErr := ctrl.repo.GetFolderContext(c.Request.Context(), rid)
+		if ctxErr == nil {
+			ctrl.cacheUpsert(c, func(rc *rediscache.Cache) error {
+				return rc.UpsertFolder(c.Request.Context(), item, envId, projectId, parentFolderId, level)
+			})
+		}
+	}
 	ctrl.write(c, item, err)
 }
 
@@ -192,5 +212,9 @@ func (ctrl *Controller) DeleteFolder(c *gin.Context) {
 	if !ctrl.allowScope(c, "folder:delete", "folder", rid) {
 		return
 	}
-	ctrl.write(c, gin.H{"deleted": true}, ctrl.repo.DeleteFolder(c.Request.Context(), rid, ctrl.actor(c)))
+	scope, err := ctrl.repo.DeleteFolder(c.Request.Context(), rid, ctrl.actor(c))
+	if err == nil {
+		ctrl.cacheInvalidateCascade(c, scope)
+	}
+	ctrl.write(c, gin.H{"deleted": true}, err)
 }

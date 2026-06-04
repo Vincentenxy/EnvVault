@@ -31,7 +31,10 @@ type ResourceRepository interface {
 	GetOrganization(ctx context.Context, id string) (domain.Entity, error)
 	GetOrganizationByCode(ctx context.Context, code string) (domain.Entity, error)
 	UpdateOrganization(ctx context.Context, id, name, comment, actor string) (domain.Entity, error)
-	DeleteOrganization(ctx context.Context, id, actor string, force bool) error
+	// DeleteOrganization 级联软删 4 级;返回的 CascadeScope 包含所有被软删的下游
+	// id,handler 用来同步 Redis cache 失效。force=false 时只删 org 自身,
+	// ProjectIds/EnvironmentIds/FolderIds/SecretIds 均为空。
+	DeleteOrganization(ctx context.Context, id, actor string, force bool) (domain.CascadeScope, error)
 
 	// ---- Project ----
 	CreateProject(ctx context.Context, orgId, code, name, comment, actor string, envs []domain.EnvSpec) (domain.Entity, error)
@@ -40,7 +43,8 @@ type ResourceRepository interface {
 	GetProject(ctx context.Context, id string) (domain.Entity, error)
 	GetProjectByCode(ctx context.Context, orgId, code string) (domain.Entity, error)
 	UpdateProject(ctx context.Context, id, name, comment, actor string) (domain.Entity, error)
-	DeleteProject(ctx context.Context, id, actor string) error
+	// DeleteProject 级联软删其下 env/folder/secret;返回 CascadeScope 供 cache 同步。
+	DeleteProject(ctx context.Context, id, actor string) (domain.CascadeScope, error)
 
 	// ---- Environment ----
 	CreateEnvironment(ctx context.Context, projectId, code, name, comment, actor string) (domain.Entity, error)
@@ -49,7 +53,8 @@ type ResourceRepository interface {
 	GetEnvironment(ctx context.Context, id string) (domain.Entity, error)
 	GetEnvironmentByCode(ctx context.Context, projectId, code string) (domain.Entity, error)
 	UpdateEnvironment(ctx context.Context, id, name, comment, actor string) (domain.Entity, error)
-	DeleteEnvironment(ctx context.Context, id, actor string) error
+	// DeleteEnvironment 级联软删其下 folder/secret;返回 CascadeScope 供 cache 同步。
+	DeleteEnvironment(ctx context.Context, id, actor string) (domain.CascadeScope, error)
 
 	// ---- Environment Template (org 层只读快照) ----
 	// ListEnvironmentTemplates 按 caller 在 (env_template, organization) 层的 binding 收窄。
@@ -63,8 +68,23 @@ type ResourceRepository interface {
 	ListFolders(ctx context.Context, callerUserId, envId, parentId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
 	GetFolder(ctx context.Context, id string) (domain.Entity, error)
 	GetFolderByCode(ctx context.Context, environmentId, code string) (domain.Entity, error)
+	// GetFolderContext 返回 cache 同步所需的 folder 全量上下文(envId/projectId/parentId/level)。
+	// 给 handler 在 CreateFolder/UpdateFolder 后立即写入 Redis cache 时反查用。
+	// 与 GetFolder 区别:不返回 Entity,只返回 4 个 folder 专属字段,SQL 走窄列,开销小。
+	GetFolderContext(ctx context.Context, id string) (envId, projectId, parentId string, level int, err error)
 	UpdateFolder(ctx context.Context, id, name, comment, actor string) (domain.Entity, error)
-	DeleteFolder(ctx context.Context, id, actor string) error
+	// DeleteFolder 级联软删其下 secret;返回 CascadeScope 供 cache 同步(只填 SecretIds)。
+	DeleteFolder(ctx context.Context, id, actor string) (domain.CascadeScope, error)
+
+	// ---- Tree 专用(不分页,带 caller narrowing) ----
+	// ListAllOrganizationsForTree 给 TreeService 用,列 caller 可见的全量 org(无分页)。
+	// 复用 userReadScopeCTE + scopeNarrowingWhere 收窄,SQL 不接 LIMIT/OFFSET。
+	ListAllOrganizationsForTree(ctx context.Context, callerUserId string) ([]domain.Entity, error)
+	ListAllProjectsForTree(ctx context.Context, callerUserId string) ([]domain.Entity, error)
+	ListAllEnvironmentsForTree(ctx context.Context, callerUserId string) ([]domain.Entity, error)
+	// ListAllFoldersForTree 返回 FolderTreeEntry 而非 Entity,因为 tree 组装需要
+	// level/environmentId/parentId 3 个 folder 专属字段(Entity.ParentId 多态,不够用)。
+	ListAllFoldersForTree(ctx context.Context, callerUserId string) ([]domain.FolderTreeEntry, error)
 
 	// ---- Secret ----
 	CreateSecret(ctx context.Context, folderId, key, comment, actor string, ciphertext domain.SecretCiphertext) (domain.Secret, error)

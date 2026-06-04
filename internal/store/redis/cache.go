@@ -357,6 +357,261 @@ func (c *Cache) DeleteFolder(ctx context.Context, id string) error {
 	return c.deleteResource(ctx, resourceFolder, id)
 }
 
+// TreeWarmSnapshot 是 tree 启动 warm-up 用的全量元数据快照。
+// 4 类资源一次性塞进来,内部并发 Pipeline 写入 Redis。
+type TreeWarmSnapshot struct {
+	Orgs     []domain.Entity
+	Projects []domain.Entity
+	Envs     []domain.Entity
+	Folders  []domain.FolderTreeEntry
+}
+
+// TreeMetaSnapshot 是从 Redis 拉出来的全量元数据,供 TreeService 拼树。
+// 4 类资源(每类已用 HGetAll 反序列化为结构体)并行返回,TreeService
+// 不需要再走 DB。
+type TreeMetaSnapshot struct {
+	Orgs     []domain.Entity
+	Projects []domain.Entity
+	Envs     []domain.Entity
+	Folders  []domain.FolderTreeEntry
+}
+
+// Empty 判断 snapshot 是否完全空(cache miss 时可能 4 类都空)。
+func (s TreeMetaSnapshot) Empty() bool {
+	return len(s.Orgs) == 0 && len(s.Projects) == 0 &&
+		len(s.Envs) == 0 && len(s.Folders) == 0
+}
+
+// ListAllMeta 并发 4 路从 Redis 拉 4 类资源的全量元数据,返回 TreeMetaSnapshot。
+// 任一类读失败时整次返回 error,由 TreeService 决定是否 fallback 到 DB。
+func (c *Cache) ListAllMeta(ctx context.Context) (TreeMetaSnapshot, error) {
+	snap := TreeMetaSnapshot{}
+	if c == nil || c.client == nil {
+		return snap, nil
+	}
+	var wg sync.WaitGroup
+	var orgErr, projErr, envErr, folderErr error
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		orgErr = c.scanType(ctx, resourceOrg, func(values map[string]string) error {
+			snap.Orgs = append(snap.Orgs, hashToOrg(values))
+			return nil
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		projErr = c.scanType(ctx, resourceProject, func(values map[string]string) error {
+			snap.Projects = append(snap.Projects, hashToProject(values))
+			return nil
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		envErr = c.scanType(ctx, resourceEnv, func(values map[string]string) error {
+			snap.Envs = append(snap.Envs, hashToEnv(values))
+			return nil
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		folderErr = c.scanType(ctx, resourceFolder, func(values map[string]string) error {
+			entry, ok := hashToFolderEntry(values)
+			if !ok {
+				return nil
+			}
+			snap.Folders = append(snap.Folders, entry)
+			return nil
+		})
+	}()
+	wg.Wait()
+	if orgErr != nil {
+		return snap, orgErr
+	}
+	if projErr != nil {
+		return snap, projErr
+	}
+	if envErr != nil {
+		return snap, envErr
+	}
+	if folderErr != nil {
+		return snap, folderErr
+	}
+	return snap, nil
+}
+
+// scanType 拉某类资源的所有 HASH,逐条 callback。空 hash 跳过(已删除的
+// 条目不会从 ids 集合自动清掉,这里容忍)。
+func (c *Cache) scanType(ctx context.Context, t resourceType, cb func(map[string]string) error) error {
+	ids, err := c.client.SMembers(ctx, c.typeIdsKey(t)).Result()
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	pipe := c.client.Pipeline()
+	cmds := make([]*goredis.StringStringMapCmd, len(ids))
+	for i, id := range ids {
+		cmds[i] = pipe.HGetAll(ctx, c.typeKey(t, id))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != goredis.Nil {
+		return err
+	}
+	for _, cmd := range cmds {
+		values, err := cmd.Result()
+		if err != nil || len(values) == 0 {
+			continue
+		}
+		if err := cb(values); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// hashToOrg 把 Redis HASH 反序列化为 Entity。空 id 跳过(防御)。
+func hashToOrg(values map[string]string) domain.Entity {
+	e := domain.Entity{
+		Id:        values["id"],
+		Code:      values["code"],
+		Name:      values["name"],
+		Comment:   values["comment"],
+		CreatedBy: values["created_by"],
+		UpdatedBy: values["updated_by"],
+	}
+	return e
+}
+
+func hashToProject(values map[string]string) domain.Entity {
+	return domain.Entity{
+		Id:        values["id"],
+		ParentId:  values["org_id"],
+		Code:      values["code"],
+		Name:      values["name"],
+		Comment:   values["comment"],
+		CreatedBy: values["created_by"],
+		UpdatedBy: values["updated_by"],
+	}
+}
+
+func hashToEnv(values map[string]string) domain.Entity {
+	return domain.Entity{
+		Id:        values["id"],
+		ParentId:  values["project_id"],
+		Code:      values["code"],
+		Name:      values["name"],
+		Comment:   values["comment"],
+		CreatedBy: values["created_by"],
+		UpdatedBy: values["updated_by"],
+	}
+}
+
+// hashToFolderEntry 把 Redis folder HASH 反序列化为 FolderTreeEntry。
+// level 必须能从 hash 读到(空字符串 = 0,合法 level=1/2 不可能 0);
+// project_id 字段也必须存在(warm-up 写入时由 UpsertFolder 写)。
+// 字段缺失时返回 false(让 scanType 跳过这条)。
+func hashToFolderEntry(values map[string]string) (domain.FolderTreeEntry, bool) {
+	levelStr := values["level"]
+	projectId := values["project_id"]
+	if values["id"] == "" || values["environment_id"] == "" || projectId == "" {
+		return domain.FolderTreeEntry{}, false
+	}
+	level := atoi(levelStr)
+	// 防御:level=0 表示字段缺失(level 字段 hash 写入时为数字字符串)
+	if level != 1 && level != 2 {
+		return domain.FolderTreeEntry{}, false
+	}
+	return domain.FolderTreeEntry{
+		Entity: domain.Entity{
+			Id:        values["id"],
+			ParentId:  values["environment_id"], // 兼容 Entity.ParentId(level=1 父是 env)
+			Code:      values["code"],
+			Name:      values["name"],
+			Comment:   values["comment"],
+			CreatedBy: values["created_by"],
+			UpdatedBy: values["updated_by"],
+		},
+		Level:         level,
+		EnvironmentId: values["environment_id"],
+		ParentId:      values["parent_id"],
+		ProjectId:     projectId,
+	}, true
+}
+
+// atoi 在 convert.go 已有定义,这里不再重复。
+
+// WarmTree 启动时(或 tree miss 后)批量回填 4 类资源元数据到 Redis。
+// 内部并发 4 路上 Pipeline,每类一次 HSet + SAdd 写完所有行。
+// 失败仅返回首个错误,handler 端通常 logging.Warn 兜底。
+func (c *Cache) WarmTree(ctx context.Context, snapshot TreeWarmSnapshot) error {
+	if c == nil {
+		return nil
+	}
+	if len(snapshot.Orgs) == 0 && len(snapshot.Projects) == 0 &&
+		len(snapshot.Envs) == 0 && len(snapshot.Folders) == 0 {
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 4)
+
+	// org
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, o := range snapshot.Orgs {
+			if err := c.UpsertOrg(ctx, o); err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+	// project
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, p := range snapshot.Projects {
+			if err := c.UpsertProject(ctx, p); err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+	// env
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, e := range snapshot.Envs {
+			if err := c.UpsertEnvironment(ctx, e); err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+	// folder — 字段最复杂(entity + envId/projectId/parentId/level)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, f := range snapshot.Folders {
+			if err := c.UpsertFolder(ctx, f.Entity, f.EnvironmentId, f.ProjectId, f.ParentId, f.Level); err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // GlobalSearchHit 是 GlobalSearch 单条命中的展示形态。
 type GlobalSearchHit struct {
 	Id         string `json:"id"`

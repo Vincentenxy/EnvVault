@@ -6,6 +6,7 @@ import (
 	"envVault/internal/auth"
 	"envVault/internal/domain"
 	"envVault/internal/logging"
+	rediscache "envVault/internal/store/redis"
 )
 
 func (ctrl *Controller) CreateOrganization(c *gin.Context) {
@@ -21,6 +22,9 @@ func (ctrl *Controller) CreateOrganization(c *gin.Context) {
 	}
 	ctrl.log(c, "CreateOrganization", logging.F("code", req.Code), logging.F("name", req.Name))
 	item, err := ctrl.repo.CreateOrganization(c.Request.Context(), req.Code, req.Name, req.Comment, ctrl.actor(c))
+	if err == nil {
+		ctrl.cacheUpsert(c, func(rc *rediscache.Cache) error { return rc.UpsertOrg(c.Request.Context(), item) })
+	}
 	ctrl.write(c, item, err)
 }
 
@@ -95,6 +99,9 @@ func (ctrl *Controller) UpdateOrganization(c *gin.Context) {
 		return
 	}
 	item, err := ctrl.repo.UpdateOrganization(c.Request.Context(), rid, req.Name, req.Comment, ctrl.actor(c))
+	if err == nil {
+		ctrl.cacheUpsert(c, func(rc *rediscache.Cache) error { return rc.UpsertOrg(c.Request.Context(), item) })
+	}
 	ctrl.write(c, item, err)
 }
 
@@ -130,5 +137,12 @@ func (ctrl *Controller) DeleteOrganization(c *gin.Context) {
 	if req.Force && !ctrl.allowScope(c, "org:force_delete", "organization", rid) {
 		return
 	}
-	ctrl.write(c, gin.H{"deleted": true}, ctrl.repo.DeleteOrganization(c.Request.Context(), rid, ctrl.actor(c), req.Force))
+	scope, err := ctrl.repo.DeleteOrganization(c.Request.Context(), rid, ctrl.actor(c), req.Force)
+	if err == nil {
+		ctrl.cacheInvalidateCascade(c, scope)
+	}
+	ctrl.write(c, gin.H{"deleted": true}, err)
 }
+
+// 注:DeleteOrganization 现已返回 domain.CascadeScope(级联软删范围),
+// handler 在第 7 步接入 cache 同步后会用 scope 遍历 cache.DeleteXxx。

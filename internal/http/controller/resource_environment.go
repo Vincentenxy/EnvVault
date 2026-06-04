@@ -5,6 +5,7 @@ import (
 
 	"envVault/internal/auth"
 	"envVault/internal/logging"
+	rediscache "envVault/internal/store/redis"
 )
 
 func (ctrl *Controller) CreateEnvironment(c *gin.Context) {
@@ -20,6 +21,9 @@ func (ctrl *Controller) CreateEnvironment(c *gin.Context) {
 	}
 	ctrl.log(c, "CreateEnvironment", logging.F("project_id", req.ParentId), logging.F("code", req.Code), logging.F("name", req.Name))
 	item, err := ctrl.repo.CreateEnvironment(c.Request.Context(), req.ParentId, req.Code, req.Name, req.Comment, ctrl.actor(c))
+	if err == nil {
+		ctrl.cacheUpsert(c, func(rc *rediscache.Cache) error { return rc.UpsertEnvironment(c.Request.Context(), item) })
+	}
 	ctrl.write(c, item, err)
 }
 
@@ -97,6 +101,9 @@ func (ctrl *Controller) UpdateEnvironment(c *gin.Context) {
 		return
 	}
 	item, err := ctrl.repo.UpdateEnvironment(c.Request.Context(), rid, req.Name, req.Comment, ctrl.actor(c))
+	if err == nil {
+		ctrl.cacheUpsert(c, func(rc *rediscache.Cache) error { return rc.UpsertEnvironment(c.Request.Context(), item) })
+	}
 	ctrl.write(c, item, err)
 }
 
@@ -121,5 +128,9 @@ func (ctrl *Controller) DeleteEnvironment(c *gin.Context) {
 	if !ctrl.allowScope(c, "env:delete", "environment", rid) {
 		return
 	}
-	ctrl.write(c, gin.H{"deleted": true}, ctrl.repo.DeleteEnvironment(c.Request.Context(), rid, ctrl.actor(c)))
+	scope, err := ctrl.repo.DeleteEnvironment(c.Request.Context(), rid, ctrl.actor(c))
+	if err == nil {
+		ctrl.cacheInvalidateCascade(c, scope)
+	}
+	ctrl.write(c, gin.H{"deleted": true}, err)
 }

@@ -6,6 +6,7 @@ import (
 	"envVault/internal/auth"
 	"envVault/internal/domain"
 	"envVault/internal/logging"
+	rediscache "envVault/internal/store/redis"
 )
 
 func (ctrl *Controller) CreateProject(c *gin.Context) {
@@ -30,6 +31,12 @@ func (ctrl *Controller) CreateProject(c *gin.Context) {
 	}
 	ctrl.log(c, "CreateProject", logging.F("org_id", req.ParentId), logging.F("code", req.Code), logging.F("env_count", len(specs)))
 	item, err := ctrl.repo.CreateProject(c.Request.Context(), req.ParentId, req.Code, req.Name, req.Comment, ctrl.actor(c), specs)
+	if err == nil {
+		ctrl.cacheUpsert(c, func(rc *rediscache.Cache) error { return rc.UpsertProject(c.Request.Context(), item) })
+		// 注:CreateProject 顺带创建了若干 env,但 env ids 在 CreateProject 返回值里
+		// 不可见(只返回 project)。env 的 cache 同步依赖下次 env:list/tree:warm 触发。
+		// 这里为了准确性,先不主动补 env;若一致性要求更严可改成 repo 返回 project+envs。
+	}
 	ctrl.write(c, item, err)
 }
 
@@ -107,6 +114,9 @@ func (ctrl *Controller) UpdateProject(c *gin.Context) {
 		return
 	}
 	item, err := ctrl.repo.UpdateProject(c.Request.Context(), rid, req.Name, req.Comment, ctrl.actor(c))
+	if err == nil {
+		ctrl.cacheUpsert(c, func(rc *rediscache.Cache) error { return rc.UpsertProject(c.Request.Context(), item) })
+	}
 	ctrl.write(c, item, err)
 }
 
@@ -131,5 +141,9 @@ func (ctrl *Controller) DeleteProject(c *gin.Context) {
 	if !ctrl.allowScope(c, "project:delete", "project", rid) {
 		return
 	}
-	ctrl.write(c, gin.H{"deleted": true}, ctrl.repo.DeleteProject(c.Request.Context(), rid, ctrl.actor(c)))
+	scope, err := ctrl.repo.DeleteProject(c.Request.Context(), rid, ctrl.actor(c))
+	if err == nil {
+		ctrl.cacheInvalidateCascade(c, scope)
+	}
+	ctrl.write(c, gin.H{"deleted": true}, err)
 }

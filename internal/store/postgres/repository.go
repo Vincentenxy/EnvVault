@@ -131,71 +131,56 @@ func (r *Repository) UpdateOrganization(ctx context.Context, id, name, comment, 
 	return r.updateEntity(ctx, "organizations", id, name, comment, actor, "organization")
 }
 
-func (r *Repository) DeleteOrganization(ctx context.Context, id, actor string, force bool) error {
+// DeleteOrganization 级联软删 org + 所有下属 project/env/folder/secret。
+// 返回的 CascadeScope 包含所有被软删的下游 id,handler 用它同步 Redis cache 失效。
+// force=false 时只删 org 自身(若有 active project 直接返回 ErrConflict),
+// 此时 ProjectIds/EnvironmentIds/FolderIds/SecretIds 均为空。
+func (r *Repository) DeleteOrganization(ctx context.Context, id, actor string, force bool) (domain.CascadeScope, error) {
+	scope := domain.CascadeScope{OrganizationId: id}
 	if !force {
 		// 非强制:先查 active project,只要有一个就拒,避免造成孤儿 org。
 		var activeProjects int64
 		if err := r.db.QueryRowContext(ctx, `
 select count(*) from projects where org_id = $1::uuid and is_deleted = false
 `, id).Scan(&activeProjects); err != nil {
-			return err
+			return scope, err
 		}
 		if activeProjects > 0 {
-			return fmt.Errorf("organization has %d active project(s); pass force=true to cascade delete: %w", activeProjects, ErrConflict)
+			return scope, fmt.Errorf("organization has %d active project(s); pass force=true to cascade delete: %w", activeProjects, ErrConflict)
 		}
 	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return scope, err
 	}
 	defer tx.Rollback()
 
 	// 1. 软删 org 自身 + 快照 + 审计
 	if err := r.snapshotAndSoftDeleteTx(ctx, tx, "organizations", id, actor, "organization"); err != nil {
-		return err
+		return scope, err
 	}
-	// 2. 级联:软删 org 下所有 project
-	if err := softDeleteByParentTx(ctx, tx, "projects", "org_id", id, actor); err != nil {
-		return err
+	// 2. 级联:软删 org 下所有 project(RETURNING id 收集到 CascadeScope)
+	scope.ProjectIds, err = softDeleteByParentTxReturning(ctx, tx, "projects", "org_id", id, actor)
+	if err != nil {
+		return scope, err
 	}
 	// 3. 级联:软删 org 下所有 env(跨表:env.project_id ∈ projects under org)
-	if _, err := tx.ExecContext(ctx, `
-update environments
-set is_deleted = true, deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
-where project_id in (select id from projects where org_id = $1::uuid)
-  and is_deleted = false
-`, id, actor); err != nil {
-		return err
+	scope.EnvironmentIds, err = softDeleteEnvUnderOrgTx(ctx, tx, id, actor)
+	if err != nil {
+		return scope, err
 	}
 	// 4. 级联:软删 org 下所有 folder(沿 project → env → folder)
-	if _, err := tx.ExecContext(ctx, `
-update folders
-set is_deleted = true, deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
-where environment_id in (
-  select e.id from environments e
-  join projects p on p.id = e.project_id
-  where p.org_id = $1::uuid
-)
-  and is_deleted = false
-`, id, actor); err != nil {
-		return err
+	scope.FolderIds, err = softDeleteFolderUnderOrgTx(ctx, tx, id, actor)
+	if err != nil {
+		return scope, err
 	}
 	// 5. 级联:软删 org 下所有 secret(沿 project → env → folder → secret)
-	if _, err := tx.ExecContext(ctx, `
-update secrets
-set is_deleted = true, deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
-where folder_id in (
-  select f.id from folders f
-  join environments e on e.id = f.environment_id
-  join projects p on p.id = e.project_id
-  where p.org_id = $1::uuid
-)
-  and is_deleted = false
-`, id, actor); err != nil {
-		return err
+	scope.SecretIds, err = softDeleteSecretUnderOrgTx(ctx, tx, id, actor)
+	if err != nil {
+		return scope, err
 	}
-	return tx.Commit()
+	return scope, tx.Commit()
 }
 
 func (r *Repository) CreateProject(ctx context.Context, orgId, code, name, comment, actor string, envs []EnvSpec) (Entity, error) {
@@ -280,35 +265,37 @@ func (r *Repository) UpdateProject(ctx context.Context, id, name, comment, actor
 	return r.updateEntity(ctx, "projects", id, name, comment, actor, "project")
 }
 
-func (r *Repository) DeleteProject(ctx context.Context, id, actor string) error {
+// DeleteProject 级联软删 project + 下属 env/folder/secret。
+// 返回 CascadeScope:ProjectIds 为 [id] 自身(便于 handler 统一遍历),其他 3 类
+// 收集所有被软删的下游 id。
+func (r *Repository) DeleteProject(ctx context.Context, id, actor string) (domain.CascadeScope, error) {
+	scope := domain.CascadeScope{ProjectIds: []string{id}}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return scope, err
 	}
 	defer tx.Rollback()
 
 	// 1. 软删 project 自身 + 快照 + 审计
 	if err := r.snapshotAndSoftDeleteTx(ctx, tx, "projects", id, actor, "project"); err != nil {
-		return err
+		return scope, err
 	}
 	// 2. 级联:软删 project 下所有 env
-	if err := softDeleteByParentTx(ctx, tx, "environments", "project_id", id, actor); err != nil {
-		return err
+	scope.EnvironmentIds, err = softDeleteByParentTxReturning(ctx, tx, "environments", "project_id", id, actor)
+	if err != nil {
+		return scope, err
 	}
 	// 3. 级联:软删 project 下所有 folder(跨表:folder.environment_id ∈ envs under project)
-	if _, err := tx.ExecContext(ctx, `
-update folders
-set is_deleted = true, deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
-where environment_id in (select id from environments where project_id = $1::uuid)
-  and is_deleted = false
-`, id, actor); err != nil {
-		return err
+	scope.FolderIds, err = softDeleteFolderUnderProjectTx(ctx, tx, id, actor)
+	if err != nil {
+		return scope, err
 	}
 	// 4. 级联:软删 project 下所有 secret(跨表,沿 env → folder → secret 链)
-	if err := softDeleteSecretsUnderProjectTx(ctx, tx, id, actor); err != nil {
-		return err
+	scope.SecretIds, err = softDeleteSecretsUnderProjectTx(ctx, tx, id, actor)
+	if err != nil {
+		return scope, err
 	}
-	return tx.Commit()
+	return scope, tx.Commit()
 }
 
 func (r *Repository) CreateEnvironment(ctx context.Context, projectId, code, name, comment, actor string) (Entity, error) {
@@ -407,26 +394,31 @@ func (r *Repository) UpdateEnvironment(ctx context.Context, id, name, comment, a
 	return r.updateEntity(ctx, "environments", id, name, comment, actor, "environment")
 }
 
-func (r *Repository) DeleteEnvironment(ctx context.Context, id, actor string) error {
+// DeleteEnvironment 级联软删 env + 下属 folder/secret。
+// 返回 CascadeScope:EnvironmentIds 为 [id] 自身,其他 2 类收集所有被软删的下游 id。
+func (r *Repository) DeleteEnvironment(ctx context.Context, id, actor string) (domain.CascadeScope, error) {
+	scope := domain.CascadeScope{EnvironmentIds: []string{id}}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return scope, err
 	}
 	defer tx.Rollback()
 
 	// 1. 软删 env 自身 + 快照 + 审计(同事务)
 	if err := r.snapshotAndSoftDeleteTx(ctx, tx, "environments", id, actor, "environment"); err != nil {
-		return err
+		return scope, err
 	}
 	// 2. 级联:软删 env 下所有 folder
-	if err := softDeleteByParentTx(ctx, tx, "folders", "environment_id", id, actor); err != nil {
-		return err
+	scope.FolderIds, err = softDeleteByParentTxReturning(ctx, tx, "folders", "environment_id", id, actor)
+	if err != nil {
+		return scope, err
 	}
 	// 3. 级联:软删 env 下所有 secret(跨表:secret.folder_id ∈ folders under env)
-	if err := softDeleteSecretsUnderEnvTx(ctx, tx, id, actor); err != nil {
-		return err
+	scope.SecretIds, err = softDeleteSecretsUnderEnvTx(ctx, tx, id, actor)
+	if err != nil {
+		return scope, err
 	}
-	return tx.Commit()
+	return scope, tx.Commit()
 }
 
 // upsertEnvironmentTemplateTx 在事务内 upsert env 模板;已存在则跳过,name/comment 保持首次写入快照。
@@ -769,26 +761,55 @@ where id = $1::uuid and is_deleted = false
 	return envId, nil
 }
 
+// GetFolderContext 返回 cache 同步所需的 folder 全量上下文。
+// level=1:parentId 为空(level=1 父是 env,不在 folder 行里);level=2:parentId 是父 folder id。
+// 一次性走 1 次 SQL 把 envId / projectId / parentId / level 都取回来,避免 handler
+// 在 CreateFolder/UpdateFolder 后再发多次请求拼数据。
+func (r *Repository) GetFolderContext(ctx context.Context, folderId string) (string, string, string, int, error) {
+	var envId, projectId, parentId string
+	var level int
+	err := r.db.QueryRowContext(ctx, `
+select f.environment_id::text,
+       e.project_id::text,
+       coalesce(f.parent_id::text, ''),
+       f.level
+from folders f
+join environments e on e.id = f.environment_id
+where f.id = $1::uuid and f.is_deleted = false
+`, folderId).Scan(&envId, &projectId, &parentId, &level)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", "", 0, ErrNotFound
+	}
+	if err != nil {
+		return "", "", "", 0, err
+	}
+	return envId, projectId, parentId, level, nil
+}
+
 func (r *Repository) UpdateFolder(ctx context.Context, id, name, comment, actor string) (Entity, error) {
 	return r.updateEntity(ctx, "folders", id, name, comment, actor, "folder")
 }
 
-func (r *Repository) DeleteFolder(ctx context.Context, id, actor string) error {
+// DeleteFolder 级联软删 folder + 下属 secret。
+// 返回 CascadeScope:FolderIds 为 [id] 自身,SecretIds 收集所有被软删的下游 id。
+func (r *Repository) DeleteFolder(ctx context.Context, id, actor string) (domain.CascadeScope, error) {
+	scope := domain.CascadeScope{FolderIds: []string{id}}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return scope, err
 	}
 	defer tx.Rollback()
 
 	// 1. 软删 folder 自身 + 快照 + 审计
 	if err := r.snapshotAndSoftDeleteTx(ctx, tx, "folders", id, actor, "folder"); err != nil {
-		return err
+		return scope, err
 	}
 	// 2. 级联:软删 folder 下所有 secret
-	if err := softDeleteByParentTx(ctx, tx, "secrets", "folder_id", id, actor); err != nil {
-		return err
+	scope.SecretIds, err = softDeleteByParentTxReturning(ctx, tx, "secrets", "folder_id", id, actor)
+	if err != nil {
+		return scope, err
 	}
-	return tx.Commit()
+	return scope, tx.Commit()
 }
 
 func (r *Repository) CreateSecret(ctx context.Context, folderId, key, comment, actor string, ciphertext SecretCiphertext) (Secret, error) {
@@ -1449,33 +1470,173 @@ values ($1, $2, $3, $4, $5, $6)
 	return recordAuditTx(ctx, tx, actor, resourceType, id, "delete", snapshot)
 }
 
-// softDeleteByParentTx 在事务内软删某父 id 下的所有未删除行。
+// softDeleteByParentTxReturning 在事务内软删某父 id 下的所有未删除行,
+// 通过 RETURNING id 收集被软删的行 id,
+// 供 DeleteXxx 系列方法回填 CascadeScope 供 cache 失效。
+// 无下游时返回空 slice(非 nil),handler 循环 range 不会 nil 报错。
 // 用于 folder ← env、secret ← folder 等直系子资源。
-func softDeleteByParentTx(ctx context.Context, tx *sql.Tx, table, parentCol, parentId, actor string) error {
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+func softDeleteByParentTxReturning(ctx context.Context, tx *sql.Tx, table, parentCol, parentId, actor string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 update %s
 set is_deleted = true, deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
 where %s = $1::uuid and is_deleted = false
+returning id::text
 `, table, parentCol), parentId, actor)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// softDeleteEnvUnderOrgTx 级联软删 org 下所有 env(env 跨表:env.project_id ∈ projects under org),
+// RETURNING id 收集到 []string。
+func softDeleteEnvUnderOrgTx(ctx context.Context, tx *sql.Tx, orgId, actor string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+update environments
+set is_deleted = true, deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
+where project_id in (select id from projects where org_id = $1::uuid)
+  and is_deleted = false
+returning id::text
+`, orgId, actor)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// softDeleteFolderUnderOrgTx 级联软删 org 下所有 folder(沿 project → env → folder),
+// RETURNING id 收集到 []string。
+func softDeleteFolderUnderOrgTx(ctx context.Context, tx *sql.Tx, orgId, actor string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+update folders
+set is_deleted = true, deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
+where environment_id in (
+  select e.id from environments e
+  join projects p on p.id = e.project_id
+  where p.org_id = $1::uuid
+)
+  and is_deleted = false
+returning id::text
+`, orgId, actor)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// softDeleteFolderUnderProjectTx 级联软删 project 下所有 folder(沿 env → folder),
+// RETURNING id 收集到 []string。
+func softDeleteFolderUnderProjectTx(ctx context.Context, tx *sql.Tx, projectId, actor string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+update folders
+set is_deleted = true, deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
+where environment_id in (select id from environments where project_id = $1::uuid)
+  and is_deleted = false
+returning id::text
+`, projectId, actor)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// softDeleteSecretUnderOrgTx 级联软删 org 下所有 secret(沿 project → env → folder → secret),
+// RETURNING id 收集到 []string。
+func softDeleteSecretUnderOrgTx(ctx context.Context, tx *sql.Tx, orgId, actor string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
+update secrets
+set is_deleted = true, deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
+where folder_id in (
+  select f.id from folders f
+  join environments e on e.id = f.environment_id
+  join projects p on p.id = e.project_id
+  where p.org_id = $1::uuid
+)
+  and is_deleted = false
+returning id::text
+`, orgId, actor)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // softDeleteSecretsUnderEnvTx 在事务内级联软删 env 下的所有 secret。
 // secret 与 env 不直连,要通过 folders.environment_id 间接定位。
-func softDeleteSecretsUnderEnvTx(ctx context.Context, tx *sql.Tx, envId, actor string) error {
-	_, err := tx.ExecContext(ctx, `
+// 改返回 []string(被软删的 secret id),供 DeleteEnvironment 收集到 CascadeScope。
+func softDeleteSecretsUnderEnvTx(ctx context.Context, tx *sql.Tx, envId, actor string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
 update secrets
 set is_deleted = true, deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
 where folder_id in (select id from folders where environment_id = $1::uuid)
   and is_deleted = false
+returning id::text
 `, envId, actor)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // softDeleteSecretsUnderProjectTx 在事务内级联软删 project 下所有 secret。
 // 沿 project → env → folder → secret 链间接定位。
-func softDeleteSecretsUnderProjectTx(ctx context.Context, tx *sql.Tx, projectId, actor string) error {
-	_, err := tx.ExecContext(ctx, `
+// 改返回 []string,供 DeleteProject 收集到 CascadeScope。
+func softDeleteSecretsUnderProjectTx(ctx context.Context, tx *sql.Tx, projectId, actor string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `
 update secrets
 set is_deleted = true, deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now()
 where folder_id in (
@@ -1484,8 +1645,21 @@ where folder_id in (
   where e.project_id = $1::uuid
 )
   and is_deleted = false
+returning id::text
 `, projectId, actor)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (r *Repository) createEntityTx(ctx context.Context, tx *sql.Tx, table, parentColumn, parentId, code, name, comment, actor string) (Entity, error) {

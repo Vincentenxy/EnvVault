@@ -340,7 +340,7 @@ func (r *recordingRepo) GetOrganizationByCode(context.Context, string) (domain.E
 func (r *recordingRepo) UpdateOrganization(context.Context, string, string, string, string) (domain.Entity, error) {
 	panic("not implemented")
 }
-func (r *recordingRepo) DeleteOrganization(context.Context, string, string, bool) error {
+func (r *recordingRepo) DeleteOrganization(context.Context, string, string, bool) (domain.CascadeScope, error) {
 	panic("not implemented")
 }
 func (r *recordingRepo) CreateProject(context.Context, string, string, string, string, string, []domain.EnvSpec) (domain.Entity, error) {
@@ -358,7 +358,7 @@ func (r *recordingRepo) GetProjectByCode(context.Context, string, string) (domai
 func (r *recordingRepo) UpdateProject(context.Context, string, string, string, string) (domain.Entity, error) {
 	panic("not implemented")
 }
-func (r *recordingRepo) DeleteProject(context.Context, string, string) error {
+func (r *recordingRepo) DeleteProject(context.Context, string, string) (domain.CascadeScope, error) {
 	panic("not implemented")
 }
 func (r *recordingRepo) CreateEnvironment(context.Context, string, string, string, string, string) (domain.Entity, error) {
@@ -376,7 +376,7 @@ func (r *recordingRepo) GetEnvironmentByCode(context.Context, string, string) (d
 func (r *recordingRepo) UpdateEnvironment(context.Context, string, string, string, string) (domain.Entity, error) {
 	panic("not implemented")
 }
-func (r *recordingRepo) DeleteEnvironment(context.Context, string, string) error {
+func (r *recordingRepo) DeleteEnvironment(context.Context, string, string) (domain.CascadeScope, error) {
 	panic("not implemented")
 }
 func (r *recordingRepo) ListEnvironmentTemplates(context.Context, string, string, domain.Pagination) (domain.PaginatedResult[domain.EnvironmentTemplate], error) {
@@ -403,7 +403,10 @@ func (r *recordingRepo) GetFolderByCode(context.Context, string, string) (domain
 func (r *recordingRepo) UpdateFolder(context.Context, string, string, string, string) (domain.Entity, error) {
 	panic("not implemented")
 }
-func (r *recordingRepo) DeleteFolder(context.Context, string, string) error {
+func (r *recordingRepo) GetFolderContext(context.Context, string) (string, string, string, int, error) {
+	panic("not implemented")
+}
+func (r *recordingRepo) DeleteFolder(context.Context, string, string) (domain.CascadeScope, error) {
 	panic("not implemented")
 }
 func (r *recordingRepo) CreateSecret(context.Context, string, string, string, string, domain.SecretCiphertext) (domain.Secret, error) {
@@ -434,5 +437,17 @@ func (r *recordingRepo) ListAuditRecords(context.Context, string, string, domain
 	panic("not implemented")
 }
 func (r *recordingRepo) CacheUserLabel(string, string) {
+	panic("not implemented")
+}
+func (r *recordingRepo) ListAllOrganizationsForTree(context.Context, string) ([]domain.Entity, error) {
+	panic("not implemented")
+}
+func (r *recordingRepo) ListAllProjectsForTree(context.Context, string) ([]domain.Entity, error) {
+	panic("not implemented")
+}
+func (r *recordingRepo) ListAllEnvironmentsForTree(context.Context, string) ([]domain.Entity, error) {
+	panic("not implemented")
+}
+func (r *recordingRepo) ListAllFoldersForTree(context.Context, string) ([]domain.FolderTreeEntry, error) {
 	panic("not implemented")
 }

@@ -19,6 +19,7 @@ type Dependencies struct {
 	Repo       *postgres.Repository
 	Secret     service.SecretService
 	RBAC       service.RBACService
+	Tree       service.TreeService
 	Authorizer auth.Authorizer
 	Cache      *redis.Cache
 	Database   interface {
@@ -46,6 +47,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 		Repo:       deps.Repo,
 		Secret:     deps.Secret,
 		RBAC:       deps.RBAC,
+		Tree:       deps.Tree,
 		Authorizer: deps.Authorizer,
 		Cache:      deps.Cache,
 	})
@@ -178,6 +180,11 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 				search := protected.Group("/search")
 				{
 					search.POST("/global", ctrl.GlobalSearch)
+				}
+
+				tree := protected.Group("/tree")
+				{
+					tree.POST("/get", ctrl.GetResourceTree)
 				}
 			}
 		}

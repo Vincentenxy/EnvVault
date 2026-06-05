@@ -15,14 +15,16 @@ import (
 )
 
 type Dependencies struct {
-	Config     config.Config
-	Repo       *postgres.Repository
-	Secret     service.SecretService
-	RBAC       service.RBACService
-	Tree       service.TreeService
-	Authorizer auth.Authorizer
-	Cache      *redis.Cache
-	Database   interface {
+	Config      config.Config
+	Repo        *postgres.Repository
+	Secret      service.SecretService
+	RBAC        service.RBACService
+	Tree        service.TreeService
+	Auth        service.AuthService
+	TokensCache *auth.TokensCache
+	Authorizer  auth.Authorizer
+	Cache       *redis.Cache
+	Database    interface {
 		PingContext(ctx context.Context) error
 	}
 }
@@ -48,6 +50,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 		Secret:     deps.Secret,
 		RBAC:       deps.RBAC,
 		Tree:       deps.Tree,
+		Auth:       deps.Auth,
 		Authorizer: deps.Authorizer,
 		Cache:      deps.Cache,
 	})
@@ -66,11 +69,19 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 				v1.POST("/auth/dev/token", ctrl.CreateDevJWT)
 			}
 
+			// v9 auth: register / login 匿名可调
+			authPub := v1.Group("/auth")
+			{
+				authPub.POST("/register", ctrl.Register)
+				authPub.POST("/login", ctrl.Login)
+			}
+
 			protected := v1.Group("")
 			{
 				if deps.Config.Auth.Enabled {
 					protected.Use(auth.JWTMiddleware(auth.JWTConfig{
-						PublicKey: deps.Config.Auth.PublicKey,
+						PublicKey:   deps.Config.Auth.PublicKey,
+						TokensCache: deps.TokensCache,
 					}))
 				} else {
 					protected.Use(auth.StaticUserMiddleware(auth.UserInfo{
@@ -79,6 +90,13 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 					}))
 				}
 				protected.GET("/me", ctrl.Me)
+
+				// v9 auth: logout / changePassword 需 JWT
+				authProtected := protected.Group("/auth")
+				{
+					authProtected.POST("/logout", ctrl.Logout)
+					authProtected.POST("/changePassword", ctrl.ChangePassword)
+				}
 
 				org := protected.Group("/org")
 				{
@@ -133,6 +151,13 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 					secret.POST("/path/info", ctrl.GetSecretByPath)
 					secret.POST("/path/reveal", ctrl.RevealSecretByPath)
 					secret.POST("/path/batchReveal", ctrl.BatchRevealSecretByPath)
+				}
+
+				// v11 batchCreate:复数 /secrets,显式 dev/test/sim/prod 字段。
+				// 与单条 /secret/* 区分(单条走 path access,批量走 explicit 字段)。
+				secrets := protected.Group("/secrets")
+				{
+					secrets.POST("/batchCreate", ctrl.BatchCreateSecret)
 				}
 
 				audit := protected.Group("/audit")

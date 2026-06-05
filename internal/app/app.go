@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"envVault/internal/auth"
+	"envVault/internal/auth/ratelimit"
 	"envVault/internal/config"
 	secretcrypto "envVault/internal/crypto"
 	httpapi "envVault/internal/http"
@@ -39,6 +40,7 @@ func Run() error {
 	userCache := postgres.NewUserCache()
 	repository := postgres.NewRepository(db, userCache)
 	rbacStore := postgres.NewRBACStore(db, gormDB, userCache)
+	authStore := postgres.NewAuthStore(db, gormDB, userCache)
 	if err := rbacStore.EnsureSystemData(ctx); err != nil {
 		return err
 	}
@@ -88,15 +90,54 @@ func Run() error {
 		treeSvc = service.NewTreeService(repository, nil, authorizer)
 	}
 
+	// v9: tokens_valid_after 进程内缓存 + 后台 refresher。
+	// 注意:即便 Redis 未启用,进程内 cache 也要建出来 — JWT middleware 强依赖它。
+	tokensCache := auth.NewTokensCache(auth.TokensCacheOptions{
+		PerUserLoader: func(c context.Context, userId string) (time.Time, error) {
+			return authStore.GetTokensValidAfter(c, userId)
+		},
+		Refresher: cfg.Auth.TokensCacheRefresh,
+	})
+	// 启动后台 refresher(独立 ctx;主 ctx 取消时随 server.Shutdown 退出)
+	refresherCtx, refresherCancel := context.WithCancel(context.Background())
+	defer refresherCancel()
+	tokensCache.RunRefresher(refresherCtx, func(c context.Context) (map[string]time.Time, error) {
+		return authStore.ListUsersWithTokensValidAfter(c)
+	})
+
+	// v9: AuthService 装配。Limiter 走 Redis(若启用),否则 noop(开发态)。
+	var limiter ratelimit.Limiter
+	if cfg.Redis.Enabled && cache != nil {
+		limiter = ratelimit.NewRedisLimiter(cache.Client(), ratelimit.Options{
+			Window:        cfg.Auth.LoginRateLimitWindow,
+			MaxAttempts:   cfg.Auth.LoginRateLimit,
+			LockoutPeriod: cfg.Auth.LockoutDuration,
+			KeyPrefix:     "ratelimit:login",
+		})
+	} else {
+		limiter = noopLimiter{}
+	}
+	authSvc := service.NewAuthService(service.AuthServiceOptions{
+		AuthRepo:       authStore,
+		PasswordHasher: auth.NewArgon2idHasher(auth.DefaultPasswordParams()),
+		Limiter:        limiter,
+		TokensCache:    tokensCache,
+		PrivateKeyPEM:  cfg.Auth.PrivateKey,
+		TokenTTL:       cfg.Auth.TokenTTL,
+		PasswordMinLen: cfg.Auth.PasswordMinLength,
+	})
+
 	router := httpapi.NewRouter(httpapi.Dependencies{
-		Config:     cfg,
-		Database:   db,
-		Repo:       repository,
-		Secret:     secretSvc,
-		RBAC:       rbacSvc,
-		Tree:       treeSvc,
-		Authorizer: authorizer,
-		Cache:      cache,
+		Config:      cfg,
+		Database:    db,
+		Repo:        repository,
+		Secret:      secretSvc,
+		RBAC:        rbacSvc,
+		Tree:        treeSvc,
+		Auth:        authSvc,
+		TokensCache: tokensCache,
+		Authorizer:  authorizer,
+		Cache:       cache,
 	})
 
 	server := &http.Server{
@@ -111,3 +152,9 @@ func Run() error {
 	}
 	return err
 }
+
+// noopLimiter 在 Redis 未启用时提供「不限流」的 ratelimit 实现,保留 Login 流程可跑通。
+type noopLimiter struct{}
+
+func (noopLimiter) Check(_ context.Context, _ string) error          { return nil }
+func (noopLimiter) Record(_ context.Context, _ string, _ bool) error { return nil }

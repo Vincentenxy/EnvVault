@@ -738,6 +738,66 @@ func (r *Repository) GetFolder(ctx context.Context, id string) (Entity, error) {
 	return r.getEntity(ctx, "folders", id)
 }
 
+// ListFolderChildren 批量拉取多个父 folder 下的 level=2 子 folder,按 caller 的
+// user_role_bindings 在 (folder, environment, project, organization) 层做 narrowing;
+// 复用 v7 的 userReadScopeCTE + scopeNarrowingWhere。
+//
+// 行为约定:
+//   - parentIds 为空时直接返回空 map(不发 SQL,避免 $3::uuid[] 空数组在某些 PG 版本下
+//     与 ANY 语义交互产生歧义;空数组走 ANY 本身是 no match,但显式短路更省)。
+//   - 返回的 map 始终非 nil(空 parent id 不会出现;对应某个 parent 的空数组是 []Entity{},非 nil),
+//     让 handler 直接 `subs := children[it.Id]; if subs == nil { subs = []Entity{} }` 即可。
+//   - 单 SQL 内 SQL 参数:$1=callerUserId, $2='folder:read', $3=parentIds(uuid[])。
+//   - 输出按 t.parent_id ASC, t.name ASC 排,Go 端按 parent_id 分组组装为 map。
+func (r *Repository) ListFolderChildren(ctx context.Context, callerUserId string, parentIds []string) (map[string][]Entity, error) {
+	result := make(map[string][]Entity, len(parentIds))
+	if len(parentIds) == 0 {
+		return result, nil
+	}
+
+	cte := userReadScopeCTE()
+	// 子 folder 的 Entity.ParentId 在 level=2 时固定为父 folder id,所以读 parent_id 列。
+	cols, scanInto := entityReadColumns("parent_id")
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "folder", column: "t.id"},
+		{scopeType: "environment", column: "t.environment_id"},
+		{scopeType: "project", column: "p.id"},
+		{scopeType: "organization", column: "p.org_id"},
+	})
+	query := cte + fmt.Sprintf(`
+select %s
+from folders t
+join environments e on e.id = t.environment_id
+join projects p on p.id = e.project_id
+where t.parent_id = any($3::uuid[])
+  and t.is_deleted = false
+  and e.is_deleted = false
+  and p.is_deleted = false%s
+order by t.parent_id asc, t.name asc
+`, cols, narrow)
+
+	rows, err := r.db.QueryContext(ctx, query, callerUserId, "folder:read", parentIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var entity Entity
+		if err := rows.Scan(scanInto(&entity)...); err != nil {
+			return nil, err
+		}
+		r.fillEntityLabels(&entity)
+		// entity.ParentId(level=2) 必为父 folder id,即 group key;不可能为空。
+		pid := entity.ParentId
+		result[pid] = append(result[pid], entity)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func (r *Repository) GetFolderByCode(ctx context.Context, environmentId, code string) (Entity, error) {
 	return r.getEntityByCodeWithParent(ctx, "folders", "environment_id", environmentId, code)
 }
@@ -847,6 +907,102 @@ returning id, folder_id, key, comment, version, created_by, updated_by, created_
 		return Secret{}, err
 	}
 	return r.GetSecret(ctx, secret.Id)
+}
+
+// BatchCreateSecrets 单事务批量创建 secret + 1 条 batch audit。
+// N 条 INSERT,每条 RETURNING id;任一条失败(unique violation 等)→ rollback 整批。
+// 全部 INSERT 成功后,1 条 audit_records(action="create_batch",
+// resource_type="folder", resource_id=template folder id,
+// encrypted_value=jsonb([{envCode, key, secretId}, ...])。
+// commit 后用 r.GetSecret 拉每条的完整 metadata(带 path / 4 级 codes)。
+func (r *Repository) BatchCreateSecrets(ctx context.Context, items []store.BatchCreateSecretItem) ([]Secret, error) {
+	if len(items) == 0 {
+		return []Secret{}, nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	// 预生成 uuid + 序列化 ciphertext。任一条 serialize 失败 → 整批 abort。
+	type pending struct {
+		item    store.BatchCreateSecretItem
+		id      string
+		payload []byte
+	}
+	pendings := make([]pending, 0, len(items))
+	for _, it := range items {
+		uid, err := uuidgen.NewUUID()
+		if err != nil {
+			return nil, err
+		}
+		payload, err := json.Marshal(it.Ciphertext)
+		if err != nil {
+			return nil, err
+		}
+		pendings = append(pendings, pending{item: it, id: uid, payload: payload})
+	}
+
+	// 按 envCode 分组收集:同 folder 跨多个 secretList item 会共享 envCode。
+	// 简化:每个 (envCode, key) 单独 audit,template folder id 来自任一 item。
+	auditEntries := make([]map[string]any, 0, len(pendings))
+	var templateFolderId string
+	insertedIds := make([]string, 0, len(pendings))
+
+	for _, p := range pendings {
+		var secretId string
+		err := tx.QueryRowContext(ctx, `
+insert into secrets (id, folder_id, key, value_ciphertext, comment, version, created_by, updated_by)
+values ($1, $2, $3, $4, $5, 1, $6, $6)
+returning id
+`, p.id, p.item.FolderId, p.item.Key, string(p.payload), p.item.Comment, p.item.Actor).Scan(&secretId)
+		if err != nil {
+			return nil, translatePgErr(err)
+		}
+		insertedIds = append(insertedIds, secretId)
+		if templateFolderId == "" {
+			templateFolderId = p.item.FolderId
+		}
+		// 解析 envCode:folderId → folder.environment_id → environments.code。
+		// 在事务内通过 1 次额外 join 拿到,避免 service 层预扫 N 次。
+		var envCode string
+		if err := tx.QueryRowContext(ctx, `
+select e.code from folders f join environments e on e.id = f.environment_id where f.id = $1::uuid
+`, p.item.FolderId).Scan(&envCode); err != nil {
+			return nil, fmt.Errorf("resolve env code for folder %s: %w", p.item.FolderId, err)
+		}
+		auditEntries = append(auditEntries, map[string]any{
+			"envCode":  envCode,
+			"key":      p.item.Key,
+			"secretId": secretId,
+		})
+	}
+
+	// 1 条 batch audit。
+	auditPayload, err := json.Marshal(auditEntries)
+	if err != nil {
+		return nil, fmt.Errorf("marshal batch create audit: %w", err)
+	}
+	if err := recordAuditTx(ctx, tx, items[0].Actor, "folder", templateFolderId, "create_batch", auditPayload); err != nil {
+		return nil, fmt.Errorf("record create_batch audit: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	// commit 后拉每条完整 metadata。
+	out := make([]Secret, 0, len(insertedIds))
+	for _, id := range insertedIds {
+		sec, err := r.GetSecret(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("post-commit GetSecret(%s): %w", id, err)
+		}
+		out = append(out, sec)
+	}
+	return out, nil
 }
 
 func (r *Repository) UpdateSecret(ctx context.Context, id, key, comment, actor string, ciphertext SecretCiphertext) (Secret, error) {

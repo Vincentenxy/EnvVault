@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"envVault/internal/auth"
@@ -45,9 +46,52 @@ type SecretService interface {
 	// 不分页,整批 1 条 audit(action=reveal_batch, resource_type=folder)。
 	BatchRevealByPath(ctx context.Context, user auth.UserInfo, path string, keys []string, actor string) ([]domain.Secret, []string, error)
 
+	// 批量创建:接收 secretList,每条 item 含 (key, comment?, dev/test/sim/prod 字段),
+	// 每个 env 字段显式指定目标 folderId + value。服务端展开为 (item, env) 二元组
+	// 序列,逐条做 secret:create 权限 check + 加密,单事务 N 条 INSERT + 1 条
+	// batch audit,任一阶段失败整批 rollback。
+	//
+	// 业务错误以 sentinel 形式返出(controller 统一翻译为 HTTP 200 + body code=-1):
+	//   - auth.ErrPermissionDenied:任一目标 folder 缺 secret:create
+	//   - domain.ErrNotFound:目标 folder 不存在
+	//   - domain.ErrConflict:任一 (folder, key) 冲突
+	//   - 其他 err:走通用 err.Error() 描述
+	BatchCreate(ctx context.Context, user auth.UserInfo, req BatchCreateRequest, actor string) error
+
 	List(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
 	Search(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
 }
+
+// BatchCreateRequest 是 SecretService.BatchCreate 的入参。
+//
+// 不再有顶层 folderId(template folder 概念已弃用);每条 item 内部自带
+// (envCode, folderId, value) 三元组,客户端显式指定每个 env 的目标 folder。
+type BatchCreateRequest struct {
+	SecretList []BatchCreateSecretSpec
+}
+
+// BatchCreateSecretSpec 单条 secret 的批量创建规格:
+//
+//	Key     string
+//	Comment string
+//	Envs    []BatchCreateEnvTarget // 按 dev/test/sim/prod 顺序展开
+type BatchCreateSecretSpec struct {
+	Key     string
+	Comment string
+	Envs    []BatchCreateEnvTarget
+}
+
+// BatchCreateEnvTarget 单个 env 下的「目标 folder + 待写入 value」三元组。
+// EnvCode 仅为审计 / 日志 / 缓存键标识使用,不影响 repo 写入(repo 只看 FolderId)。
+type BatchCreateEnvTarget struct {
+	EnvCode  string
+	FolderId string
+	Value    string
+}
+
+// secretServiceKeyPattern 与 controller 端 secretKeyPattern 同源;service 入口做防御性二次校验,
+// 防止 controller 被绕过/直调 service 时漏校验。
+var secretServiceKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 
 type secretService struct {
 	repo       store.ResourceRepository
@@ -288,6 +332,99 @@ func (s *secretService) BatchRevealByPath(ctx context.Context, user auth.UserInf
 		}
 	}
 	return results, notFound, nil
+}
+
+// BatchCreate 编排流程:
+//
+//  1. 空 user.UserId → auth.ErrPermissionDenied(controller 翻译为权限不足)
+//  2. 入参防御性二次校验(secretList 非空、每条 key 合法、每条 env 非空)
+//  3. 展开 secretList 为 (envCode, folderId, value, key, comment) 序列;
+//     对每条 (target) 做 secret:create 权限 check(走 v7 cascade narrowing)。
+//     任一权限不足 → 整批拒绝,不写库。
+//  4. 对每条 target 加密 value;
+//  5. 调 repo.BatchCreateSecrets 单事务批量 INSERT + 1 条 batch audit;
+//     unique violation(23505)由 translatePgErr 翻译为 domain.ErrConflict 透传;
+//  6. commit 后逐条 cacheUpsert(同 Create);
+//
+// 所有错误一律以 err 形式返出(controller 统一翻译为 HTTP 200 + body code=-1 +
+// msg 描述);成功时只返 nil。
+func (s *secretService) BatchCreate(ctx context.Context, user auth.UserInfo, req BatchCreateRequest, actor string) error {
+	if strings.TrimSpace(user.UserId) == "" {
+		return auth.ErrPermissionDenied
+	}
+	// 1. 入参防御性二次校验(controller 已做,这里兜底直调 service 的场景)。
+	if len(req.SecretList) == 0 {
+		return errors.New("secretList 不能为空")
+	}
+	for i, item := range req.SecretList {
+		if !secretServiceKeyPattern.MatchString(item.Key) {
+			return fmt.Errorf("secretList[%d].key 格式错误,必须匹配 ^[A-Z][A-Z0-9_]*$", i)
+		}
+		if len(item.Envs) == 0 {
+			return fmt.Errorf("secretList[%d] 至少需要指定一个 env", i)
+		}
+		for j, e := range item.Envs {
+			if strings.TrimSpace(e.FolderId) == "" {
+				return fmt.Errorf("secretList[%d].envs[%d].folderId 不能为空", i, j)
+			}
+		}
+	}
+
+	// 2. 展开为有序的 (envCode, folderId, value, key, comment) target 列表。
+	type target struct {
+		envCode    string
+		folderId   string
+		key        string
+		comment    string
+		ciphertext domain.SecretCiphertext
+	}
+	var targets []target
+	for _, item := range req.SecretList {
+		for _, e := range item.Envs {
+			ct, err := s.encrypt(ctx, e.Value)
+			if err != nil {
+				return err
+			}
+			targets = append(targets, target{
+				envCode:    e.EnvCode,
+				folderId:   e.FolderId,
+				key:        item.Key,
+				comment:    item.Comment,
+				ciphertext: ct,
+			})
+		}
+	}
+
+	// 3. 权限 check:对每个 target folder 单独 secret:create 判定。
+	// 任一缺失即整批拒绝(严控,避免半写库)。
+	for _, t := range targets {
+		if err := s.authorizer.Allow(ctx, user, "secret:create", secretFolderScope(t.folderId)); err != nil {
+			return fmt.Errorf("对 folder %s (env=%s) 没有 secret:create 权限: %w", t.folderId, t.envCode, err)
+		}
+	}
+
+	// 4. 构造 store 输入,调 repo.BatchCreateSecrets。
+	items := make([]store.BatchCreateSecretItem, 0, len(targets))
+	for _, t := range targets {
+		items = append(items, store.BatchCreateSecretItem{
+			FolderId:   t.folderId,
+			Key:        t.key,
+			Comment:    t.comment,
+			Actor:      actor,
+			Ciphertext: t.ciphertext,
+		})
+	}
+	created, err := s.repo.BatchCreateSecrets(ctx, items)
+	if err != nil {
+		// 透传 ErrConflict / ErrNotFound / 其他 err;translatePgErr 已做 unique violation → ErrConflict。
+		return err
+	}
+
+	// 5. 同步 cache:targets 顺序与 created 顺序一致,逐对 upsert。
+	for i, t := range targets {
+		s.cacheUpsert(ctx, created[i], t.ciphertext)
+	}
+	return nil
 }
 
 // listScope 实现 List / Search 共享的"最深 scope"策略:

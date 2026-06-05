@@ -3,12 +3,14 @@ package postgres
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"envVault/internal/domain"
+	"envVault/internal/store"
 )
 
 // TestParentColumnEnvironmentsPointsToProject 锁住 v3 重构:
@@ -84,6 +86,34 @@ func TestBuildSecretPathJoinsOrgProjectEnvFolderKey(t *testing.T) {
 func TestBuildSecretPathEmptyPart(t *testing.T) {
 	if got := buildSecretPath(Secret{OrgCode: "o", ProjectCode: "", EnvironmentCode: "e", FolderCode: "f", Key: "k"}); got != "" {
 		t.Fatalf("path with empty part = %q, want empty", got)
+	}
+}
+
+// =====================================================================
+// v11: BatchCreateSecretItem 字段锁
+// =====================================================================
+
+// TestBatchCreateSecretItemFields 锁住 store.BatchCreateSecretItem 字段名。
+// service 层依赖这些字段名构造 items,字段 rename 必导致 service 编译失败,
+// 但这里再加一道测试防止 reorder/typo。
+func TestBatchCreateSecretItemFields(t *testing.T) {
+	rt := reflect.TypeOf(store.BatchCreateSecretItem{})
+	expected := map[string]string{
+		"FolderId":   "FolderId",
+		"Key":        "Key",
+		"Comment":    "Comment",
+		"Actor":      "Actor",
+		"Ciphertext": "Ciphertext",
+	}
+	for name, want := range expected {
+		f, ok := rt.FieldByName(name)
+		if !ok {
+			t.Errorf("missing field %q", name)
+			continue
+		}
+		if f.Name != want {
+			t.Errorf("%s name = %q, want %q", name, f.Name, want)
+		}
 	}
 }
 

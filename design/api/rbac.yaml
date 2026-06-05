@@ -680,17 +680,27 @@ components:
 
     PageResp:
       type: object
+      description: |
+        Paginated response wrapper. Shape depends on whether the result has data:
+
+        - **Empty data** (`list.length === 0`): `{ "total": 0, "list": [] }` —
+          `pageNum` / `pageSize` are **omitted**.
+        - **Non-empty data**: `{ "pageNum": 1, "pageSize": 20, "total": N, "list": [...] }`.
+
+        See `design/DESIGN.md`「分页响应 - 空数据形态」.
       required:
-        - pageNum
-        - pageSize
         - total
         - list
       properties:
         pageNum:
           type: integer
+          description: |
+            Page number. **Omitted on empty-data responses.**
           example: 1
         pageSize:
           type: integer
+          description: |
+            Page size. **Omitted on empty-data responses.**
           example: 20
         total:
           type: integer

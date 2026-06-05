@@ -10,6 +10,12 @@ security:
 tags:
   - name: Health
   - name: Auth Dev
+  - name: Auth
+    description: |
+      Local email + password authentication. See `design/DESIGN.md`「认证 & 用户（v9）」.
+      - `register` / `login` are anonymous; first registrant becomes `platform_admin` (global).
+      - `logout` / `changePassword` require a valid JWT; both bump
+        `users.tokens_valid_after` to invalidate the caller's other sessions.
   - name: Current User
   - name: Organizations
   - name: Projects
@@ -60,6 +66,122 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/DevToken"
+
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: Self-register a new account
+      description: |
+        Self-registration endpoint. The **first** user to register automatically
+        receives the `platform_admin` role (global scope), making it the bootstrap
+        admin for a fresh deployment. Subsequent registrations have no role grants
+        until a platform_admin assigns them.
+
+        Rate-limited per IP. If `auth.register_enabled=false`, returns 403.
+        Password must be at least `auth.password_min_length` characters.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRegisterRequest"
+      responses:
+        "200":
+          description: Account created and JWT issued.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AuthTokenResponse"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Login with email and password
+      description: |
+        Email + password authentication. Returns 401 for both "email not found"
+        and "wrong password" (no user enumeration). Rate-limited per IP:
+        `auth.login_rate_limit` failures within `auth.login_rate_limit_window`
+        triggers a 15-minute lockout (`auth.lockout_duration`).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthLoginRequest"
+      responses:
+        "200":
+          description: Login successful.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/AuthTokenResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Force logout
+      description: |
+        Revokes the caller's current JWT by setting `users.tokens_valid_after = NOW()`.
+        All previously-issued JWTs for this user become invalid (401 on next
+        request) within the in-process cache propagation window
+        (`auth.tokens_cache_refresh`, default 1 minute).
+
+        Idempotent: calling on an already-logged-out session is a no-op.
+      responses:
+        "204":
+          description: Logged out.
+
+  /api/v1/auth/changePassword:
+    post:
+      tags: [Auth]
+      summary: Change the caller's password
+      description: |
+        Verifies the old password, then atomically updates the password hash
+        and bumps `tokens_valid_after` (effectively logging out all existing
+        sessions for this user). New password must be at least
+        `auth.password_min_length` characters.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthChangePasswordRequest"
+      responses:
+        "200":
+          description: Password changed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          changed:
+                            type: boolean
+                            example: true
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/me:
     get:
@@ -455,7 +577,18 @@ paths:
           (cascading across the 4-level chain folder → env → project → org).
         - Caller with no active binding: returns an empty list.
 
-        See `design/DESIGN.md` §"List 接口按 caller 权限收窄（v7）".
+        `includeSubfolders` (v10+): when `true` AND the request uses
+        `environmentId` mode, each item in `list` becomes a `FolderWithSubfolders`
+        whose `subfolders` array carries that parent's level=2 children. This
+        collapses what would otherwise be N+1 round-trips (one to list level=1
+        folders, then one per parent to list its children) into a single call.
+        Only valid in `environmentId` mode; passing `true` with `folderParentId`
+        returns 400 (the current schema only goes to level=2, so there is no
+        level=3 to nest). Default `false`; response shape is then identical to
+        historical calls (no `subfolders` field on list items).
+
+        See `design/DESIGN.md` §"List 接口按 caller 权限收窄（v7）" and
+        §"Folder 路径访问 - list 嵌套子 folder".
       requestBody:
         required: true
         content:
@@ -473,12 +606,163 @@ paths:
                       type: string
                       format: uuid
                       description: List level=2 folders under this parent folder.
+                    includeSubfolders:
+                      type: boolean
+                      default: false
+                      description: |
+                        When `true` (only with `environmentId` mode), each list item
+                        carries a `subfolders: [Entity, ...]` field with the parent's
+                        level=2 children. See endpoint description for details.
                   description: Exactly one of environmentId or folderParentId is required.
+            examples:
+              envOnly:
+                summary: List level=1 folders under an env (default, no nesting)
+                value:
+                  pageNum: 1
+                  pageSize: 20
+                  environmentId: "11111111-1111-1111-1111-111111111111"
+              envWithChildren:
+                summary: List level=1 folders, with subfolders array on each item
+                value:
+                  pageNum: 1
+                  pageSize: 20
+                  environmentId: "11111111-1111-1111-1111-111111111111"
+                  includeSubfolders: true
+              parentOnly:
+                summary: List level=2 folders under a parent folder
+                value:
+                  pageNum: 1
+                  pageSize: 20
+                  folderParentId: "22222222-2222-2222-2222-222222222222"
       responses:
         "200":
-          $ref: "#/components/responses/FolderList"
+          description: |
+            Folder list. Each item is `Entity` by default. When the request set
+            `includeSubfolders: true`, each item is upgraded to
+            `FolderWithSubfolders` (Entity fields + `subfolders: [Entity, ...]`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FolderListResponse"
+              examples:
+                defaultFlat:
+                  summary: Default response (no includeSubfolders)
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      pageNum: 1
+                      pageSize: 20
+                      total: 2
+                      list:
+                        - id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                          parentId: "11111111-1111-1111-1111-111111111111"
+                          code: globals
+                          name: Globals
+                          comment: ""
+                          createdBy: dev-user
+                          createdByLabel: Dev User
+                          updatedBy: dev-user
+                          updatedByLabel: Dev User
+                          createdAt: "2026-06-01T10:00:00Z"
+                          updatedAt: "2026-06-01T10:00:00Z"
+                        - id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+                          parentId: "11111111-1111-1111-1111-111111111111"
+                          code: groups-secrets
+                          name: Group Secrets
+                          comment: ""
+                          createdBy: dev-user
+                          createdByLabel: Dev User
+                          updatedBy: dev-user
+                          updatedByLabel: Dev User
+                          createdAt: "2026-06-01T10:00:00Z"
+                          updatedAt: "2026-06-01T10:00:00Z"
+                withSubfolders:
+                  summary: includeSubfolders=true (each item carries its level=2 children)
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      pageNum: 1
+                      pageSize: 20
+                      total: 2
+                      list:
+                        - id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                          parentId: "11111111-1111-1111-1111-111111111111"
+                          code: globals
+                          name: Globals
+                          comment: ""
+                          createdBy: dev-user
+                          createdByLabel: Dev User
+                          updatedBy: dev-user
+                          updatedByLabel: Dev User
+                          createdAt: "2026-06-01T10:00:00Z"
+                          updatedAt: "2026-06-01T10:00:00Z"
+                          subfolders:
+                            - id: "cccccccc-cccc-cccc-cccc-cccccccccccc"
+                              parentId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                              code: aws
+                              name: AWS
+                              comment: ""
+                              createdBy: dev-user
+                              createdByLabel: Dev User
+                              updatedBy: dev-user
+                              updatedByLabel: Dev User
+                              createdAt: "2026-06-01T10:00:00Z"
+                              updatedAt: "2026-06-01T10:00:00Z"
+                            - id: "dddddddd-dddd-dddd-dddd-dddddddddddd"
+                              parentId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                              code: db
+                              name: DB
+                              comment: ""
+                              createdBy: dev-user
+                              createdByLabel: Dev User
+                              updatedBy: dev-user
+                              updatedByLabel: Dev User
+                              createdAt: "2026-06-01T10:00:00Z"
+                              updatedAt: "2026-06-01T10:00:00Z"
+                        - id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+                          parentId: "11111111-1111-1111-1111-111111111111"
+                          code: groups-secrets
+                          name: Group Secrets
+                          comment: ""
+                          createdBy: dev-user
+                          createdByLabel: Dev User
+                          updatedBy: dev-user
+                          updatedByLabel: Dev User
+                          createdAt: "2026-06-01T10:00:00Z"
+                          updatedAt: "2026-06-01T10:00:00Z"
+                          subfolders: []
         "400":
-          $ref: "#/components/responses/BadRequest"
+          description: |
+            Bad request. Returned when neither `environmentId` nor `folderParentId`
+            is supplied, when both are supplied, or when `includeSubfolders=true`
+            is combined with `folderParentId` (only valid in `environmentId` mode).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
+              examples:
+                includeSubfoldersWithoutEnv:
+                  summary: |
+                    `includeSubfolders=true` is only valid with `environmentId`;
+                    passing it with `folderParentId` is rejected.
+                  value:
+                    code: 1002
+                    msg: includeSubfolders only valid with environmentId
+                    data: null
+                missingBothFilters:
+                  summary: Neither environmentId nor folderParentId supplied.
+                  value:
+                    code: 1002
+                    msg: environmentId or folderParentId is required
+                    data: null
+                bothFiltersSupplied:
+                  summary: environmentId and folderParentId are mutually exclusive.
+                  value:
+                    code: 1002
+                    msg: environmentId and folderParentId are mutually exclusive
+                    data: null
 
   /api/v1/folder/create:
     post:
@@ -784,6 +1068,81 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/secrets/batchCreate:
+    post:
+      tags: [Secrets]
+      summary: Batch create secrets across multiple envs with same key / different values
+      description: |
+        Creates N secrets in a single transaction. The client **explicitly
+        specifies the target folderId + value for each env** (dev / test / sim /
+        prod are hardcoded fields). The whole batch is one transaction
+        (all-or-nothing) with **one** batch audit record.
+
+        Use case: setting `DATABASE_URL` to a different value in dev / test / sim /
+        prod, in one request, instead of N serial `/secret/create` calls.
+
+        **Note**: the path is `/api/v1/secrets/batchCreate` (plural `secrets`),
+        kept on a separate route group from the single-secret `/secret/*` endpoints.
+
+        **Important: business errors all return HTTP 200**, with the error code in
+        the body. This is a deliberate departure from the rest of the API (which
+        uses 4xx for business errors); the user can rely on `body.code` for the
+        business outcome and on `body.msg` for a human-readable description.
+
+        Body code matrix:
+
+        - `0`  — success; `data` is `null` (the client may call `secretList` /
+          `secret/path/info` to fetch metadata if needed).
+        - `-1` — **all** business failures, including:
+          - `msg: "入参校验，<描述>"` — input validation failed (empty
+            `secretList` / invalid `key` format / missing `folderId` / etc).
+          - `msg: "创建失败，权限不足"` — caller lacks `secret:create` on at
+            least one target folder (v7 cascade narrowing); the entire batch
+            is rejected.
+          - `msg: "创建失败，目标 folder 不存在"` — at least one target
+            `folderId` does not exist.
+          - `msg: "创建失败，secret 已存在"` — at least one `(folder, key)`
+            already exists (PG `23505` unique violation); the entire batch
+            is rolled back.
+          - `msg: "创建失败，<err>"` — any other internal error.
+
+        Behavior:
+
+        - `secretList` must be non-empty; each `key` must match `^[A-Z][A-Z0-9_]*$`.
+        - At least one of `dev` / `test` / `sim` / `prod` must be present per item;
+          all four being `null` (or absent) rejects the item.
+        - Each env field's `folderId` must be a non-empty UUID; the system does
+          **not** do any "find folder by code" lookup — the client is responsible
+          for picking the correct target folder per env.
+        - One `secret:create` permission check per target `(env, folder)` pair;
+          any denial aborts the whole batch.
+        - The DB layer writes N INSERTs and **one** `audit_records` row in a
+          single transaction; `action="create_batch"`, `resource_type="folder"`,
+          `resource_id=<first item's folder_id>`,
+          `encrypted_value=jsonb([{envCode, key, secretId}, ...])`.
+        - After commit, every created secret is upserted into the Redis
+          `SecretCache` (same path as `/secret/create`).
+        - No cross-project batch (each item's `folderId` lives in its own project;
+          no project-level batch semantics).
+        - No nested folder support; no `folderParentId` / `includeSubfolders`
+          semantics (matches single `/secret/create`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretBatchCreateRequest"
+      responses:
+        "200":
+          description: |
+            Batch create response. **All responses** (success and business
+            failure) return HTTP 200; the body code discriminates. The `data`
+            field is always `null` in v11.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
+
   /api/v1/search/global:
     post:
       tags: [Search]
@@ -861,6 +1220,82 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/AuditList"
+
+  /api/v1/tree/get:
+    post:
+      tags: [Tree]
+      summary: Get the visible resource tree (org → project → env → folder)
+      description: |
+        Assembles a hierarchical view of the resources the caller can see,
+        cascading down 4 levels: organization → project → environment → folder
+        (including level-1 and level-2 folders). The tree is built in the
+        following order:
+
+        1. Read cached tree snapshots from Redis (if present) for each level.
+        2. Fall back to PostgreSQL `ListAll*ForTree` calls when the cache
+           is missing or empty.
+        3. Re-assemble the in-memory tree, apply caller's RBAC narrowing
+           (`org:read` / `project:read` / `env:read` / `folder:read`),
+           and prune the depth to `maxDepth`.
+
+        RBAC: there is no dedicated `tree:read` permission. Visibility is
+        controlled by the 4 `:read` codes (`org:read` / `project:read` /
+        `env:read` / `folder:read`). A user with no binding on any of
+        these scopes gets an empty `roots` array (no 403). This matches
+        the v7 "implicit empty list" semantics used by `List*` endpoints.
+
+        `maxDepth` levels:
+
+        - 1 = only `organization`
+        - 2 = + `project`
+        - 3 = + `environment`
+        - 4 = + `folder` (default; includes both level-1 and level-2 folders)
+
+        Out-of-range or zero `maxDepth` is normalized to 4 server-side.
+
+        `includeOrphans` controls what to do with nodes whose parent is
+        not visible to the caller (e.g. an `env` whose parent `project`
+        is hidden, but the env is bound to a higher-scope `org_admin`).
+        When `false` (default), orphan nodes are dropped and counted in
+        `stats.dropped`. When `true`, orphans are attached to a virtual
+        root and counted in `stats.orphans`.
+
+        `source` in the response is `"cache"` if the tree was fully
+        served from Redis snapshots, `"database"` if any level fell
+        back to DB, or `"mixed"`. Debug / metrics only; clients can
+        ignore it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TreeRequest"
+            examples:
+              default:
+                value: {}
+              withMaxDepth:
+                value:
+                  maxDepth: 2
+              includeOrphans:
+                value:
+                  maxDepth: 4
+                  includeOrphans: true
+      responses:
+        "200":
+          description: Resource tree response.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ResourceTreeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          $ref: "#/components/responses/BadRequest"
 
 components:
   securitySchemes:
@@ -944,6 +1379,46 @@ components:
           example:
             code: 1002
             msg: invalid request
+            data: null
+    InvalidRequest:
+      description: Invalid request body or parameters.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Response"
+          example:
+            code: 1002
+            msg: invalid argument
+            data: null
+    Unauthorized:
+      description: Authentication failed (missing or invalid JWT, or bad credentials).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Response"
+          example:
+            code: 1401
+            msg: bad credentials
+            data: null
+    Conflict:
+      description: Resource conflict (e.g. email already exists).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Response"
+          example:
+            code: 1409
+            msg: email already exists
+            data: null
+    RateLimited:
+      description: Too many requests; IP is locked.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Response"
+          example:
+            code: 1429
+            msg: rate limited
             data: null
     Forbidden:
       description: Permission denied.
@@ -1135,13 +1610,28 @@ components:
 
     PageResp:
       type: object
-      required: [pageNum, pageSize, total, list]
+      description: |
+        Paginated response wrapper. Shape depends on whether the result has data:
+
+        - **Empty data** (`list.length === 0`): `{ "total": 0, "list": [] }` —
+          `pageNum` / `pageSize` are **omitted**.
+        - **Non-empty data**: `{ "pageNum": 1, "pageSize": 20, "total": N, "list": [...] }`.
+
+        `pageNum` / `pageSize` are non-required for the same reason: when
+        `list` is empty the server uses `omitempty` to drop them, and clients
+        should not need to do `pageNum === undefined` defensive checks on
+        empty-data responses. See `design/DESIGN.md`「分页响应 - 空数据形态」.
+      required: [total, list]
       properties:
         pageNum:
           type: integer
+          description: |
+            Page number. **Omitted on empty-data responses.**
           example: 1
         pageSize:
           type: integer
+          description: |
+            Page size. **Omitted on empty-data responses.**
           example: 20
         total:
           type: integer
@@ -1149,6 +1639,8 @@ components:
           example: 1
         list:
           type: array
+          description: |
+            Always a JSON array; on empty data it is `[]` (never `null`).
           items: {}
 
     CreateEntityRequest:
@@ -1313,6 +1805,74 @@ components:
           type: string
           format: date-time
 
+    AuthRegisterRequest:
+      type: object
+      required: [email, name, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        name:
+          type: string
+          minLength: 1
+          example: Alice
+        password:
+          type: string
+          format: password
+          minLength: 12
+          example: correct-horse-battery-staple
+
+    AuthLoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          format: password
+          example: correct-horse-battery-staple
+
+    AuthChangePasswordRequest:
+      type: object
+      required: [oldPassword, newPassword]
+      properties:
+        oldPassword:
+          type: string
+          format: password
+          example: correct-horse-battery-staple
+        newPassword:
+          type: string
+          format: password
+          minLength: 12
+          example: new-correct-horse-12+chars
+
+    AuthTokenResponse:
+      type: object
+      properties:
+        userId:
+          type: string
+          example: email:alice@example.com
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        name:
+          type: string
+          example: Alice
+        token:
+          type: string
+          description: Signed JWT (RS256 / ES256 / EdDSA depending on configured key).
+        issuedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+
     SecretFilter:
       type: object
       description: |
@@ -1393,6 +1953,61 @@ components:
           items:
             type: string
           example: ["MISSING_KEY"]
+
+    SecretBatchCreateRequest:
+      type: object
+      required: [secretList]
+      properties:
+        secretList:
+          type: array
+          minItems: 1
+          description: |
+            List of secrets to create. For each item, the system expands
+            `dev` / `test` / `sim` / `prod` fields into a sequence of
+            `(envCode, folderId, value)` triples and creates one secret per
+            triple. At least one env field must be present per item; all
+            four being `null` (or absent) rejects the item.
+          items:
+            $ref: "#/components/schemas/SecretBatchCreateItemRequest"
+
+    SecretBatchCreateItemRequest:
+      type: object
+      required: [key]
+      properties:
+        key:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]*$"
+          description: The secret key (same constraints as `/secret/create`).
+          example: DATABASE_URL
+        comment:
+          type: string
+          description: Optional per-item comment, persisted on each created secret.
+        dev:
+          $ref: "#/components/schemas/SecretBatchEnvTarget"
+        test:
+          $ref: "#/components/schemas/SecretBatchEnvTarget"
+        sim:
+          $ref: "#/components/schemas/SecretBatchEnvTarget"
+        prod:
+          $ref: "#/components/schemas/SecretBatchEnvTarget"
+
+    SecretBatchEnvTarget:
+      type: object
+      description: |
+        Per-env target for a single secret. The client must explicitly supply
+        the `folderId` for each env; the system does **not** look up folders
+        by code (no "template folder" mechanism in v11).
+      required: [folderId, value]
+      properties:
+        folderId:
+          type: string
+          format: uuid
+          description: The id of the folder in this env where the secret will be created.
+          example: f-dev-uuid
+        value:
+          type: string
+          description: The plaintext value of the secret.
+          example: postgres://dev.local/db
 
     SecretUpsertRequest:
       type: object
@@ -1678,8 +2293,29 @@ components:
                   properties:
                     list:
                       type: array
+                      description: |
+                        List items are `Entity` by default. When the request sets
+                        `includeSubfolders: true` (only valid in `environmentId`
+                        mode), each item is upgraded to `FolderWithSubfolders`,
+                        which embeds `Entity` and adds a `subfolders` array.
                       items:
-                        $ref: "#/components/schemas/Entity"
+                        $ref: "#/components/schemas/FolderWithSubfolders"
+
+    FolderWithSubfolders:
+      allOf:
+        - $ref: "#/components/schemas/Entity"
+        - type: object
+          required: [subfolders]
+          properties:
+            subfolders:
+              type: array
+              description: |
+                Level=2 children of this parent folder (always a JSON array,
+                possibly empty). RBAC-narrowed independently from the parent:
+                a child the caller cannot see simply does not appear here.
+                Sorted by `name` ASC.
+              items:
+                $ref: "#/components/schemas/Entity"
 
     SecretListResponse:
       allOf:
@@ -1710,3 +2346,156 @@ components:
                       type: array
                       items:
                         $ref: "#/components/schemas/AuditRecord"
+
+    TreeNodeType:
+      type: string
+      description: |
+        Identifies a node's resource category. Avoids the need for clients
+        to guess from id prefixes.
+      enum: [organization, project, environment, folder]
+      example: folder
+
+    TreeRequest:
+      type: object
+      description: |
+        `maxDepth` controls how many levels the returned tree descends to:
+
+        - 1 = organization
+        - 2 = + project
+        - 3 = + environment
+        - 4 = + folder (default; includes both level-1 and level-2 folders)
+
+        Out-of-range or zero `maxDepth` is normalized to 4 server-side.
+      properties:
+        includeOrphans:
+          type: boolean
+          default: false
+          description: |
+            When `true`, nodes whose parent is not visible to the caller
+            (e.g. an env whose parent project is hidden, but the env is
+            bound at a higher scope) are attached to a virtual root and
+            counted in `stats.orphans`. When `false` (default), such
+            nodes are dropped and counted in `stats.dropped`.
+        maxDepth:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 4
+          default: 4
+          description: |
+            Maximum depth of the returned tree. Out-of-range or zero
+            values are normalized to 4 server-side.
+      example:
+        maxDepth: 4
+        includeOrphans: false
+
+    TreeNode:
+      type: object
+      description: |
+        Tree node DTO. Audit fields (createdBy / updatedBy / at) are
+        intentionally omitted; use the corresponding `info` endpoint to
+        fetch them. `children` is always a (possibly empty) array so
+        clients can call `children.map(...)` without null checks.
+      required: [id, type, code, name, children]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          $ref: "#/components/schemas/TreeNodeType"
+        level:
+          type: integer
+          format: int32
+          enum: [1, 2]
+          description: "Only present for `type: folder`. 1 = top-level, 2 = child."
+        parentId:
+          type: string
+          format: uuid
+          description: |
+            Parent node id. Top-level `organization` nodes have no
+            `parentId`; for `type: folder` with `level: 1` the parent
+            is the environment id; for `level: 2` the parent is the
+            level-1 folder id.
+        code:
+          type: string
+          example: globals
+        name:
+          type: string
+          example: Globals
+        comment:
+          type: string
+          description: Optional human-readable comment.
+        children:
+          type: array
+          description: |
+            Child nodes (always a JSON array, possibly empty). Order
+            follows the underlying resource's natural ordering.
+          items:
+            $ref: "#/components/schemas/TreeNode"
+
+    TreeStats:
+      type: object
+      description: |
+        Statistics about the assembled tree. Useful for debugging
+        narrowing behavior and for surfacing "you have N hidden items"
+        hints in the UI.
+      required: [organizations, projects, environments, folders, dropped, orphans]
+      properties:
+        organizations:
+          type: integer
+          format: int32
+          description: Caller-visible organization nodes included in the tree.
+        projects:
+          type: integer
+          format: int32
+          description: Caller-visible project nodes included in the tree.
+        environments:
+          type: integer
+          format: int32
+          description: Caller-visible environment nodes included in the tree.
+        folders:
+          type: integer
+          format: int32
+          description: Caller-visible folder nodes (sum of level-1 + level-2) included in the tree.
+        dropped:
+          type: integer
+          format: int32
+          description: |
+            Nodes that were dropped because their parent is not visible
+            to the caller AND `includeOrphans` was `false` (default).
+        orphans:
+          type: integer
+          format: int32
+          description: |
+            Nodes that were attached to a virtual root because their
+            parent is not visible to the caller AND `includeOrphans`
+            was `true`. Only meaningful when `includeOrphans` is enabled.
+
+    ResourceTreeResponse:
+      type: object
+      required: [roots, stats, generatedAt, source]
+      properties:
+        roots:
+          type: array
+          description: |
+            Top-level (`organization`) nodes of the assembled tree.
+            May be empty if the caller has no visible organizations.
+          items:
+            $ref: "#/components/schemas/TreeNode"
+        stats:
+          $ref: "#/components/schemas/TreeStats"
+        generatedAt:
+          type: string
+          format: date-time
+          description: |
+            Server-side timestamp of when this tree was assembled.
+            Used by the client to detect stale caches.
+        source:
+          type: string
+          enum: [cache, database, mixed]
+          description: |
+            Where the tree was assembled from. Debug / metrics only;
+            clients can ignore this field.
+            - `cache`: fully served from Redis snapshots.
+            - `database`: at least one level fell back to DB.
+            - `mixed`: some levels came from cache, some from DB.

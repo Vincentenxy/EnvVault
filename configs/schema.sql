@@ -4,6 +4,7 @@ drop table if exists user_role_bindings;
 drop table if exists role_permissions;
 drop table if exists roles;
 drop table if exists permissions;
+drop table if exists login_attempts;
 drop table if exists users;
 drop table if exists secrets;
 drop table if exists folders;
@@ -219,12 +220,46 @@ create table if not exists users (
     source text not null default 'jwt',
     is_disabled boolean not null default false,
     last_seen_at timestamptz,
+    -- v9: 本地密码登录
+    -- password_hash / password_algo 仅当 source='password' 时有值;
+    -- 走 external_user_id(JWT / OAuth)的用户这两列仍为空串。
+    -- algo 用于未来切到 bcrypt/scrypt/argon2 其它参数时区分 hash 类型。
+    password_hash text not null default '',
+    password_algo text not null default '',
+    -- v9: 强制登出时间戳。Logout / ChangePassword 时 UPDATE 为 NOW();
+    -- JWT middleware 比对 tokens_valid_after > iat 时拒绝。
+    -- 默认为 'epoch'(1970-01-01),表示「未启用强制登出」,永远不拒绝现有 token。
+    tokens_valid_after timestamptz not null default 'epoch',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
 
 create unique index if not exists users_external_user_id_uidx
     on users (external_user_id);
+
+-- v9: 注册用户的 email 必须唯一;但 external_user_id(JWT 占位)用户的 email=''
+-- 不参与唯一约束(partial index)。
+create unique index if not exists users_email_active_uidx
+    on users (email)
+    where email <> '';
+
+-- v9: 登录风控表。记录每次 login 尝试(成功 + 失败)+ IP,
+-- 给 ratelimit 模块用,以及审计回溯。
+-- 注意:不存明文密码、错误密码 hash,只存 success / email / ip。
+create table if not exists login_attempts (
+    id uuid primary key,
+    email text not null,
+    ip text not null,
+    success boolean not null,
+    user_id uuid,
+    created_at timestamptz not null default now()
+);
+
+create index if not exists login_attempts_ip_time_idx
+    on login_attempts (ip, created_at desc);
+
+create index if not exists login_attempts_email_time_idx
+    on login_attempts (email, created_at desc);
 
 create table if not exists permissions (
     id uuid primary key,

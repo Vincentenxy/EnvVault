@@ -11,6 +11,9 @@ EnvVault is a lightweight, self-hostable secret management platform inspired by 
 - One-level folder structure with default folders: `globals` and `groups-secrets`.
 - Secret entries contain `.env` style `key`, encrypted `value`, and `comment`.
 - JWT authentication for externally issued tokens.
+- **Local email + password authentication** (v9): self-registration, login, logout, change password.
+  Passwords hashed with argon2id; rate-limited login with Redis sliding window; forced logout via
+  per-user `tokens_valid_after` timestamp.
 - RBAC authorization extension points.
 - PostgreSQL persistence.
 - Redis-backed secret search cache.
@@ -89,6 +92,16 @@ Common environment variables:
 - `ENVVAULT_AUTH_DEV_PRIVATE_KEY`
 - `ENVVAULT_AUTH_DEV_USER_ID`
 - `ENVVAULT_AUTH_DEV_USER_NAME`
+- `ENVVAULT_AUTH_PRIVATE_KEY` (v9, PKCS8 PEM, used to sign login JWTs)
+- `ENVVAULT_AUTH_REGISTER_ENABLED` (v9, default `true`, set `false` to disable `/auth/register`)
+- `ENVVAULT_AUTH_PASSWORD_MIN_LENGTH` (v9, default `12`)
+- `ENVVAULT_AUTH_LOGIN_RATE_LIMIT` (v9, default `5` failures per window)
+- `ENVVAULT_AUTH_LOGIN_RATE_LIMIT_WINDOW` (v9, default `60s`)
+- `ENVVAULT_AUTH_LOCKOUT_DURATION` (v9, default `15m`)
+- `ENVVAULT_AUTH_TOKENS_CACHE_REFRESH` (v9, default `1m`)
+- `ENVVAULT_AUTH_TOKEN_TTL` (v9, default `24h`)
+- `ENVVAULT_BOOTSTRAP_ADMIN_USER_ID` (grants `platform_admin` on startup)
+- `ENVVAULT_BOOTSTRAP_ADMIN_NAME`
 - `ENVVAULT_SECURITY_ENCRYPTION_KEY`
 - `ENVVAULT_DATABASE_HOST`
 - `ENVVAULT_DATABASE_PORT`
@@ -113,7 +126,7 @@ EnvVault uses action-style HTTP APIs:
 - Requests with data, including pagination, filters, IDs, and search keywords, use `POST` with a JSON body.
 - Special link-style flows may use `GET` with query parameters.
 - API request and response fields use camelCase, such as `parentId`, `folderId`, `scopeType`, and `externalUserId`.
-- Paginated requests use `pageNum` and `pageSize`; paginated responses use `data.pageNum`, `data.pageSize`, `data.total`, and `data.list`.
+- Paginated requests use `pageNum` and `pageSize`; paginated responses use `data.total` and `data.list`, and **on non-empty data** also include `data.pageNum` and `data.pageSize` (omitted on empty data — see `design/DESIGN.md`「分页响应 - 空数据形态」).
 - HTTP status codes describe transport-level status. The response body `code` is the business code: `0` means success, `-1` means generic failure, and special failures use codes greater than or equal to `1000`.
 
 All business responses follow this format:

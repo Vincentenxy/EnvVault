@@ -84,7 +84,7 @@ go fmt ./...
 - 分页、过滤条件、资源 ID、搜索关键字都视为请求数据，应使用 `POST`。
 - 特殊场景下，例如分享链接这类带参数但适合链接访问的流程，可以使用 `GET + query params`。
 - HTTP API 的请求字段和响应字段统一使用 camelCase，例如 `parentId`、`folderId`、`scopeType`、`externalUserId`。数据库表字段、SQL 列名和索引名可以继续使用 snake_case。
-- 分页请求统一复用 `PageRequest`，字段为 `pageNum` 和 `pageSize`；分页响应统一为 `{ "pageNum": 页码, "pageSize": 每页数量, "total": 总条数, "list": 数据列表 }`。
+- 分页请求统一复用 `PageRequest`，字段为 `pageNum` 和 `pageSize`；分页响应统一为 `{ "pageNum": 页码, "pageSize": 每页数量, "total": 总条数, "list": 数据列表 }`,**空数据时退化为 `{ "total": 0, "list": [] }`,省略 `pageNum` / `pageSize`**(由 `omitempty` 控制,见 `design/DESIGN.md`「分页响应 - 空数据形态」节)。
 - HTTP 状态码只表示 HTTP 传输层结果，响应体中的 `code` 是业务状态码，二者不能混用。
 - 成功响应业务码统一为 `0`，通用失败业务码统一为 `-1`；明确可区分的特殊错误码使用 `1000` 以上，例如参数错误、未认证、无权限、资源不存在、服务不可用。
 - 成功响应优先使用 `response.OK`，需要自定义成功消息时使用 `response.OkWithMsg`；通用失败优先使用 `response.FailWithMsg`，特殊错误使用 `response.Fail` 并传入明确业务码。
@@ -106,6 +106,25 @@ go fmt ./...
 - JWT 校验应通过中间件统一执行。
 - 授权检查应尽量靠近 service 操作本身，不应只依赖路由注册时的控制。
 - 密钥创建、更新、删除以及关键元数据变化都应记录变更历史。
+
+## 认证 & 用户（v9）
+
+v9 起，EnvVault 支持本地 email+password 自助注册/登录，端点定义在 `design/api/core.yaml`。
+实现位置：`internal/auth/password.go`（argon2id）、`internal/auth/ratelimit/`（Redis 频控）、
+`internal/auth/tokens_cache.go`（强制登出锚点缓存）、`internal/service/auth_service.go`（业务编排）、
+`internal/store/postgres/auth.go`（`AuthStore` 落库）、`internal/http/controller/auth.go`（HTTP 层）。
+
+- 密码哈希使用 argon2id（`m=64MiB, t=3, p=2`，PHC 字符串格式），**禁止**写入 bcrypt / 明文 / SHA。
+- 登录密码与 12 位最小长度（配置 `auth.passwordMinLength`，默认 12）由 `AuthService.Login` 校验。
+- 登录频控：同一 IP 在 `window`（默认 60s）内 `maxAttempts`（默认 5）次失败后锁 `lockoutPeriod`（默认 15min）。
+  Redis 未启用时降级为 noop（开发态）。详见 `internal/auth/ratelimit/ratelimit.go`。
+- 强制登出：`users.tokens_valid_after` 字段 + 进程内 `TokensCache`（refresher 周期 1min）。
+  Logout/ChangePassword 必 bump；JWT iat < tokens_valid_after 的请求 1401。
+- 任何 password 都不应出现在日志、panic 信息、错误响应中。
+- 错误响应统一返回 `401 1401`（不区分「邮箱不存在」与「密码错误」）以避免枚举攻击。
+- 自注册写 `login_attempts` 审计行，不论成功失败，保留 IP 与 email 索引。
+- 单元测试应覆盖：argon2id roundtrip、ratelimit 阈值/锁定/重置、TokensCache refresher 失败降级、
+  `AuthService` 4 个方法的 happy/拒绝路径、`AuthStore` 首个 password 用户自动 platform_admin 的并发安全。
 
 ## 搜索与并发
 

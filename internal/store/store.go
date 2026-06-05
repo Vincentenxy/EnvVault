@@ -66,6 +66,11 @@ type ResourceRepository interface {
 	CreateFolder(ctx context.Context, environmentId, parentFolderId, code, name, comment, actor string, level int) (domain.Entity, error)
 	// ListFolders 按 caller 在 (folder, environment, project, organization) 层的 binding 收窄。
 	ListFolders(ctx context.Context, callerUserId, envId, parentId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
+	// ListFolderChildren 批量拉取多个父 folder 下的 level=2 子 folder;按 caller 在
+	// (folder, environment, project, organization) 层的 binding 收窄。
+	// 空 parentIds 直接返回空 map(不发 SQL);返回 map 始终非 nil(空 key 不出现,
+	// 空数组也不会 nil)。handler 在 includeSubfolders=true 时调用,把父→子关系拼到响应里。
+	ListFolderChildren(ctx context.Context, callerUserId string, parentIds []string) (map[string][]domain.Entity, error)
 	GetFolder(ctx context.Context, id string) (domain.Entity, error)
 	GetFolderByCode(ctx context.Context, environmentId, code string) (domain.Entity, error)
 	// GetFolderContext 返回 cache 同步所需的 folder 全量上下文(envId/projectId/parentId/level)。
@@ -88,6 +93,12 @@ type ResourceRepository interface {
 
 	// ---- Secret ----
 	CreateSecret(ctx context.Context, folderId, key, comment, actor string, ciphertext domain.SecretCiphertext) (domain.Secret, error)
+	// BatchCreateSecrets 在单事务里完成 N 条 INSERT + 1 条 batch audit,
+	// 全成功 commit;任一条 INSERT 失败(unique violation 等)→ 整批 rollback,
+	// 错误透传(service 层翻译为 1409)。每条插入单独 RETURNING id,
+	// commit 后用 r.GetSecret 拿完整 metadata(带 path/codes)。
+	// 输入 items 长度应等于 N,顺序与输出 secrets 一致。
+	BatchCreateSecrets(ctx context.Context, items []BatchCreateSecretItem) ([]domain.Secret, error)
 	GetSecret(ctx context.Context, id string) (domain.Secret, error)
 	GetSecretByKey(ctx context.Context, folderId, key string) (domain.Secret, error)
 	GetSecretByPath(ctx context.Context, orgCode, projectCode, envCode, folderCode, key string) (domain.Secret, error)
@@ -149,4 +160,66 @@ type SecretCache interface {
 	UpsertSecret(ctx context.Context, record domain.SecretCacheRecord) error
 	DeleteSecret(ctx context.Context, id string) error
 	WarmSecrets(ctx context.Context, records []domain.SecretCacheRecord) error
+}
+
+// BatchCreateSecretItem 是 ResourceRepository.BatchCreateSecrets 的输入单元:
+// 一条待插入 secret 的全部信息(folder/key/comment/actor + 已加密 ciphertext)。
+// 顺序与 BatchCreateSecrets 返回的 []Secret 一一对应。
+type BatchCreateSecretItem struct {
+	FolderId   string
+	Key        string
+	Comment    string
+	Actor      string
+	Ciphertext domain.SecretCiphertext
+}
+
+// AuthRepository 持久化 v9 自注册 / 登录 / 强制登出 / 改密 相关数据。
+//
+// 与 RBACRepository 的边界:
+//   - RBACRepository 管「用户是谁、能干啥」 → external_user_id 体系 + role binding
+//   - AuthRepository 管「用户怎么登录、何时失效」 → email + password_hash +
+//     tokens_valid_after + login_attempts
+//
+// 两边不重叠,但都通过 external_user_id 关联到同一张 users 行。
+type AuthRepository interface {
+	// ---- User with credentials ----
+	// GetUserByEmail 拿 (id, external_user_id, name, password_hash, password_algo,
+	// is_disabled, tokens_valid_after, last_seen_at)。
+	// password_hash/password_algo 在 domain.User 上是 json:"-"(永不外泄),
+	// 真实 hash 始终在 service 层 VerifyPassword 内部消化,handler 看不到。
+	GetUserByEmail(ctx context.Context, email string) (domain.User, error)
+	// GetUserById 按内部 id (uuid) 查 user。
+	GetUserById(ctx context.Context, id string) (domain.User, error)
+	// GetUserByExternalId 按 external_user_id 查 user(JWT subject 直接对应)。
+	GetUserByExternalId(ctx context.Context, externalUserId string) (domain.User, error)
+	// BumpTokensValidAfterByExternalId 强制登出。返新时间戳。
+	BumpTokensValidAfterByExternalId(ctx context.Context, externalUserId string) (time.Time, error)
+	// UpdatePasswordHashByExternalId 改密。原子 bump tokens_valid_after。
+	UpdatePasswordHashByExternalId(ctx context.Context, externalUserId, passwordHash, passwordAlgo string) (domain.User, error)
+	// CreatePasswordUser 在事务里 atomic 完成:
+	//   1) INSERT users (..., source='password', password_hash, password_algo)
+	//   2) 若 users 表当前行数 = 0(本事务内),额外 grant platform_admin(global)
+	// 返回的 User 已包含 id / external_user_id(由 repo 内部用 email 生成)。
+	CreatePasswordUser(ctx context.Context, email, name, passwordHash, passwordAlgo string) (domain.User, error)
+	// UpdatePasswordHash 改密。原子地:UPDATE password_hash / password_algo +
+	// tokens_valid_after = NOW()(让旧 token 立即失效)。返回更新后 user。
+	UpdatePasswordHash(ctx context.Context, userId, passwordHash, passwordAlgo string) (domain.User, error)
+	// BumpTokensValidAfter 强制登出。UPDATE tokens_valid_after = NOW()。
+	// 不需要返 user,但需要返新时间戳(给 cache 同步)。
+	BumpTokensValidAfter(ctx context.Context, userId string) (time.Time, error)
+	// GetTokensValidAfter 拉单个用户的 tokens_valid_after。给 cache 初始化 / 校正用。
+	GetTokensValidAfter(ctx context.Context, userId string) (time.Time, error)
+	// ListUsersWithTokensValidAfter 拉全量 (userId, tokensValidAfter)。
+	// 进程内 tokens_cache 启动时 / 周期 refresher 用。
+	ListUsersWithTokensValidAfter(ctx context.Context) (map[string]time.Time, error)
+	// TouchLastSeen 登录成功后 UPDATE last_seen_at = NOW()。
+	TouchLastSeen(ctx context.Context, userId string) error
+
+	// ---- Login attempts (风控 + 审计) ----
+	// RecordLoginAttempt 写一行 login_attempts。
+	// userId 可空(login 失败时连 user 都不存在,userId='' 即可)。
+	RecordLoginAttempt(ctx context.Context, email, ip string, success bool, userId string) error
+	// CountRecentFailedByIP 统计 [now-window, now] 区间内 ip 的失败次数。
+	// 给 ratelimit 用;返回的次数含本次(若调用方先 Record 再 Count)。
+	CountRecentFailedByIP(ctx context.Context, ip string, window time.Duration) (int, error)
 }

@@ -58,6 +58,15 @@ func (c *Cache) Close() error {
 	return c.client.Close()
 }
 
+// Client 暴露底层 redis client。给 v9 ratelimit 等需要直连 redis 的能力复用。
+// 返回 UniversalClient,既支持单机也支持 cluster/sentinel。
+func (c *Cache) Client() goredis.UniversalClient {
+	if c == nil {
+		return nil
+	}
+	return c.client
+}
+
 func (c *Cache) WarmSecrets(ctx context.Context, records []domain.SecretCacheRecord) error {
 	if c == nil {
 		return nil

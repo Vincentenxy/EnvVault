@@ -27,6 +27,7 @@ type Dependencies struct {
 	Secret     service.SecretService
 	RBAC       service.RBACService
 	Tree       service.TreeService
+	Auth       service.AuthService
 	Authorizer auth.Authorizer
 	Cache      *redis.Cache
 	Database   interface {
@@ -41,6 +42,7 @@ type Controller struct {
 	secret     service.SecretService
 	rbac       service.RBACService
 	tree       service.TreeService
+	auth       service.AuthService
 	authorizer auth.Authorizer
 	cache      *redis.Cache
 	database   interface {
@@ -55,6 +57,7 @@ func New(deps Dependencies) *Controller {
 		secret:     deps.Secret,
 		rbac:       deps.RBAC,
 		tree:       deps.Tree,
+		auth:       deps.Auth,
 		authorizer: deps.Authorizer,
 		cache:      deps.Cache,
 		database:   deps.Database,

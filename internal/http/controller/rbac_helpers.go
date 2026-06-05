@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -155,12 +156,57 @@ func paginationFromRequest(req PageRequest) domain.Pagination {
 	return domain.Pagination{PageNum: req.PageNum, PageSize: req.PageSize}.Normalize()
 }
 
+// pageData 把 service 层的 PaginatedResult + 请求分页参数打包成 PageResp。
+//
+// 当 items 为空(nil / 长度 0)时:
+//   - pageNum / pageSize 设为 0(由 `omitempty` 省略)→ 响应退化为 {total, list}
+//   - list 用反射转换为同类型空 slice,避免 marshaling 出 `null` 而非 `[]`
+//
+// 非空时正常返回 pageNum / pageSize,供调用方确认服务端归一化后的分页上下文。
+// 规则见 `design/DESIGN.md`「分页响应 - 空数据形态」节。
 func pageData(items any, total int64, pagination domain.Pagination) PageResp {
 	pagination = pagination.Normalize()
+	if isEmptyList(items) {
+		return PageResp{
+			Total: total,
+			List:  emptyListOfSameType(items),
+		}
+	}
 	return PageResp{
 		PageNum:  pagination.PageNum,
 		PageSize: pagination.PageSize,
 		Total:    total,
 		List:     items,
 	}
+}
+
+// isEmptyList 判断 items 是否应该走「空数据形态」。
+//   - nil 接口 → 空
+//   - 任意 slice 类型的 nil 或长度 0 → 空
+//   - 其它类型按非空处理(分页响应只可能接 slice,防御性兜底)
+func isEmptyList(items any) bool {
+	if items == nil {
+		return true
+	}
+	v := reflect.ValueOf(items)
+	if v.Kind() != reflect.Slice {
+		return false
+	}
+	return v.Len() == 0
+}
+
+// emptyListOfSameType 把 items 转换为同 slice 类型的空 slice(非 nil),
+// 保证 `json.Marshal` 出 `[]` 而非 `null`。
+//   - items 为 nil 接口 → 返回 `[]any{}`
+//   - items 为 nil slice → 用 reflect.MakeSlice 构造同类型空 slice
+//   - 其它类型原样返回(防御性兜底)
+func emptyListOfSameType(items any) any {
+	if items == nil {
+		return []any{}
+	}
+	v := reflect.ValueOf(items)
+	if v.Kind() != reflect.Slice {
+		return items
+	}
+	return reflect.MakeSlice(v.Type(), 0, 0).Interface()
 }

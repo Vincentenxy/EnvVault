@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v4"
@@ -133,4 +134,161 @@ func testRSAKeyPair(t *testing.T) (*rsa.PrivateKey, string) {
 	}
 	publicKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicKeyDER})
 	return privateKey, string(publicKeyPEM)
+}
+
+func TestClaims_IsRevokedBy(t *testing.T) {
+	issued := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		c    *Claims
+		tva  time.Time
+		want bool
+	}{
+		{
+			name: "no tva set",
+			c:    &Claims{RegisteredClaims: jwt.RegisteredClaims{IssuedAt: jwt.NewNumericDate(issued)}},
+			tva:  time.Time{},
+			want: false,
+		},
+		{
+			name: "iat before tva → revoked",
+			c:    &Claims{RegisteredClaims: jwt.RegisteredClaims{IssuedAt: jwt.NewNumericDate(issued)}},
+			tva:  issued.Add(time.Minute),
+			want: true,
+		},
+		{
+			name: "iat equal tva → not revoked",
+			c:    &Claims{RegisteredClaims: jwt.RegisteredClaims{IssuedAt: jwt.NewNumericDate(issued)}},
+			tva:  issued,
+			want: false,
+		},
+		{
+			name: "iat after tva → not revoked",
+			c:    &Claims{RegisteredClaims: jwt.RegisteredClaims{IssuedAt: jwt.NewNumericDate(issued)}},
+			tva:  issued.Add(-time.Minute),
+			want: false,
+		},
+		{
+			name: "iat missing → not revoked (conservative)",
+			c:    &Claims{},
+			tva:  issued,
+			want: false,
+		},
+		{
+			name: "nil claims → not revoked",
+			c:    nil,
+			tva:  issued,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.c.IsRevokedBy(tc.tva); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestJWTMiddleware_RevokedByTokensValidAfter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	privateKey, publicKeyPEM := testRSAKeyPair(t)
+
+	iat := time.Now().Add(-time.Hour) // 1h 前签发
+	claims := Claims{
+		UserId: "user-1",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   "user-1",
+			IssuedAt:  jwt.NewNumericDate(iat),
+			ExpiresAt: jwt.NewNumericDate(iat.Add(2 * time.Hour)),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tokenString, err := token.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("SignedString: %v", err)
+	}
+
+	// cache: tokensValidAfter 在 iat 之后 → 应被 401
+	cache := NewTokensCache(TokensCacheOptions{})
+	cache.Set("user-1", iat.Add(time.Minute))
+
+	router := gin.New()
+	router.Use(JWTMiddleware(JWTConfig{PublicKey: publicKeyPEM, TokensCache: cache}))
+	router.GET("/me", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJWTMiddleware_AllowedWhenTokensValidAfterBeforeIAT(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	privateKey, publicKeyPEM := testRSAKeyPair(t)
+
+	iat := time.Now().Add(-time.Hour)
+	claims := Claims{
+		UserId: "user-1",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   "user-1",
+			IssuedAt:  jwt.NewNumericDate(iat),
+			ExpiresAt: jwt.NewNumericDate(iat.Add(2 * time.Hour)),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tokenString, err := token.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("SignedString: %v", err)
+	}
+
+	// cache: tokensValidAfter 在 iat 之前 → 200
+	cache := NewTokensCache(TokensCacheOptions{})
+	cache.Set("user-1", iat.Add(-time.Minute))
+
+	router := gin.New()
+	router.Use(JWTMiddleware(JWTConfig{PublicKey: publicKeyPEM, TokensCache: cache}))
+	router.GET("/me", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJWTMiddleware_NoCache_Allows(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	privateKey, publicKeyPEM := testRSAKeyPair(t)
+
+	iat := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, Claims{
+		UserId: "user-1",
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt:  jwt.NewNumericDate(iat),
+			ExpiresAt: jwt.NewNumericDate(iat.Add(time.Hour)),
+		},
+	})
+	tokenString, _ := token.SignedString(privateKey)
+
+	// TokensCache nil → 跳过强制登出校验
+	router := gin.New()
+	router.Use(JWTMiddleware(JWTConfig{PublicKey: publicKeyPEM}))
+	router.GET("/me", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 when cache nil, got %d", rec.Code)
+	}
 }

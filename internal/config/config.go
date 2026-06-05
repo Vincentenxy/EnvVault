@@ -27,12 +27,28 @@ type HTTPConfig struct {
 }
 
 type AuthConfig struct {
-	Enabled         bool   `mapstructure:"enabled"`
-	PublicKey       string `mapstructure:"public_key"`
+	Enabled   bool   `mapstructure:"enabled"`
+	PublicKey string `mapstructure:"public_key"`
+	// v9 生产用私钥(RSA / ECDSA / Ed25519 PEM)。若空,Register / Login 不可用。
+	PrivateKey      string `mapstructure:"private_key"`
 	DevTokenEnabled bool   `mapstructure:"dev_token_enabled"`
 	DevPrivateKey   string `mapstructure:"dev_private_key"`
 	DevUserId       string `mapstructure:"dev_user_id"`
 	DevUserName     string `mapstructure:"dev_user_name"`
+	// v9 自注册开关;默认 true。false 时 POST /auth/register 返 403。
+	RegisterEnabled bool `mapstructure:"register_enabled"`
+	// v9 密码最小长度;默认 12。
+	PasswordMinLength int `mapstructure:"password_min_length"`
+	// v9 登录 IP 频控:窗口内允许的最大失败次数;默认 5。
+	LoginRateLimit int `mapstructure:"login_rate_limit"`
+	// v9 登录频控窗口;默认 1min。
+	LoginRateLimitWindow time.Duration `mapstructure:"login_rate_limit_window"`
+	// v9 触发 lockout 后的封禁时长;默认 15min。
+	LockoutDuration time.Duration `mapstructure:"lockout_duration"`
+	// v9 进程内 tokens_valid_after 缓存的全量刷新周期;默认 1min。
+	TokensCacheRefresh time.Duration `mapstructure:"tokens_cache_refresh"`
+	// v9 JWT 有效期;默认 24h。
+	TokenTTL time.Duration `mapstructure:"token_ttl"`
 }
 
 type SecurityConfig struct {
@@ -181,6 +197,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.dev_token_enabled", false)
 	v.SetDefault("auth.dev_user_id", "dev-user")
 	v.SetDefault("auth.dev_user_name", "Dev User")
+	v.SetDefault("auth.register_enabled", true)
+	v.SetDefault("auth.password_min_length", 12)
+	v.SetDefault("auth.login_rate_limit", 5)
+	v.SetDefault("auth.login_rate_limit_window", time.Minute)
+	v.SetDefault("auth.lockout_duration", 15*time.Minute)
+	v.SetDefault("auth.tokens_cache_refresh", time.Minute)
+	v.SetDefault("auth.token_ttl", 24*time.Hour)
 	v.SetDefault("database.host", "127.0.0.1")
 	v.SetDefault("database.port", 5432)
 	v.SetDefault("database.user", "admin")

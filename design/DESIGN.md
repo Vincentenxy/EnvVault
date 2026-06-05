@@ -853,6 +853,8 @@ security:
 - v6 起所有 delete 操作按"父 → 子"级联软删,避免孤儿行;`org` 级删除需 `force=true` 触发 4 级级联,需要额外 `org:force_delete` 权限。
 - v7 起 list 接口按 caller 的 `user_role_bindings` 自动收窄可见作用域(`ListOrganizations` / `ListProjects` / `ListEnvironments` / `ListEnvironmentTemplates` / `ListFolders` / `ListSecrets`);controller 入口不再做 `allowScope`,repo SQL 自身完成 cascade narrowing;无 binding 的 user 拿到空 list(隐式空 list,不返 403)。
 - v8 起新增 `POST /api/v1/secret/path/batchReveal` 批量 reveal 接口:按 `org.proj.env.folder` 4 段路径 + 可选 keys 列表,**一次性**返回所有命中 key 的明文 + 元数据。**不分页**、**无上限**(用户决策);复用 v7 cascade narrowing(`secret:reveal` 权限自动从 secret / folder / env / project / org 任何一层 binding 向下展开);**整批 1 条 audit**(`action="reveal_batch"`,`resource_type="folder"`,`encrypted_value=jsonb([keys...])`)。
+- v9 起新增认证 & 用户管理:4 个端点(`/auth/register` `/auth/login` `/auth/logout` `/auth/changePassword`),argon2id 密码哈希 + Redis sliding window 频控 + 进程内 `TokensCache` 强制登出。
+- v10 起 `POST /api/v1/folder/list` 在 `environmentId` 模式下支持 `includeSubfolders: true` 开关:响应里每个父 folder 多带 `subfolders: [Entity, ...]`,一次性拉完两级目录,消除 N+1 round-trip。`folderParentId` 模式不支持(只到 level=2),传了 true 直接 400。
 
 完整 RBAC 设计、实现细节和权限矩阵以 [rbac_degisn.md](rbac_degisn.md) 为准。
 
@@ -1125,6 +1127,256 @@ v8 决策:整批 1 条 audit,`resource_type="folder"`,`resource_id=<folder.id>`,
 | 缓存 | Search 走 cache(已废弃) | 不走 cache(同 Reveal) |
 | 数量上限 | pageSize (200) | **无上限**(用户决策) |
 
+### Folder list 嵌套子 folder（v10）
+
+`POST /api/v1/folder/list` 在 `environmentId` 模式(level=1 父列表)下,前端通常还要
+对每个父 folder 再调一次 list(传 `folderParentId`)才能拼出两级树。在 env 下 folder
+数量不大时,这 N+1 次往返既慢又费 audit/audit-quota。v10 给 `environmentId` 模式
+加一个 `includeSubfolders` 开关,触发后响应里每个父 folder 多带
+`subfolders: [Entity, ...]`,一次性把两级目录拉完。
+
+#### 请求
+
+```json
+{
+  "pageNum": 1,
+  "pageSize": 20,
+  "environmentId": "uuid",
+  "folderParentId": "",
+  "includeSubfolders": true
+}
+```
+
+校验:
+- `environmentId` 与 `folderParentId` 互斥(已有)。
+- `includeSubfolders=true` 时必须传 `environmentId`,否则
+  `400 1002 includeSubfolders only valid with environmentId`。
+
+#### 响应
+
+触发 `includeSubfolders=true` 时,`data.list` 的元素从 `Entity` 升级为
+`FolderWithSubfolders`(用 `allOf: [Entity, { subfolders: [Entity] }]` 表达;
+无子 folder 时 `subfolders: []`,与 `tree.get` 同款约定,前端不用判 null):
+
+```json
+{
+  "code": 0,
+  "data": {
+    "pageNum": 1,
+    "pageSize": 20,
+    "total": 3,
+    "list": [
+      {
+        "id": "folder-1", "parentId": "env-id", "code": "globals", "name": "Globals",
+        "comment": "", "createdBy": "...", "createdByLabel": "...", "updatedBy": "...",
+        "createdAt": "...", "updatedAt": "...",
+        "subfolders": [
+          { "id": "folder-1-1", "parentId": "folder-1", "code": "aws", "name": "AWS", ... },
+          { "id": "folder-1-2", "parentId": "folder-1", "code": "db",  "name": "DB",  ... }
+        ]
+      },
+      {
+        "id": "folder-2", "parentId": "env-id", "code": "groups-secrets", "name": "Group Secrets",
+        "subfolders": []
+      }
+    ]
+  }
+}
+```
+
+`data.total` 仍只计父 folder 数量;`subfolders` 不参与分页(env 下子 folder 数量
+天然受父 folder 数量约束,无分页必要)。不传 `includeSubfolders` 或 `false` 时,
+响应 list 项完全等同现有 `Entity`,**不带** `subfolders` 字段(omitempty),
+**与历史 100% 兼容**。
+
+#### 权限
+
+子 folder 走与父 folder 同样的 `folder:read` narrowing,复用 v7 已有的
+`userReadScopeCTE` / `narrowingPredicate` / `scopeNarrowingWhere`;
+narrowing chain 与 `ListFolders` 一致:`(folder, environment, project, organization)`。
+一个 env 下的所有父+子 folder 必须各自通过 narrowing,自然收敛到 caller 可见子集;
+父通过但子不通过 → 子不出现在 `subfolders`(可能是空数组)。
+
+#### 实现要点
+
+- 新增 `ResourceRepository.ListFolderChildren(ctx, callerUserId, parentIds) (map[string][]Entity, error)`:
+  - 复用 `entityReadColumns("parent_id")` 让 level=2 folder 的 `Entity.ParentId` 字段
+    自动取 `parent_id` 列(父 folder id);
+  - narrowing entries `[(folder, t.id), (environment, t.environment_id), (project, p.id), (organization, p.org_id)]`;
+  - 单 SQL `WHERE t.parent_id = ANY($3::uuid[])`;
+  - `ORDER BY t.parent_id ASC, t.name ASC` 便于 Go 端按 `t.parent_id` 分组装 `map`;
+  - 空 `parentIds` 直接返回空 map(不发 SQL);返回 map 始终非 nil。
+- Handler:ListFolders 在 `includeSubfolders=true` 时,先调 `ListFolders` 拿父列表,再
+  用父列表的 `id` 集合调 `ListFolderChildren`,把结果按父 id 拼到响应里。空子 folder
+  兜底为 `[]Entity{}`,JSON 出 `[]` 而非 `null`。
+
+#### 风险与权衡
+
+- **响应体膨胀**:env 下 50 个 folder,每个 10 个子 folder → 500 行 Entity。属可接受范围;
+  未来若发现过度,可加 per-parent 上限。
+- **隐式授权泄露面**:子 folder 走 narrowing,但父 folder 已经过 narrowing,所以没有
+  额外泄露面;反过来若父不通过,子不会出现在 `subfolders`(整个父都不在 list 里)。
+- **DTO 命名**:用 `Subfolders`(复数)避开与 `Entity.ParentId` 的命名;
+  `Entity` 自身没有 `subfolders` 字段(纯 entity,无 children 概念),不会冲突。
+- **回退**:DTO 加字段对现有调用方透明;完全独立方法 `ListFolderChildren` 不影响
+  `ListFolders` 行为。
+- **审计**:不新增 audit 事件(list 本身不写 audit)。
+
+### Secret 批量创建（v11）
+
+`POST /api/v1/secret/create` 是单条创建。当用户要在一个 project 下多个 env
+（dev / test / sim / prod）里给同一个 key（如 `DATABASE_URL`）设置不同 value 时，
+需要 N 次 round-trip、N 次权限校验 + N 条 audit。v11 新增
+`POST /api/v1/secrets/batchCreate`（注意：复数 `secrets`，与单条 `/secret/*`
+区分，**单独路由组**）：**一次请求**由客户端**显式指定每个 env 的目标 folderId**
++ value，**单事务**完成 N 条 INSERT + 1 条 batch audit，全成功或全 rollback。
+
+#### 业务语义
+
+- **无 template folder 机制**：v11 不再有"通过 folderId.code 跨 env 找同名 folder"
+  的服务端推断；客户端在每个 env 字段里**显式**指定 `folderId` + `value`。
+  理由：env 字段硬编码为项目下标准 4 个（dev/test/sim/prod），每个 env 的目标
+  folder 是客户端已知的业务事实；让客户端显式表达减少服务端的隐式查找和失败面。
+- **env 字段硬编码**：`dev` / `test` / `sim` / `prod` 是项目下标准 4 env；每个
+  字段为可选 `*secretBatchEnvValue{FolderId, value}`（nil 表示该 env 不创建）。
+  顺序固定为 `dev → test → sim → prod`，用于 audit 列举和 cache 键构造。
+- **每条 item 至少要指定一个 env**：4 个 env 字段全为 nil 视为该 item 无效，整条拒绝。
+- **整批原子**：任一阶段失败（入参校验 / 权限 / 冲突 / 内部错误）即整批拒绝，
+  不会部分写入。
+
+#### 请求
+
+```json
+{
+  "secretList": [
+    {
+      "key": "DATABASE_URL",
+      "comment": "数据库url",
+      "dev":  { "folderId": "f-dev-uuid",  "value": "postgres://dev.local/db"  },
+      "test": { "folderId": "f-test-uuid", "value": "postgres://test.local/db" },
+      "sim":  { "folderId": "f-sim-uuid",  "value": "postgres://sim.local/db"  },
+      "prod": { "folderId": "f-prod-uuid", "value": "postgres://prod.local/db" }
+    }
+  ]
+}
+```
+
+只指定部分 env（例：只 `dev` + `prod`）也合法；4 个 env 全留空则该 item 被拒绝。
+
+#### 响应（成功，HTTP 200）
+
+```json
+{
+  "code": 0,
+  "msg": "success",
+  "data": null
+}
+```
+
+成功响应极简：HTTP 200 + `code: 0` + `data: null`。客户端按需用 `secretList` /
+`secret/path/info` 反查 metadata。
+
+#### 失败响应（**统一 HTTP 200 + code=-1**）
+
+```json
+{
+  "code": -1,
+  "msg": "创建失败，secret 已存在",
+  "data": null
+}
+```
+
+| 失败场景 | `msg` 格式 | `code` |
+| --- | --- | --- |
+| 入参校验失败（空 secretList / 缺 key / 缺 folderId / key 格式错） | `入参校验，<错误描述>` | `-1` |
+| 权限不足（任一 target folder 缺 `secret:create`） | `创建失败，权限不足` | `-1` |
+| 目标 folder 不存在 | `创建失败，目标 folder 不存在` | `-1` |
+| (folder, key) 冲突（unique violation） | `创建失败，secret 已存在` | `-1` |
+| 加密 / DB / 缓存等其他内部错误 | `创建失败，<err.Error()>` | `-1` |
+
+> **关键设计决策**：本端点**所有失败统一 code=-1**。这与「业务错也 HTTP 200」
+> 的 v11 起点一致，把所有"入参错 / 权限 / 冲突 / 内部错误"统统走同一条出口，
+> 前端只需判定 `body.code != 0` 即失败，无需区分 -1 / 1403 / 1409。
+> `msg` 中文描述提供足够信息供前端展示。`auth.ErrPermissionDenied` /
+> `domain.ErrNotFound` / `domain.ErrConflict` 在 controller 端用 `errors.Is` 翻译
+> 成固定文案；其他 err 走 `err.Error()` 原文。
+
+#### 事务与 audit
+
+与 v8 `batchReveal` 同款「单事务 N 条 INSERT + 1 条 batch audit」范式：
+
+- `repo.BatchCreateSecrets(items)`：`BeginTx` → 循环 N 条
+  `INSERT INTO secrets RETURNING id` → 1 条
+  `recordAuditTx(action="create_batch", resource_type="folder",
+  resource_id=第一条 item 的 folder_id,
+  encrypted_value=jsonb([{envCode, key, secretId}, ...]))` → `Commit`。
+- 任一 INSERT 失败（PG `23505` unique violation 等）→ `defer tx.Rollback()` 触发，
+  err 透传，service 层 `errors.Is(err, domain.ErrConflict)` 检测（`translatePgErr`
+  已做 unique violation → `domain.ErrConflict` 翻译）。
+- 成功 commit 后**不**走 `r.GetSecret` 二次查表（节省 N 次 round-trip）：
+  客户端如需 metadata 调 `secretList` / `secret/path/info` 即可。
+- commit 后逐条 `s.cacheUpsert(ctx, secret, ciphertext)` 同步到 Redis SecretCache，
+  顺序与 `targets` 一致。
+- 单条 audit 的 `resource_id` 选第一条 item 的 folder_id（共享同一个 folder 的
+  item 聚合时无歧义；多 folder 跨 project 场景罕见，且 audit 通过
+  `encrypted_value` 数组保留了完整 env×key 映射）。
+
+#### 权限
+
+对每个 (envCode, folderId, value) target **单独** `secret:create` 权限 check，
+走 v7 cascade narrowing `(folder → environment → project → organization)`。
+任一 target 拒绝即整批失败、err 透传为 `auth.ErrPermissionDenied`，controller
+翻译为 `msg: "创建失败，权限不足"`。
+
+#### 关键设计决策
+
+| 维度 | 决策 | 备注 |
+| --- | --- | --- |
+| 端点路径 | `/api/v1/secrets/batchCreate`（**复数** secrets，独立路由组） | 与单条 `/secret/*` 区分 |
+| env 字段 | 硬编码 4 个：`dev` / `test` / `sim` / `prod` | 项目下标准 4 env |
+| env 字段类型 | `*secretBatchEnvValue`（指针，可 nil） | nil 表示该 env 不创建 |
+| 目标 folder 指定 | 客户端显式（每个 env 字段自带 folderId） | 无服务端跨 env 推断 |
+| 入参校验 | secretList 非空 / key 合法 / 每条至少 1 个 env / 每个 env.folderId 非空 | controller 端 + service 端双重防御 |
+| 失败统一出口 | HTTP 200 + body code=-1 + msg 中文 | 不再分 1403/1409/1404/1500 |
+| 原子性 | **单事务**：N 条 INSERT + 1 条 batch audit | v8 batchReveal 范式 |
+| 业务码常量 | 新增 `CodeBatchCreateError = -1` | — |
+| 权限 | 每个 target folder 单独 `secret:create` check | v7 cascade narrowing |
+| Audit | 1 条 `action="create_batch"`，`resource_type="folder"`，`resource_id=第一条 item folder_id` | 整批 1 条 |
+| Cache | 同步 upsert 每条到 Redis SecretCache | 同 CreateSecret |
+
+#### 不支持的场景
+
+- `folderParentId` 嵌套 / `includeSubfolders` 嵌套（与单条 Create 保持一致）。
+- env 字段 `folderId` 为空字符串（整条 item 拒绝）。
+- 跨 project 批量创建（每条 item 各自的 folderId 必须在 caller 有 `secret:create`
+  权限；无 project 级批量语义，caller 需在每个目标 folder 上分别有权限）。
+- 非 4 标准 env 的项目（后续可按需扩展为 `envCodes []string` 数组 / map 形式）。
+
+#### 风险与权衡
+
+- **HTTP 200 + 业务错 vs 4xx**：本端点选择 200 + body code 是用户原始诉求
+  （「业务错也 HTTP 200」）。代价是：传统「HTTP status 判定」失效，前端 SDK
+  必须解析 body.code；服务端需在中间件/网关放行本端点的 200。后续如果需要
+  「HTTP 4xx 风格」，需要新加 `strict` query 参数或新端点。
+- **统一 code=-1 与多错误码的权衡**：本端点选择统一 `-1`（用户明确要求）
+  而不是分 1403/1409/1404。代价：前端拿不到精确错误类型；获益：实现简单、
+  失败面收窄、SDK 判定逻辑一致。`msg` 文案提供 enough info 给前端展示。
+- **整批 1 条 audit**：与 v8 batchReveal 一致；丢失的是「单条 secret 的精确
+  失败原因」——例如 4 条 INSERT 中第 3 条 23505，整批 rollback，但 audit 里只有
+  attempt 4 条的列表，没有"哪条冲突"。这与单条 `CreateSecret` 的"1 条 1 audit"
+  行为相比是损失，但换取 N 倍 round-trip + N 倍 audit 写入的节约。
+- **无 success response data**：成功时 `data: null`（不返 created[] 列表）。
+  客户端需要 metadata 走 `secretList` / `secret/path/info` 二次查询。节省
+  响应体大小 + 避免 N 个 secret 的 ciphertext 误传出（虽然 service 不填
+  `Secret.Value`，但 metadata 本身也含 `comment` / `createdBy` / `updatedBy`
+  等冗余信息）。
+- **env 字段硬编码**：项目下非 4 标准 env 的场景不支持。后续 v12 优化：把
+  `dev` / `test` / `sim` / `prod` 字段替换为 `envs: [{envCode, folderId, value}, ...]`
+  数组形式。当前硬编码对齐"项目下标准 4 env"的产品事实。
+- **回退**：若端点行为不被接受，handler / writer 集中在
+  `internal/http/controller/resource_secret_batch.go`，删一个文件 + 路由 + service
+  一个方法即可回退到 v10 状态。
+
 ## 日志与链路追踪
 
 HTTP 请求进入后读取请求头中的 request id，并写回响应头。默认请求头名称为：
@@ -1211,7 +1463,19 @@ x-request-id
 
 - `total`：符合查询条件的总条数。
 - `list`：当前页数据列表。
-- 分页响应必须返回 `pageNum`、`pageSize`，便于调用方确认服务端归一化后的分页上下文。
+- **空数据形态**：当 `list` 为空时(本次查询无数据返回),响应退化为
+  ```json
+  { "total": 0, "list": [] }
+  ```
+  `pageNum` / `pageSize` 字段**不出现**;服务端在 `pageData` 把这两个 int 字段设为 0
+  并由 `omitempty` 省略。这样前端「空数据」分支不用做 "pageNum undefined?" 的防御。
+- 非空时(`list` 长度 ≥ 1)仍按 `PageResp` 完整四字段返回
+  ```json
+  { "pageNum": 1, "pageSize": 20, "total": N, "list": [...] }
+  ```
+  便于调用方确认服务端归一化后的分页上下文。
+- `pageData` 用反射把 nil slice 转换为同类型的空 slice,保证 `json.Marshal` 出 `[]`
+  而非 `null`(Go 的 `encoding/json` 对 nil slice 输出 `null`)。
 - 不允许再使用 `organizations`、`projects`、`secrets` 等按资源类型命名的列表字段，所有分页列表统一使用 `list`。
 
 错误响应：
@@ -1626,3 +1890,103 @@ curl http://localhost:8080/api/v1/readyz
 - 当前 `secret_versions` 尚未实现，主表只保留最新 version 字段，缺少历史回滚能力。
 - 当前 `env_template:read` 权限码已注册但 RBAC authorizer 尚未接到 env/template 控制器，后续接入。
 - 当前 value 搜索尚未实现，详见 [search.md](search.md)。
+- 当前 tokens_valid_after 缓存为进程内,多实例部署下跨进程传播最迟 1min,极端场景(用户改密后立即跨进程访问)有窗口;后续可引入 Redis 共享层。
+
+## 认证 & 用户（v9）
+
+### 目标
+
+envVault 之前没有用户管理入口。`users` 表只由三条隐式路径写入:
+- `EnsureBootstrapAdmin`(通过 `ENVVAULT_BOOTSTRAP_ADMIN_USER_ID` 环境变量拉起第一个 admin)
+- `SyncUser`(JWT 用户首次调 `/rbac/user/me` 时 lazy 创建)
+- `GrantRole`(管理员授权时若 user 不存在则 upsert)
+
+前端无注册页,运维只能手工 bootstrap。本轮加 4 个端点,提供完整自注册 / 登录 / 强制登出 / 改密能力。
+
+### 端点
+
+| 路径 | 方法 | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| `/api/v1/auth/register` | POST | 匿名 | 自助注册;**首用户自动 platform_admin(global)** |
+| `/api/v1/auth/login` | POST | 匿名 | 邮箱 + 密码登录;**统一 `bad credentials`**(防 user enumeration) |
+| `/api/v1/auth/logout` | POST | JWT | 强制登出;旧 token 立即失效(本进程)+ 1min 内全集群同步 |
+| `/api/v1/auth/changePassword` | POST | JWT | 改密;成功后旧 token 全部失效 |
+
+### 用户身份模型
+
+- 沿用 `users.external_user_id` 作为「JWT subject」和「RBAC authorizer 入口」。
+- 自注册用户 `external_user_id = "email:<email>"`(前缀 `email:` 标识 source=`password`),与 JWT 占位 user(`source='jwt'`,external_user_id 形如 sub/uid)区分。
+- `users` 表新增 3 列:`password_hash` / `password_algo` / `tokens_valid_after`(默认 `epoch`)。
+- `email` 加 partial unique index:`where email <> ''`(JWT 占位 user email 为空,不影响唯一约束)。
+
+### 密码
+
+- 算法:**argon2id**,参数 `m=64 MiB` / `t=3` / `p=2`(OWASP 2023 推荐),salt 16 byte,key 32 byte。
+- 输出 PHC 字符串:`$argon2id$v=19$m=65536,t=3,p=2$<salt-b64>$<hash-b64>`,复用 `golang.org/x/crypto/argon2`。
+- 最小长度:12 字符(可配 `auth.password_min_length`)。无复杂度要求(OWASP 2023 已撤销复杂度建议)。
+- 校验走 `crypto/subtle.ConstantTimeCompare`,防 timing attack。
+
+### 强制登出策略
+
+JWT 本身无状态,服务端无法直接 revoke。本轮用 **「JWT 嵌入 + 进程内缓存比对」** 双层机制:
+
+1. **DB 侧**:`users.tokens_valid_after` 列,默认 `epoch`(永不拒绝);`Logout` / `ChangePassword` 流程 `UPDATE ... = NOW()`。
+2. **JWT 侧**:不需要额外 claim。middleware 用 `claims.IssuedAt`(标准 iat)即可。
+3. **校验**:`cache.Get(userId)` 拿到 `tokens_valid_after`,若 `iat < tokens_valid_after` → 401 `ErrTokenRevoked`。
+4. **进程内缓存**:`internal/auth.TokensCache`,key=userId,value=time;全量 loader + per-user loader,后台 goroutine 周期灌(默认 1min);Logout / ChangePassword 主动 Set,让本进程下一次请求立即生效。
+5. **跨实例**:各实例独立维护 cache,极端情况(用户在 A 实例 logout,B 实例还有 1min 旧 cache)最迟 1min 内通过 refresher 同步。
+6. **可接受 trade-off**:v9 锁定 web 单设备场景(用户决策),无多设备登出需求。若以后跨设备,需引入 Redis 共享层,改 `TokensCache` 后端实现。
+
+### 登录频控
+
+- Redis sliding window(sorted set)+ hard lockout key。
+- 参数(可配):5 次/1min/IP,触发后 15min lockout。
+- 实现位于 `internal/auth/ratelimit`,接口 `Limiter { Check, Record }`;fake 实现便于单测,生产用 `NewRedisLimiter(client, opts)` 包装 go-redis。
+- Check:先 EXISTS lockout key;再 ZCARD 失败计数;超阈值时 SetNX lockout(防止并发竞争)。
+- Record:成功 → DEL failures + lockout;失败 → ZADD 唯一 member(`<ts-ns>-<rand-hex>`,防同 ms 覆盖)+ ZREMRANGEBYSCORE 清过期。
+
+### 业务码
+
+| 错误 | HTTP | 业务码 | 说明 |
+| --- | --- | --- | --- |
+| `service.ErrInvalidArgument` | 400 | 1002 | 邮箱格式错 / 密码短 / name 空 |
+| `service.ErrEmailAlreadyExists` | 409 | 1409 | email 已被注册 |
+| `service.ErrBadCredentials` | 401 | 1401 | 邮箱不存在 / 密码错 / 用户被禁用 |
+| `ratelimit.ErrRateLimited` | 429 | 1429 | IP 频控锁 |
+
+`response.CodeRateLimited = 1429` 为本轮新增。
+
+### 配置(`config.AuthConfig`)
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | true | JWT 中间件是否启用 |
+| `public_key` | — | JWT 验签公钥(PEM,RSA/ECDSA/Ed25519) |
+| `private_key` | — | **本轮新增**:生产用私钥;Register / Login 签 token |
+| `register_enabled` | true | 关闭后 `/auth/register` 返 403 |
+| `password_min_length` | 12 | 密码最小长度 |
+| `login_rate_limit` | 5 | 窗口内允许的失败次数 |
+| `login_rate_limit_window` | 1min | 频控窗口 |
+| `lockout_duration` | 15min | 触发后封禁时长 |
+| `tokens_cache_refresh` | 1min | 后台灌全量周期 |
+| `token_ttl` | 24h | JWT 有效期 |
+
+### 关键文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `configs/schema.sql` | users +3 列,login_attempts 表,email partial unique |
+| `internal/domain/rbac.go` | User +3 字段 |
+| `internal/store/store.go` | AuthRepository 接口 |
+| `internal/store/postgres/auth.go` | AuthStore 实现 |
+| `internal/auth/password.go` | argon2id Hasher |
+| `internal/auth/ratelimit/ratelimit.go` | Redis sliding window Limiter |
+| `internal/auth/tokens_cache.go` | 进程内 cache + Refresher |
+| `internal/auth/jwt.go` | Claims + IsRevokedBy + JWTRegisteredClaimsAt + middleware 接入 cache |
+| `internal/service/auth_service.go` | AuthService 业务编排 |
+| `internal/http/controller/auth.go` | 4 个 handler + 错误码映射 |
+| `internal/http/router.go` | 4 个端点(2 匿名 + 2 JWT) |
+| `internal/app/app.go` | AuthStore / AuthService / TokensCache / 后台 Refresher / 真实 ratelimit 装配 |
+| `internal/http/response/response.go` | +CodeRateLimited = 1429 |
+| `internal/config/config.go` | AuthConfig +8 字段 |
+| `internal/store/redis/cache.go` | Client() accessor(给 ratelimit 复用) |

@@ -28,14 +28,23 @@ type Role struct {
 }
 
 // User is the read shape for users table.
+//
+// PasswordHash / PasswordAlgo / TokensValidAfter 是 v9 自注册 / 强制登出机制
+// 引入的字段;PasswordHash/PasswordAlgo 永不出现在 JSON 响应里(json:"-"),
+// 仅供 auth_service 内部 VerifyPassword / UpdatePasswordHash 用。
+// TokensValidAfter 暴露给 list/get 响应,供前端展示「上次登出时间」之类的
+// 调试信息;不暴露具体 hash 之前都是无害的。
 type User struct {
-	Id             string     `json:"id"`
-	ExternalUserId string     `json:"externalUserId"`
-	Name           string     `json:"name"`
-	Email          string     `json:"email"`
-	Source         string     `json:"source"`
-	IsDisabled     bool       `json:"isDisabled"`
-	LastSeenAt     *time.Time `json:"lastSeenAt,omitempty"`
+	Id               string     `json:"id"`
+	ExternalUserId   string     `json:"externalUserId"`
+	Name             string     `json:"name"`
+	Email            string     `json:"email"`
+	Source           string     `json:"source"`
+	IsDisabled       bool       `json:"isDisabled"`
+	LastSeenAt       *time.Time `json:"lastSeenAt,omitempty"`
+	PasswordHash     string     `json:"-"`
+	PasswordAlgo     string     `json:"-"`
+	TokensValidAfter *time.Time `json:"tokensValidAfter,omitempty"`
 }
 
 // RoleBinding is the read shape for user_role_bindings joined with users.

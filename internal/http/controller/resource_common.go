@@ -72,9 +72,15 @@ type PageRequest struct {
 	PageSize int `json:"pageSize"`
 }
 
+// PageResp 是 list 接口的统一分页响应载体。
+//
+// 当 list 为空(即本次查询无数据返回)时,pageNum / pageSize 字段会被 `pageData`
+// 设为 0 并由 `omitempty` 省略;响应体退化为 `{total: 0, list: []}`,避免误导
+// 调用方「我请求了 page 1,size 20 怎么回我的 pageNum 字段不见了」。
+// 详细规则见 `design/DESIGN.md`「分页响应 - 空数据形态」节。
 type PageResp struct {
-	PageNum  int   `json:"pageNum"`
-	PageSize int   `json:"pageSize"`
+	PageNum  int   `json:"pageNum,omitempty"`
+	PageSize int   `json:"pageSize,omitempty"`
 	Total    int64 `json:"total"`
 	List     any   `json:"list"`
 }
@@ -243,6 +249,22 @@ func validateListFolders(c *gin.Context, req listRequest) bool {
 	if envId != "" && parentId != "" {
 		logging.Warn(c.Request.Context(), "validateListFolders", "environmentId and folderParentId are mutually exclusive")
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "environmentId and folderParentId are mutually exclusive")
+		return false
+	}
+	return true
+}
+
+// validateListFoldersIncludeSubfolders 校验 includeSubfolders 开关只在 environmentId
+// 模式生效。当前 schema 只到 level=2,parent(folder) 模式返回的是 level=2 列表,
+// 再嵌一层 level=3 子 folder 没数据,前端也用不上,直接 400 拒绝。
+func validateListFoldersIncludeSubfolders(c *gin.Context, req folderListRequest) bool {
+	if !req.IncludeSubfolders {
+		return true
+	}
+	envId := strings.TrimSpace(req.EnvironmentId)
+	if envId == "" {
+		logging.Warn(c.Request.Context(), "validateListFoldersIncludeSubfolders", "includeSubfolders only valid with environmentId")
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "includeSubfolders only valid with environmentId")
 		return false
 	}
 	return true

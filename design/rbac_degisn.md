@@ -309,7 +309,9 @@ resource_id
 
 ### users
 
-保存外部 JWT 用户在 EnvVault 内的映射。
+保存外部 JWT 用户在 EnvVault 内的映射。v9 起,`users` 表同时承载本地 email+password 用户
+(`source = 'password'`),`external_user_id` 在本地密码用户场景下自动取 `email:<email>` 形式,
+保证唯一性约束不变。
 
 ```sql
 create table if not exists users (
@@ -317,7 +319,10 @@ create table if not exists users (
     external_user_id text not null,
     name text not null default '',
     email text not null default '',
-    source text not null default 'jwt',
+    source text not null default 'jwt',          -- 'jwt' | 'password'
+    password_hash text not null default '',
+    password_algo text not null default '',
+    tokens_valid_after timestamptz not null default 'epoch',
     is_disabled boolean not null default false,
     last_seen_at timestamptz,
     created_at timestamptz not null default now(),
@@ -326,6 +331,41 @@ create table if not exists users (
 
 create unique index if not exists users_external_user_id_uidx
     on users (external_user_id);
+
+-- v9:email 上加 partial unique index(只对非空 email 约束)
+-- 配合 password 用户唯一性。
+create unique index if not exists users_email_active_uidx
+    on users (email) where email <> '';
+```
+
+字段说明(v9 新增):
+
+| 字段 | 用途 |
+| --- | --- |
+| `source` | `jwt` = 外部 JWT 同步;`password` = 本地 email+password 用户 |
+| `password_hash` | argon2id PHC 字符串(`$argon2id$v=19$m=...,t=...,p=...$<salt>$<hash>`),source=jwt 时为空 |
+| `password_algo` | 算法标识,目前固定 `argon2id` |
+| `tokens_valid_after` | 强制登出锚点:任何 `iat < tokens_valid_after` 的 JWT 一律拒绝(中间件 401)。Logout / ChangePassword 时 bump 到 NOW() |
+
+### login_attempts(v9)
+
+登录频控审计。每次 `/auth/login` 调用必写一行(不论成功失败),`ip` 取 `c.ClientIP()`。
+
+```sql
+create table if not exists login_attempts (
+    id uuid primary key,
+    email text not null default '',
+    ip text not null default '',
+    success boolean not null default false,
+    user_id uuid references users(id),
+    created_at timestamptz not null default now()
+);
+
+create index if not exists login_attempts_ip_time_idx
+    on login_attempts (ip, created_at desc);
+
+create index if not exists login_attempts_email_time_idx
+    on login_attempts (email, created_at desc);
 ```
 
 ### permissions
@@ -495,6 +535,28 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 
 如果该变量存在，应用启动时为该用户创建本地用户记录，并授予 `platform_admin` 的 `global` 绑定。生产环境完成初始化后应移除该变量，避免误授权。
 
+### v9：首个自注册用户自动 platform_admin
+
+除环境变量显式注入外，首个通过 `POST /api/v1/auth/register` 自助注册成功的本地密码用户
+（`source = 'password'`）会被自动授予 `platform_admin` 的 `global` 绑定，作为冷启动 fallback。
+
+实现上由 `AuthRepository.CreatePasswordUser` 在单事务内完成：
+
+```sql
+-- 第一步：count 已存在 password 用户
+-- 第二步：仅当 count=0 时，才插入 platform_admin 的 global 绑定
+INSERT INTO user_role_bindings (...)
+SELECT ... WHERE (SELECT count(*) FROM users WHERE source='password') = 0
+ON CONFLICT DO NOTHING;
+```
+
+这样：
+
+- 并发首个注册不会重复授予（`ON CONFLICT DO NOTHING` 兜底）；
+- 第二个之后注册的用户不再自动获得 platform_admin，需由 admin 通过 `rbac/binding/grant` 分配；
+- 已通过 `ENVVAULT_BOOTSTRAP_ADMIN_USER_ID` 注入过 admin 的部署，首个自注册 user 也不会冲突
+  （走的是另一条 `EnsureBootstrapAdmin` 路径，`CreatePasswordUser` 仍会判定自己是不是首个 password 用户）。
+
 ## HTTP API 设计
 
 接口保持当前动作式风格：
@@ -511,8 +573,34 @@ ENVVAULT_BOOTSTRAP_ADMIN_USER_ID
 - `pageSize`：每页数量，默认 `20`，最大 `100`。
 - 列表接口将 `pageNum`、`pageSize` 放在 JSON body 中。
 - 分页请求统一复用 `PageRequest`。
-- 分页响应统一复用 `PageResp`，格式为 `{ "pageNum": 页码, "pageSize": 每页数量, "total": 总条数, "list": 数据列表 }`。
-- 分页响应必须返回 `pageNum`、`pageSize`，便于调用方确认服务端归一化后的分页上下文。
+- 分页响应统一复用 `PageResp`，非空时格式为
+  `{ "pageNum": 页码, "pageSize": 每页数量, "total": 总条数, "list": 数据列表 }`。
+- **空数据形态**：`list` 为空时响应退化为 `{ "total": 0, "list": [] }`,
+  `pageNum` / `pageSize` 字段**不出现**(由 `omitempty` 省略),前端无需做
+  `pageNum === undefined` 防御。规则与 `design/DESIGN.md`「分页响应 - 空数据形态」节一致。
+
+### 认证 & 用户接口（v9）
+
+v9 起，EnvVault 提供 4 个本地认证端点，承载 email+password 用户自注册、登录、登出、修改密码。
+完整的端点契约、错误码与频控策略见 `design/DESIGN.md`「认证 & 用户（v9）」节，
+本节只列出与 RBAC 表/初始化/审计相关的耦合点。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| POST | `/api/v1/auth/register` | 匿名 | 自助注册；**首个 password 用户自动 platform_admin**（见下） |
+| POST | `/api/v1/auth/login` | 匿名 | 邮箱+密码登录；签发 JWT，写 `login_attempts` |
+| POST | `/api/v1/auth/logout` | JWT | bump `tokens_valid_after` + 进程内 cache，强制现有 JWT 立即失效 |
+| POST | `/api/v1/auth/changePassword` | JWT | 验证旧密码 → 更新 `password_hash` → bump `tokens_valid_after` |
+
+与 RBAC 体系的耦合：
+
+- **注册即写 `users`**：`external_user_id` 取 `email:<email>` 形式（保证 `users_external_user_id_uidx` 仍生效），
+  `source = 'password'`。
+- **首个 password 用户**走 `INSERT ... SELECT ... WHERE count(*) = 1` 在单事务内一并插入
+  `user_role_bindings(scope_type='global')`，与初始化数据节中的 fallback 互不冲突。
+- **强制登出**通过 `users.tokens_valid_after` 时间戳 + 进程内 `TokensCache`（refresher 1 分钟）实现。
+  任何 `JWT.IssuedAt < tokens_valid_after` 的请求一律 1401。Logout / ChangePassword 必 bump。
+- **`/auth/logout` 与 `/auth/changePassword` 走 JWT 中间件**，因此与 RBAC 的 `JWT 中间件 401 路径` 共享同一拦截。
 
 ### 权限查询
 

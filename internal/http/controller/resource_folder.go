@@ -89,15 +89,58 @@ func (ctrl *Controller) CreateFolder(c *gin.Context) {
 	ctrl.write(c, item, err)
 }
 
+// folderListRequest 在 listRequest 基础上加 includeSubfolders 开关,触发后响应
+// 元素从 Entity 扩展为 folderWithSubfolders(Entity + subfolders 子数组)。
+// 只在 environmentId 模式(level=1 父列表)下生效;folderParentId 模式 level=2
+// 列表不支持,传了 true 直接 400(校验在 validateListFoldersIncludeSubfolders)。
+type folderListRequest struct {
+	PageRequest
+	OrgId             string `json:"orgId,omitempty"`
+	ProjectId         string `json:"projectId,omitempty"`
+	EnvironmentId     string `json:"environmentId,omitempty"`
+	FolderId          string `json:"folderId,omitempty"`
+	FolderParentId    string `json:"folderParentId,omitempty"`
+	ResourceType      string `json:"resourceType,omitempty"`
+	ResourceId        string `json:"resourceId,omitempty"`
+	Keyword           string `json:"keyword,omitempty"`
+	IncludeSubfolders bool   `json:"includeSubfolders,omitempty"`
+}
+
+// folderWithSubfolders 是 ListFolders 在 includeSubfolders=true 时的响应元素。
+// 匿名嵌入 Entity 让 Go 的 json.Marshal 把 Entity 字段(id/parentId/code/name/...)
+// 铺平到顶层,再追加 subfolders 数组;与 tree.get 的 TreeNode.children 同款约定。
+// 无子 folder 时 subfolders 为 []Entity{}(非 null),handler 兜底赋值。
+type folderWithSubfolders struct {
+	Entity
+	Subfolders []Entity `json:"subfolders"`
+}
+
 // ListFolders v7 起不再走 allowScope 入口;repo SQL 按 caller.UserId 自动收窄可见 folder。
 // envId/parentId 的「父 folder 反查 env」逻辑保留(GetFolderEnvId 仍然需要),
 // 因为 level=2 list 时父 folder.id 是路径定位的关键,不是 authz。
+//
+// v10 起支持 includeSubfolders=true:仅 environmentId 模式生效,响应 list 元素
+// 升级为 folderWithSubfolders,一次性返回两级目录;否则行为与历史完全一致。
 func (ctrl *Controller) ListFolders(c *gin.Context) {
-	var req listRequest
+	var req folderListRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
-	if !validateListFolders(c, req) {
+	// 把 listRequest 透传到共用 validator(同字段同校验)。
+	if !validateListFolders(c, listRequest{
+		PageRequest:    req.PageRequest,
+		OrgId:          req.OrgId,
+		ProjectId:      req.ProjectId,
+		EnvironmentId:  req.EnvironmentId,
+		FolderId:       req.FolderId,
+		FolderParentId: req.FolderParentId,
+		ResourceType:   req.ResourceType,
+		ResourceId:     req.ResourceId,
+		Keyword:        req.Keyword,
+	}) {
+		return
+	}
+	if !validateListFoldersIncludeSubfolders(c, req) {
 		return
 	}
 
@@ -108,7 +151,6 @@ func (ctrl *Controller) ListFolders(c *gin.Context) {
 	//   - environmentId 非空:列 env 下所有 level=1 (parent_id IS NULL) folder
 	//   - folderParentId 非空:列该父 folder 下所有 level=2 folder;env 由后端从父 folder 反查
 	// (反查是路径定位,不是 authz)
-	_ = envId
 	if parentId != "" {
 		if _, err := ctrl.repo.GetFolderEnvId(c.Request.Context(), parentId); err != nil {
 			ctrl.write(c, nil, err)
@@ -116,11 +158,43 @@ func (ctrl *Controller) ListFolders(c *gin.Context) {
 		}
 	}
 
-	ctrl.log(c, "ListFolders", logging.F("environment_id", envId), logging.F("folder_parent_id", parentId))
+	ctrl.log(c, "ListFolders", logging.F("environment_id", envId), logging.F("folder_parent_id", parentId), logging.F("include_subfolders", req.IncludeSubfolders))
 	pagination := paginationFromRequest(req.PageRequest)
 	userId := auth.UserFromContext(c).UserId
 	result, err := ctrl.repo.ListFolders(c.Request.Context(), userId, envId, parentId, pagination)
-	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+
+	// 默认(false)路径:完全等同历史响应,list 元素是 Entity,不带 subfolders 字段。
+	if !req.IncludeSubfolders {
+		ctrl.write(c, pageData(result.Items, result.Total, pagination), nil)
+		return
+	}
+
+	// includeSubfolders=true 路径:拉所有子 folder,组装嵌套响应。
+	parentIds := make([]string, 0, len(result.Items))
+	for _, it := range result.Items {
+		parentIds = append(parentIds, it.Id)
+	}
+	children, err := ctrl.repo.ListFolderChildren(c.Request.Context(), userId, parentIds)
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+
+	list := make([]folderWithSubfolders, 0, len(result.Items))
+	for _, it := range result.Items {
+		// ListFolderChildren 保证 map 非 nil,但 value 可能为 nil(无子 folder),
+		// 兜底为 []Entity{} 让 JSON 出 [] 而非 null。
+		subs := children[it.Id]
+		if subs == nil {
+			subs = []Entity{}
+		}
+		list = append(list, folderWithSubfolders{Entity: it, Subfolders: subs})
+	}
+	ctrl.write(c, pageData(list, result.Total, pagination), nil)
 }
 
 func (ctrl *Controller) GetFolder(c *gin.Context) {

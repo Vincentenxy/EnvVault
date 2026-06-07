@@ -1,36 +1,47 @@
 package controller
 
 import (
+	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"envVault/internal/auth"
+	"envVault/internal/domain"
 	"envVault/internal/http/response"
 	"envVault/internal/logging"
 	rediscache "envVault/internal/store/redis"
 )
 
-// createFolderRequest 显式表达 level 与 parent 关系:
+// createFolderRequest 表达「在指定 env 下批量创建 folder」的契约。
 //
-//   - level=1: parentId = environmentId(env 是父,顶层 folder 唯一可挂靠字段)
-//   - level=2: parentId = parent folder id(父 folder 是父;env 由后端从父 folder 反查)
+// 关键约定:
+//   - 旧版 `parentId`(folder uuid)字段已移除 —— 改用 `parentCode`(父 folder 的 code),
+//     让前端无需先查父 folder id 就能跨 env 复刻同一棵树。
+//   - `envList` 必填且非空,每项是 **env 的 id(UUID)**,不是 env code。
+//     后端按 envList 在每个 env 下各建一个 folder,整批 1 个事务。
+//   - `level=1` 时 parentCode 不需要(顶层 folder 的父就是 env 本身)。
+//   - `level=2` 时 parentCode 必填,后端在每个 env 下用 parentCode 找同 code 的
+//     level=1 sibling parent folder,挂子 folder 于此。
 //
-// 故意不暴露 environmentId 字段:env 必然等于父 folder 的 env(顶层时等于 parentId),
-// 强制让客户端再传一遍是冗余字段、容易出现传错的不一致。
+// 响应形态:始终 `{ "created": [Entity, ...] }`,按 envList 顺序。
 //
 // 注意:folders 表 schema 同时持有 environment_id 和 parent_id 两个字段,
 // 看似冗余,实际语义不重叠(详见 configs/schema.sql 与 CreateFolder 注释):
 //   - environment_id 答"属于哪个 env"(level=1 必填,level=2 也保留做 O(1) 查询)
 //   - parent_id      答"父 folder 是谁"(仅 level=2 填,level=1 必为 NULL)
 type createFolderRequest struct {
-	ParentId string `json:"parentId,omitempty"`
-	Level    int    `json:"level"`
-	Code     string `json:"code"`
-	Name     string `json:"name"`
-	Comment  string `json:"comment"`
+	Level      int      `json:"level"`
+	Code       string   `json:"code"`
+	Name       string   `json:"name"`
+	Comment    string   `json:"comment"`
+	ParentCode string   `json:"parentCode,omitempty"`
+	EnvList    []string `json:"envList"`
 }
+
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 func (ctrl *Controller) CreateFolder(c *gin.Context) {
 	var req createFolderRequest
@@ -45,48 +56,60 @@ func (ctrl *Controller) CreateFolder(c *gin.Context) {
 		return
 	}
 
-	parentId := strings.TrimSpace(req.ParentId)
-	envId := ""
-
-	switch req.Level {
-	case 1:
-		// 顶层 folder:parentId 字段就是 env id
-		if parentId == "" {
-			response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "level=1 requires parentId (environmentId)")
-			return
-		}
-		envId = parentId
-	case 2:
-		// 二级 folder:parentId 字段是父 folder id;env 由后端从父 folder 反查
-		if parentId == "" {
-			response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "level=2 requires parentId (parent folder id)")
-			return
-		}
-		envOfParent, err := ctrl.repo.GetFolderEnvId(c.Request.Context(), parentId)
-		if err != nil {
-			ctrl.write(c, nil, err)
-			return
-		}
-		envId = envOfParent
-	}
-
-	if !ctrl.allowScope(c, "folder:create", "environment", envId) {
+	// envList 是必填字段。空 → 直接 -1(沿用 envVault 通用失败业务码,
+	// 区别于「请求体格式不合法」的 1002 CodeInvalidRequest)。
+	if len(req.EnvList) == 0 {
+		response.FailWithMsg(c, "envList is required and cannot be empty")
 		return
 	}
-	ctrl.log(c, "CreateFolder", logging.F("level", req.Level), logging.F("parent_id", parentId), logging.F("environment_id", envId), logging.F("code", req.Code), logging.F("name", req.Name))
-	item, err := ctrl.repo.CreateFolder(c.Request.Context(), envId, parentId, req.Code, req.Name, req.Comment, ctrl.actor(c), req.Level)
-	if err == nil {
-		// folder cache 写需要 projectId/parentId/level(除 envId 外) 3 个额外字段,
-		// Entity 不携带,因此 CreateFolder 之后再走一次 GetFolderContext 拿全量上下文。
-		// 失败仅 warn 不抛。
-		_, projectId, parentFolderId, level, ctxErr := ctrl.repo.GetFolderContext(c.Request.Context(), item.Id)
-		if ctxErr == nil {
-			ctrl.cacheUpsert(c, func(rc *rediscache.Cache) error {
-				return rc.UpsertFolder(c.Request.Context(), item, envId, projectId, parentFolderId, level)
-			})
-		}
+	if errMsg := validateEnvIdsForCreate(req.EnvList); errMsg != "" {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, errMsg)
+		return
 	}
-	ctrl.write(c, item, err)
+
+	// level=2 必须带 parentCode
+	if req.Level == 2 && strings.TrimSpace(req.ParentCode) == "" {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "parentCode is required for level=2")
+		return
+	}
+
+	ctrl.log(c, "CreateFolder", logging.F("level", req.Level), logging.F("parent_code", req.ParentCode), logging.F("code", req.Code), logging.F("name", req.Name), logging.F("env_list_len", len(req.EnvList)))
+
+	// 走批量路径(level=1 / level=2 都不再有 legacy 单条创建)
+	ctrl.createFolderBatch(c, req)
+}
+
+// createFolderBatch 走 envList 批量路径,封装 level=1 / level=2 两种分支:
+//   - level=1:无需 parentCode,直接按 envList 在每个 env 下创建顶层 folder
+//   - level=2:parentCode 是参考父 folder 的 code,后端在每个 env 下找同名 sibling
+//     parent folder,挂子 folder 于此
+func (ctrl *Controller) createFolderBatch(c *gin.Context, req createFolderRequest) {
+	ctx := c.Request.Context()
+	actor := ctrl.actor(c)
+
+	var created []Entity
+	var err error
+	if req.Level == 1 {
+		created, err = ctrl.repo.CreateTopLevelFoldersInEnvs(ctx, req.Code, req.Name, req.Comment, actor, req.EnvList)
+	} else {
+		created, err = ctrl.repo.CreateFoldersAcrossEnvs(ctx, req.ParentCode, req.Code, req.Name, req.Comment, actor, req.EnvList)
+	}
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+	// 同步 cache:每个新建 folder 走 GetFolderContext 拿全量上下文后 Upsert。
+	// 任一失败仅 warn,不抛(已在 DB 写入,cache 降级可接受)。
+	for _, item := range created {
+		envId, projectId, parentFolderId, level, ctxErr := ctrl.repo.GetFolderContext(ctx, item.Id)
+		if ctxErr != nil {
+			continue
+		}
+		ctrl.cacheUpsert(c, func(rc *rediscache.Cache) error {
+			return rc.UpsertFolder(ctx, item, envId, projectId, parentFolderId, level)
+		})
+	}
+	ctrl.write(c, gin.H{"created": created}, nil)
 }
 
 // folderListRequest 在 listRequest 基础上加 includeSubfolders 开关,触发后响应
@@ -104,6 +127,45 @@ type folderListRequest struct {
 	ResourceId        string `json:"resourceId,omitempty"`
 	Keyword           string `json:"keyword,omitempty"`
 	IncludeSubfolders bool   `json:"includeSubfolders,omitempty"`
+}
+
+// listFoldersByProjectRequest 是 POST /api/v1/folder/listByProject 的请求体。
+// 关键区别于 folderListRequest:此接口按 project 维度一次性返回该 project 下
+// 所有 folder(level=1 + level=2,按 code 聚合),响应里 folderList 元素带
+// envList(列出每个 code 在哪些 env 下存在)。不与 folder/list 互斥,可共存。
+type listFoldersByProjectRequest struct {
+	ProjectId string `json:"projectId"`
+}
+
+// ListFoldersByProject 按 projectId 列出所有 folder + 子 folder(level=1 + level=2),
+// level=1 按 code 聚合,每组带 envList;subFolders 跟随父层(level=2 同样按 code 聚合)。
+//
+// 关键契约:"子目录跟随父目录,当父目录有这个页面的时候子目录一定存在"——
+// SQL 一次性拉同 project 下 level=1+2,service 层按 (code, parent_id) 聚合;
+// 父 group 出现在结果里,它的所有 subFolders(由 RBAC narrowing 限制)都一定
+// 存在;反向不保证——父不可见时,其子层被整体跳过。
+func (ctrl *Controller) ListFoldersByProject(c *gin.Context) {
+	var req listFoldersByProjectRequest
+	if !ctrl.bind(c, &req) {
+		return
+	}
+	if strings.TrimSpace(req.ProjectId) == "" {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "projectId is required")
+		return
+	}
+	if !uuidPattern.MatchString(req.ProjectId) {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "projectId must be a UUID")
+		return
+	}
+	if ctrl.tree == nil {
+		logging.Error(c.Request.Context(), "ListFoldersByProject", "tree service is not configured")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": response.CodeServiceUnavailable, "msg": "tree service is not configured", "data": nil})
+		return
+	}
+	ctrl.log(c, "ListFoldersByProject", logging.F("project_id", req.ProjectId))
+	user := auth.UserFromContext(c)
+	tree, err := ctrl.tree.GetProjectFolderTree(c.Request.Context(), user, domain.ProjectFolderRequest{ProjectId: req.ProjectId})
+	ctrl.write(c, tree, err)
 }
 
 // folderWithSubfolders 是 ListFolders 在 includeSubfolders=true 时的响应元素。
@@ -291,4 +353,22 @@ func (ctrl *Controller) DeleteFolder(c *gin.Context) {
 		ctrl.cacheInvalidateCascade(c, scope)
 	}
 	ctrl.write(c, gin.H{"deleted": true}, err)
+}
+
+// validateEnvIdsForCreate 校验 createFolderRequest 的 envList 字段(env id 列表)。
+// 返回 "" 表示通过,非空表示错误信息(直接给到客户端)。
+//
+// 规则:
+//   - 每项必须是合法 UUID 格式(8-4-4-4-12)
+//   - 长度非空(空数组校验在 handler 上层先做,因为空数组走 -1 通用失败而不是 1002)
+//
+// 抽成纯函数是为了让单测不依赖 controller 全套依赖(repo / authorizer / cache)。
+// 元素在 env 层面的存在性在 repo 端校验(查 environments.is_deleted)。
+func validateEnvIdsForCreate(envIds []string) string {
+	for _, id := range envIds {
+		if !uuidPattern.MatchString(id) {
+			return fmt.Sprintf("envList contains invalid id: %s (must be a UUID)", id)
+		}
+	}
+	return ""
 }

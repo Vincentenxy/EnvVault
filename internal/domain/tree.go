@@ -104,3 +104,77 @@ type FolderTreeEntry struct {
 	ParentId      string `json:"parentId,omitempty"`
 	ProjectId     string `json:"projectId"`
 }
+
+// EnvRef 描述"folder 出现在哪个 env,以及该 env 下同名 folder 的 id"。
+//
+// 用在 FolderGroup.EnvList / SubFolderGroup.EnvList:同一个 folder code
+// 跨多个 env 时,前端要的不是 envId 列表(还要再查一次才能拿到该 env 下
+// folder id),而是"env 元信息 + 该 env 下当前 folder 实例的 id"三元组。
+//
+//   - Id       env 的 uuid
+//   - Code     env 的 code(dev / test / sim / prod / ...)
+//   - FolderId 当前 env 下、与所在 group.code 同名的 folder 的 uuid
+type EnvRef struct {
+	Id       string `json:"id"`
+	Code     string `json:"code"`
+	FolderId string `json:"folderId"`
+}
+
+// FolderInProject 是按 project 聚合查询的"扁平行"——DB 返回一行 = 一个 folder,
+// 包含 level=1/2 所需的最小字段集,service 层再按 code 聚合为 FolderGroup。
+//
+// 不复用 FolderTreeEntry 的原因:FolderTreeEntry 是为 tree service 设计的,
+// 字段(code/name/comment + level + environmentId + parentId + projectId)刚好对齐;
+// 本结构也用这套字段,只是语义聚焦"按 project 列出来再聚合"。
+//
+// EnvironmentCode 由 repo JOIN environments 填,仅用于 EnvRef 的 Code 字段,
+// 不会出现在 group.id / group.name / 等其他 group 字段。
+type FolderInProject struct {
+	Id              string `json:"id"`
+	Code            string `json:"code"`
+	Name            string `json:"name"`
+	Comment         string `json:"comment"`
+	Level           int    `json:"level"`
+	EnvironmentId   string `json:"environmentId"`
+	EnvironmentCode string `json:"environmentCode"`
+	ParentId        string `json:"parentId,omitempty"` // level=2 时填父 folder id
+	ProjectId       string `json:"projectId"`
+}
+
+// ProjectFolderRequest 是 POST /api/v1/folder/listByProject 的请求体。
+// projectId 必填,前端先调 /project/list 取到 id,再列其下所有 folder 结构。
+type ProjectFolderRequest struct {
+	ProjectId string `json:"projectId"`
+}
+
+// SubFolderGroup 是 FolderGroup 下属的子 folder 聚合节点(level=2,没有 subFolders)。
+// 与 FolderGroup 解耦(不让子层继承父层的 SubFolders 字段)以避免误导前端递归。
+type SubFolderGroup struct {
+	Id      string   `json:"id"`
+	Code    string   `json:"code"`
+	Name    string   `json:"name"`
+	Comment string   `json:"comment,omitempty"`
+	EnvList []EnvRef `json:"envList"`
+}
+
+// FolderGroup 是按 project 聚合的 level=1 folder 节点:同一 code 跨多个 env 时
+// 合并为一组,envList 记录该 code 在哪些 env 下存在(含该 env 下 folder id,
+// 免去前端再走一次 /folder/list 反查);subFolders 是该 code 下属的 level=2
+// folder(同样按 code 聚合,每组带自己的 EnvList 数组)。
+//
+// Id / Name / Comment:从该 code 在第一个 env 中的实例取(典型场景下同名 folder
+// 的 name/comment 一致;不一致时以第一个为准,前端展示时如需精确可按 env 拉详情)。
+type FolderGroup struct {
+	Id         string           `json:"id"`
+	Code       string           `json:"code"`
+	Name       string           `json:"name"`
+	Comment    string           `json:"comment,omitempty"`
+	EnvList    []EnvRef         `json:"envList"`
+	SubFolders []SubFolderGroup `json:"subFolders"`
+}
+
+// ProjectFolderTree 是 POST /api/v1/folder/listByProject 的响应根。
+// 当前实现是按 level=1 code 聚合的"扁平"视图(1 层 + 子层),不递归到 level=3+。
+type ProjectFolderTree struct {
+	FolderList []FolderGroup `json:"folderList"`
+}

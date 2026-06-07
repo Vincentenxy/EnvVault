@@ -270,25 +270,26 @@ func validateListFoldersIncludeSubfolders(c *gin.Context, req folderListRequest)
 	return true
 }
 
+// validateListSecrets 与 validateSearchSecrets 行为对齐:所有 scope 字段都可选,
+// 唯一动作是 trim 空白字符。service 层会按 folder > env > project 优先级收敛。
+// 保留 "ListSecrets" 这个 controller 入口,纯粹是为了不破坏既有路由 ——
+// 实际行为已经和 SearchSecrets 共享同一个 ListFilter + 同一种 repo 查询,
+// 区别只在 service 走的是 secret:list action(无 values 字段)。
 func validateListSecrets(c *gin.Context, req listRequest) bool {
-	if req.EnvironmentId == "" && req.FolderId == "" {
-		logging.Warn(c.Request.Context(), "validateListSecrets", "environmentId or folderId is required")
-		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "environmentId or folderId is required")
-		return false
-	}
+	req.Keyword = strings.TrimSpace(req.Keyword)
+	req.ProjectId = strings.TrimSpace(req.ProjectId)
+	req.EnvironmentId = strings.TrimSpace(req.EnvironmentId)
+	req.FolderId = strings.TrimSpace(req.FolderId)
 	return true
 }
 
+// validateSearchSecrets 现在所有 scope 字段都可选:keyword 空=scope 内全量,scope
+// 全空=走 RBAC 收窄后的全量。优先级(folder > env > project)由 service 层负责。
+// 唯一保留的检查是 keyword 空白字符 trim——纯空格 keyword 等同于空 keyword。
 func validateSearchSecrets(c *gin.Context, req listRequest) bool {
-	if req.Keyword == "" {
-		logging.Warn(c.Request.Context(), "validateSearchSecrets", "keyword is required")
-		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "keyword is required")
-		return false
-	}
-	if req.EnvironmentId == "" && req.FolderId == "" {
-		logging.Warn(c.Request.Context(), "validateSearchSecrets", "environmentId or folderId is required")
-		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "environmentId or folderId is required")
-		return false
-	}
+	req.Keyword = strings.TrimSpace(req.Keyword)
+	req.ProjectId = strings.TrimSpace(req.ProjectId)
+	req.EnvironmentId = strings.TrimSpace(req.EnvironmentId)
+	req.FolderId = strings.TrimSpace(req.FolderId)
 	return true
 }

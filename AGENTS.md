@@ -157,6 +157,37 @@ v9 起，EnvVault 支持本地 email+password 自助注册/登录，端点定义
 
 - `README.md` 应与真实的安装、配置和运行方式保持一致。
 - 必须记录必要的环境变量，尤其是加密和 JWT 相关配置。
+- 完整 HTTP 端点目录(path / request / response / RBAC)以 OpenAPI 3.0.3 维护在
+  `design/api/core.yaml`(核心资源)+ `design/api/rbac.yaml`(权限管理)。
+  任何新增/修改端点都要同步更新对应的 yaml;Redocly / Swagger UI 都能直接渲染。
+  实现代码与 yaml 字段必须保持一致(默认值、枚举值、状态码、错误码)。
+
+## 主要 HTTP 端点索引
+
+完整契约见 `design/api/core.yaml`,这里只列导航,方便定位。
+
+| 端点 | 用途 | 关键字段 |
+|------|------|---------|
+| `POST /api/v1/auth/dev/token` | 开发态 JWT(仅 `DevTokenEnabled=true` 时暴露) | — |
+| `POST /api/v1/auth/register` / `login` / `logout` / `changePassword` | v9 邮箱+密码认证 | email / password |
+| `POST /api/v1/me` | 当前用户信息 | — |
+| `POST /api/v1/org/{list,create,info,update,delete}` | 组织 CRUD | code / name |
+| `POST /api/v1/project/{list,create,info,update,delete}` | 项目 CRUD | orgId / code / envs[] |
+| `POST /api/v1/env/{list,create,info,update,delete}` | 环境 CRUD | projectId / code |
+| `POST /api/v1/env/template/{list,info}` | org 层 env 模板只读快照 | orgId / code |
+| `POST /api/v1/folder/{list,create,info,update,delete}` | folder CRUD(2 级) | level=1: 无父; level=2: `parentCode`; `envList` 必填(env id 列表) |
+| `POST /api/v1/folder/listByProject` | 按 `projectId` 拉所有 folder(按 code 聚合,带 envList + subFolders) | `projectId` |
+| `POST /api/v1/secret/{list,search,create,info,reveal,update,delete}` | 密钥 CRUD + 全文搜索 | folderId / key / value |
+| `POST /api/v1/secret/path/{info,reveal,batchReveal}` | 路径式访问 `org.proj.env.folder[.KEY]` | path / keys[] |
+| `POST /api/v1/audit/list` | 审计记录 | resourceType / resourceId |
+| `POST /api/v1/rbac/{permission,role,binding,user}/*` | RBAC 管理 | code / scopeType / scopeId |
+| `POST /api/v1/search/global` | 跨 5 类资源关键字搜索(Redis 缓存) | keyword / types[] |
+| `POST /api/v1/tree/get` | **完整资源分级树**(org→proj→env→folder-l1→folder-l2) | `maxDepth` / `includeOrphans` |
+
+新增/修改端点时:
+1. 在 controller 写实现
+2. 在 `design/api/core.yaml` 或 `rbac.yaml` 补 schema 与示例(状态码、错误码、camelCase 字段名)
+3. 在本表加一行导航
 - API endpoint 实现后，应补充调用示例。
 - 当项目约定发生变化时，同步更新本文件。
 
@@ -168,6 +199,137 @@ v9 起，EnvVault 支持本地 email+password 自助注册/登录，端点定义
 - 如果确实需要新增依赖，优先选择成熟、维护活跃的库，并在变更说明中解释原因。
 - 代码变更后，在可行时运行 `go test ./...`。
 - 不要提交生成的二进制文件、本地 IDE 配置、环境文件或任何密钥材料。
+
+## Folder 批量跨环境创建(`POST /api/v1/folder/create`)
+
+**纯批量接口**,不保留单条创建路径。`envList` 必填且非空,每项是 env 的 **id
+(UUID)**,不是 env code。空 / 缺省 `envList` 直接返业务码 `-1`。
+
+### 请求体
+
+**level=1**(在多个 env 下创建同名顶层 folder):
+
+```json
+{
+  "level": 1,
+  "code": "globals",
+  "name": "Globals",
+  "comment": "默认全局",
+  "envList": [
+    "11111111-1111-1111-1111-111111111111",
+    "22222222-2222-2222-2222-222222222222",
+    "33333333-3333-3333-3333-333333333333"
+  ]
+}
+```
+
+**level=2**(在多个 env 下同名父 folder 下挂子 folder):
+
+```json
+{
+  "level": 2,
+  "code": "child-folder-aaaa",
+  "name": "child-folder aaaa",
+  "comment": "测试子folder aaa",
+  "parentCode": "payment",
+  "envList": [
+    "11111111-1111-1111-1111-111111111111",
+    "22222222-2222-2222-2222-222222222222",
+    "33333333-3333-3333-3333-333333333333"
+  ]
+}
+```
+
+### 行为
+
+1. **level=1**:`envList` 每项 → 在该 env 下创建顶层 folder(`parent_id=NULL`,`level=1`)。
+2. **level=2**:`parentCode` 是参考父 folder 的 code;后端在 `envList` 每个 env 下用
+   `parentCode` 反查同 code 的 `level=1` sibling parent,挂子 folder 于此。
+3. 整批在 1 个事务里,任一 env 缺失 / `level=2` 的 sibling parent 缺失 / 目标 code 已
+   存在 → 整体回滚。
+4. 缓存同步:每个新建 folder 走 `GetFolderContext` 拿全量上下文后 `UpsertFolder`。
+5. 响应:返回 `{ "created": [Entity, ...] }`,按 `envList` 顺序排列。
+
+### 错误码
+
+| HTTP | 业务码 | 触发条件 |
+|------|--------|---------|
+| 200 | -1 | `envList` 缺省 / 空 |
+| 400 | 1002 | `level` 不在 {1,2};code 不符合正则;envList 项不是 UUID;level=2 缺 `parentCode` |
+| 404 | 1404 | 任意 envId 不存在 / 已软删;level=2 任一 env 下找不到 `parentCode` 对应的 level=1 folder |
+| 409 | 1409 | 目标 code 在某 env 下已存在(整批回滚) |
+
+### 关键文件
+
+- `internal/store/postgres/repository.go` — `CreateFoldersAcrossEnvs`(level=2)+ `CreateTopLevelFoldersInEnvs`(level=1)
+- `internal/http/controller/resource_folder.go` — `createFolderRequest` 字段定义 + `CreateFolder` 入口 + `validateEnvIdsForCreate` UUID 校验
+- `internal/http/controller/resource_folder_test.go` — envList 校验 + JSON 解析单测
+- `design/api/core.yaml` — `/api/v1/folder/create` 完整 OpenAPI 定义
+
+## Folder 按 project 聚合列表(`POST /api/v1/folder/listByProject`)
+
+按 `projectId` 一次性返回该 project 下所有 folder 结构(level=1 + level=2),
+按 `code` 聚合,每组带 `envList`(在哪些 env 下存在)与 `subFolders`(子层)。
+
+### 请求体
+
+```json
+{ "projectId": "11111111-1111-1111-1111-111111111111" }
+```
+
+### 响应
+
+```json
+{
+  "folderList": [
+    {
+      "id": "22222222-2222-2222-2222-222222222222",
+      "code": "globals",
+      "name": "Globals",
+      "comment": "默认全局",
+      "envList": [
+        "33333333-3333-3333-3333-333333333331",
+        "33333333-3333-3333-3333-333333333332",
+        "33333333-3333-3333-3333-333333333333"
+      ],
+      "subFolders": []
+    },
+    {
+      "id": "44444444-4444-4444-4444-444444444441",
+      "code": "payment",
+      "name": "Payment Providers",
+      "envList": ["33333333-...", "33333333-..."],
+      "subFolders": [
+        {
+          "id": "55555555-5555-5555-5555-555555555551",
+          "code": "stripe",
+          "name": "Stripe",
+          "envList": ["33333333-...", "33333333-..."]
+        }
+      ]
+    }
+  ]
+}
+```
+
+### 关键契约
+
+- **子目录跟随父目录**:父 group 出现时,所有 RBAC 可见的 `subFolders` 一定存在
+  (SQL 一次性拉同 project 下 level=1+2,service 层按 `(父 code, 子 code)` 聚合)
+- **反向保证**:父被 RBAC 收窄时,其所有子实例被整体丢弃,不会出现孤儿
+- **id/name/comment**:从该 code 在第一个 env 中的实例取(同名 folder 通常一致)
+- **排序**:`folderList` 按 `code` 升序,每组 `subFolders` 也按 `code` 升序
+- **空 project**:`folderList` 返 `[]`(非 `null`)
+- **RBAC**:服务端 SQL narrowing 在 (folder, env, project, org) 4 层链 + service 层
+  per-folder `authorizer.Allow("folder:read")` 二次收窄
+
+### 关键文件
+
+- `internal/store/postgres/repository_tree.go` — `ListFoldersInProject` 实现
+- `internal/service/tree_service.go` — `GetProjectFolderTree` 业务编排(按 code 聚合)
+- `internal/http/controller/resource_folder.go` — `ListFoldersByProject` handler
+- `internal/service/tree_service_test.go` — 6 个聚合逻辑单测
+- `design/api/core.yaml` — `/api/v1/folder/listByProject` 完整 OpenAPI
 
 ## 资源分级树(tree)接口
 

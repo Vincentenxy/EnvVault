@@ -141,6 +141,69 @@ All business responses follow this format:
 
 See [design/DESIGN.md](design/DESIGN.md) for the current detailed design. OpenAPI files are in [design/api](design/api), including core APIs and RBAC APIs.
 
+The full HTTP endpoint catalog (path, request/response schema, RBAC) is in
+[design/api/core.yaml](design/api/core.yaml) (OpenAPI 3.0.3) and
+[design/api/rbac.yaml](design/api/rbac.yaml). Render with any standard tool,
+for example:
+
+```bash
+# Redocly CLI
+npx @redocly/cli preview-docs design/api/core.yaml
+# or Swagger UI
+docker run --rm -p 8081:8080 -e SWAGGER_JSON=/tmp/core.yaml \
+  -v "$PWD/design/api:/tmp" swaggerapi/swagger-ui
+```
+
+Key endpoints to start with:
+
+- `POST /api/v1/tree/get` — fetch the full org/project/env/folder tree (cached in Redis, narrowed by caller RBAC).
+- `POST /api/v1/folder/listByProject` — list all folders under a project, grouped by `code`; each group carries `envList` and `subFolders` (level=2 children, also grouped by code). Use this when the frontend needs a project-wide folder picker.
+- `POST /api/v1/folder/create` — batch-create a folder across multiple envs in one transaction. `envList` is required and contains env ids (UUIDs); `level=1` creates top-level folders, `level=2` requires `parentCode` and looks up the matching `level=1` parent in each env.
+- `POST /api/v1/secret/path/batchReveal` — bulk-reveal every secret in a folder path.
+- `POST /api/v1/search/global` — Redis-backed cross-resource keyword search.
+
+Example: call `listByProject` after `tree/get` to render a project-scoped folder picker:
+
+```bash
+# 1) Mint a dev JWT
+curl -s -X POST http://localhost:8080/api/v1/auth/dev/token
+
+# 2) Fetch the project-scoped folder tree
+curl -s -X POST http://localhost:8080/api/v1/folder/listByProject \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"projectId":"11111111-1111-1111-1111-111111111111"}'
+
+# 3) Batch-create a sub-folder under <payment> in 3 envs in one transaction
+curl -s -X POST http://localhost:8080/api/v1/folder/create \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "level": 2,
+    "code": "stripe",
+    "name": "Stripe",
+    "parentCode": "payment",
+    "envList": [
+      "11111111-1111-1111-1111-111111111111",
+      "22222222-2222-2222-2222-222222222222",
+      "33333333-3333-3333-3333-333333333333"
+    ]
+  }'
+```
+
+For local development, the easiest way to try the API is the dev-token flow:
+
+```bash
+# 1) Mint a dev JWT (only when ENVVAULT_AUTH_DEV_TOKEN_ENABLED=true)
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/dev/token | jq -r .data.token)
+
+# 2) Call a protected endpoint
+curl -s -X POST http://localhost:8080/api/v1/tree/get \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
 ## Development
 
 Run tests:

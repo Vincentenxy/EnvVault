@@ -83,12 +83,18 @@ func (ctrl *Controller) ListSecrets(c *gin.Context) {
 	if !validateListSecrets(c, req) {
 		return
 	}
-	ctrl.log(c, "ListSecrets", logging.F("environment_id", req.EnvironmentId), logging.F("folder_id", req.FolderId))
+	ctrl.log(c, "ListSecrets",
+		logging.F("project_id", req.ProjectId),
+		logging.F("environment_id", req.EnvironmentId),
+		logging.F("folder_id", req.FolderId),
+		logging.F("keyword", req.Keyword))
 	user := auth.UserFromContext(c)
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.secret.List(c.Request.Context(), user, domain.ListFilter{
+		ProjectId:     req.ProjectId,
 		EnvironmentId: req.EnvironmentId,
 		FolderId:      req.FolderId,
+		Keyword:       req.Keyword,
 	}, pagination)
 	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
@@ -101,10 +107,15 @@ func (ctrl *Controller) SearchSecrets(c *gin.Context) {
 	if !validateSearchSecrets(c, req) {
 		return
 	}
-	ctrl.log(c, "SearchSecrets", logging.F("environment_id", req.EnvironmentId), logging.F("folder_id", req.FolderId), logging.F("keyword", req.Keyword))
+	ctrl.log(c, "SearchSecrets",
+		logging.F("project_id", req.ProjectId),
+		logging.F("environment_id", req.EnvironmentId),
+		logging.F("folder_id", req.FolderId),
+		logging.F("keyword", req.Keyword))
 	user := auth.UserFromContext(c)
 	pagination := paginationFromRequest(req.PageRequest)
 	result, err := ctrl.secret.Search(c.Request.Context(), user, domain.ListFilter{
+		ProjectId:     req.ProjectId,
 		EnvironmentId: req.EnvironmentId,
 		FolderId:      req.FolderId,
 		Keyword:       req.Keyword,

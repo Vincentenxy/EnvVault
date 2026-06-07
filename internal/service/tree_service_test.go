@@ -40,10 +40,11 @@ func (s *stubAuthorizer) Allow(_ context.Context, _ auth.UserInfo, _ string, res
 
 // stubRepo 提供 4 个 ListAll*ForTree,以及一个能识别 calls 的计数。
 type stubRepo struct {
-	orgs     []domain.Entity
-	projects []domain.Entity
-	envs     []domain.Entity
-	folders  []domain.FolderTreeEntry
+	orgs           []domain.Entity
+	projects       []domain.Entity
+	envs           []domain.Entity
+	folders        []domain.FolderTreeEntry
+	projectFolders []domain.FolderInProject
 
 	listOrgsCalls     int
 	listProjectsCalls int
@@ -66,6 +67,9 @@ func (r *stubRepo) ListAllEnvironmentsForTree(_ context.Context, _ string) ([]do
 func (r *stubRepo) ListAllFoldersForTree(_ context.Context, _ string) ([]domain.FolderTreeEntry, error) {
 	r.listFoldersCalls++
 	return r.folders, nil
+}
+func (r *stubRepo) ListFoldersInProject(_ context.Context, _ string, _ string) ([]domain.FolderInProject, error) {
+	return r.projectFolders, nil
 }
 
 // stubCacheMeta 在测试中模拟"cache 命中 + warm 写入"路径。
@@ -329,4 +333,278 @@ func (b *badAuthorizer) Allow(_ context.Context, _ auth.UserInfo, _ string, _ au
 		return b.thenErr
 	}
 	return auth.ErrPermissionDenied
+}
+
+// =====================================================================
+// GetProjectFolderTree tests
+// =====================================================================
+
+// findGroup helper:按 code 找 FolderGroup,找不到返 nil。
+func findGroup(tree domain.ProjectFolderTree, code string) *domain.FolderGroup {
+	for i := range tree.FolderList {
+		if tree.FolderList[i].Code == code {
+			return &tree.FolderList[i]
+		}
+	}
+	return nil
+}
+
+// findSubFolder helper:在指定 group 里按 code 找 SubFolderGroup,找不到返 nil。
+func findSubFolder(g *domain.FolderGroup, code string) *domain.SubFolderGroup {
+	if g == nil {
+		return nil
+	}
+	for i := range g.SubFolders {
+		if g.SubFolders[i].Code == code {
+			return &g.SubFolders[i]
+		}
+	}
+	return nil
+}
+
+// containsAllEnvIds 验证 []EnvRef 中所有 .Id 都在 expectedIds 集合中(顺序无关),
+// 用于改造后 EnvList 从 []string → []EnvRef 的测试断言。
+func containsAllEnvIds(envs []domain.EnvRef, expectedIds []string) bool {
+	got := make(map[string]bool, len(envs))
+	for _, e := range envs {
+		got[e.Id] = true
+	}
+	for _, want := range expectedIds {
+		if !got[want] {
+			return false
+		}
+	}
+	return true
+}
+
+// containsAll 检查 slice 是否包含全部 elements(顺序无关)。
+func containsAll[T comparable](s, elements []T) bool {
+	set := make(map[T]bool, len(s))
+	for _, v := range s {
+		set[v] = true
+	}
+	for _, e := range elements {
+		if !set[e] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestGetProjectFolderTree_AggregateByCode 验证跨 env 同 code 聚合为单个 FolderGroup,
+// envList 包含该 code 出现的所有 env(顺序按 SQL 返回顺序)。
+func TestGetProjectFolderTree_AggregateByCode(t *testing.T) {
+	repo := &stubRepo{
+		projectFolders: []domain.FolderInProject{
+			{Id: "f1-a", Code: "payment", Name: "Payment", Level: 1, EnvironmentId: "env-a", ProjectId: "p1"},
+			{Id: "f1-b", Code: "payment", Name: "Payment", Level: 1, EnvironmentId: "env-b", ProjectId: "p1"},
+			{Id: "f1-c", Code: "payment", Name: "Payment", Level: 1, EnvironmentId: "env-c", ProjectId: "p1"},
+		},
+	}
+	authz := newStubAuthorizer([]string{"f1-a", "f1-b", "f1-c"}, nil)
+
+	svc := NewTreeService(repo, nil, authz)
+	tree, err := svc.GetProjectFolderTree(context.Background(), auth.UserInfo{UserId: "u1"},
+		domain.ProjectFolderRequest{ProjectId: "p1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tree.FolderList) != 1 {
+		t.Fatalf("FolderList len = %d, want 1 (3 instances aggregated by code)", len(tree.FolderList))
+	}
+	g := tree.FolderList[0]
+	if g.Code != "payment" {
+		t.Errorf("Code = %q, want payment", g.Code)
+	}
+	if g.Id != "f1-a" {
+		t.Errorf("Id = %q, want f1-a (first instance)", g.Id)
+	}
+	if !containsAllEnvIds(g.EnvList, []string{"env-a", "env-b", "env-c"}) {
+		t.Errorf("EnvList = %v, want all 3 envs", g.EnvList)
+	}
+	if len(g.SubFolders) != 0 {
+		t.Errorf("SubFolders should be empty, got %d items", len(g.SubFolders))
+	}
+}
+
+// TestGetProjectFolderTree_SubFoldersFollowParent 验证 subFolders 跟随父目录:
+// 父 group 出现时,其 level=2 children 一并出现并按 code 聚合。
+func TestGetProjectFolderTree_SubFoldersFollowParent(t *testing.T) {
+	repo := &stubRepo{
+		projectFolders: []domain.FolderInProject{
+			// level=1: payment 在 2 个 env
+			{Id: "p1-a", Code: "payment", Name: "Payment", Level: 1, EnvironmentId: "env-a", ProjectId: "p1"},
+			{Id: "p1-b", Code: "payment", Name: "Payment", Level: 1, EnvironmentId: "env-b", ProjectId: "p1"},
+			// level=2: stripe 在 2 个 env(同 code,聚合)
+			{Id: "p2-a", Code: "stripe", Name: "Stripe", Level: 2, EnvironmentId: "env-a", ParentId: "p1-a", ProjectId: "p1"},
+			{Id: "p2-b", Code: "stripe", Name: "Stripe", Level: 2, EnvironmentId: "env-b", ParentId: "p1-b", ProjectId: "p1"},
+			// level=2: paypal 只在 1 个 env
+			{Id: "p3-a", Code: "paypal", Name: "PayPal", Level: 2, EnvironmentId: "env-a", ParentId: "p1-a", ProjectId: "p1"},
+		},
+	}
+	authz := newStubAuthorizer(
+		[]string{"p1-a", "p1-b", "p2-a", "p2-b", "p3-a"}, nil)
+
+	svc := NewTreeService(repo, nil, authz)
+	tree, err := svc.GetProjectFolderTree(context.Background(), auth.UserInfo{UserId: "u1"},
+		domain.ProjectFolderRequest{ProjectId: "p1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	payment := findGroup(tree, "payment")
+	if payment == nil {
+		t.Fatalf("missing payment group")
+	}
+	if len(payment.SubFolders) != 2 {
+		t.Fatalf("payment.SubFolders len = %d, want 2 (stripe + paypal)", len(payment.SubFolders))
+	}
+	stripe := findSubFolder(payment, "stripe")
+	if stripe == nil {
+		t.Fatalf("missing stripe sub-folder")
+	}
+	if !containsAllEnvIds(stripe.EnvList, []string{"env-a", "env-b"}) {
+		t.Errorf("stripe.EnvList = %v, want both env-a and env-b", stripe.EnvList)
+	}
+	paypal := findSubFolder(payment, "paypal")
+	if paypal == nil {
+		t.Fatalf("missing paypal sub-folder")
+	}
+	if !containsAllEnvIds(paypal.EnvList, []string{"env-a"}) {
+		t.Errorf("paypal.EnvList = %v, want only env-a", paypal.EnvList)
+	}
+}
+
+// TestGetProjectFolderTree_ParentInvisibleChildrenDropped 验证反向契约:
+// 父不可见(RBAC 收窄)时,其子层被整体跳过——不会出现"子层孤儿挂在不存在的父 group 下"。
+func TestGetProjectFolderTree_ParentInvisibleChildrenDropped(t *testing.T) {
+	repo := &stubRepo{
+		projectFolders: []domain.FolderInProject{
+			{Id: "p1-a", Code: "payment", Name: "Payment", Level: 1, EnvironmentId: "env-a", ProjectId: "p1"},
+			{Id: "p2-a", Code: "stripe", Name: "Stripe", Level: 2, EnvironmentId: "env-a", ParentId: "p1-a", ProjectId: "p1"},
+		},
+	}
+	// 只放行 p2-a(stripe),不放行 p1-a(payment)
+	authz := newStubAuthorizer([]string{"p2-a"}, nil)
+
+	svc := NewTreeService(repo, nil, authz)
+	tree, err := svc.GetProjectFolderTree(context.Background(), auth.UserInfo{UserId: "u1"},
+		domain.ProjectFolderRequest{ProjectId: "p1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tree.FolderList) != 0 {
+		t.Errorf("FolderList len = %d, want 0 (parent invisible → children dropped)", len(tree.FolderList))
+	}
+}
+
+// TestGetProjectFolderTree_EmptyProject 验证空 project 返空 list(不是 nil)。
+func TestGetProjectFolderTree_EmptyProject(t *testing.T) {
+	repo := &stubRepo{projectFolders: nil}
+	authz := newStubAuthorizer(nil, nil)
+
+	svc := NewTreeService(repo, nil, authz)
+	tree, err := svc.GetProjectFolderTree(context.Background(), auth.UserInfo{UserId: "u1"},
+		domain.ProjectFolderRequest{ProjectId: "empty-p"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tree.FolderList == nil {
+		t.Errorf("FolderList should be non-nil empty slice, got nil")
+	}
+	if len(tree.FolderList) != 0 {
+		t.Errorf("FolderList len = %d, want 0", len(tree.FolderList))
+	}
+}
+
+// TestGetProjectFolderTree_RBACNarrowing 验证 service 层二次 authorizer 收窄。
+func TestGetProjectFolderTree_RBACNarrowing(t *testing.T) {
+	repo := &stubRepo{
+		projectFolders: []domain.FolderInProject{
+			{Id: "p1-a", Code: "payment", Name: "Payment", Level: 1, EnvironmentId: "env-a", ProjectId: "p1"},
+			{Id: "p1-b", Code: "other", Name: "Other", Level: 1, EnvironmentId: "env-b", ProjectId: "p1"},
+		},
+	}
+	// 只放行 p1-a → 只应返回 payment
+	authz := newStubAuthorizer([]string{"p1-a"}, nil)
+
+	svc := NewTreeService(repo, nil, authz)
+	tree, err := svc.GetProjectFolderTree(context.Background(), auth.UserInfo{UserId: "u1"},
+		domain.ProjectFolderRequest{ProjectId: "p1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tree.FolderList) != 1 {
+		t.Fatalf("FolderList len = %d, want 1", len(tree.FolderList))
+	}
+	if tree.FolderList[0].Code != "payment" {
+		t.Errorf("Code = %q, want payment (RBAC narrowed)", tree.FolderList[0].Code)
+	}
+}
+
+// TestGetProjectFolderTree_EnvRefCarriesFolderIdAndCode 验证 v13 改造后
+// FolderGroup.EnvList[i] = EnvRef{Id, Code, FolderId} 三元组都正确:
+//   - Id  = 该 env 的 uuid
+//   - Code = 该 env 的 code(dev/test/sim/prod ...)
+//   - FolderId = 该 env 下与 group.code 同名的 folder 的 uuid
+//
+// 这是 v12 的痛点:之前 EnvList 只返 envId 列表,前端拿到后还要再调一次
+// /folder/list 把 envId 翻成 folderId 才能进 /secret/reveal。这次直接 inline。
+func TestGetProjectFolderTree_EnvRefCarriesFolderIdAndCode(t *testing.T) {
+	repo := &stubRepo{
+		projectFolders: []domain.FolderInProject{
+			{Id: "f1-a", Code: "payment", Level: 1, EnvironmentId: "env-a", EnvironmentCode: "dev", ProjectId: "p1"},
+			{Id: "f1-b", Code: "payment", Level: 1, EnvironmentId: "env-b", EnvironmentCode: "prod", ProjectId: "p1"},
+		},
+	}
+	authz := newStubAuthorizer([]string{"f1-a", "f1-b"}, nil)
+	svc := NewTreeService(repo, nil, authz)
+
+	tree, err := svc.GetProjectFolderTree(context.Background(), auth.UserInfo{UserId: "u1"},
+		domain.ProjectFolderRequest{ProjectId: "p1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tree.FolderList) != 1 {
+		t.Fatalf("FolderList len = %d, want 1", len(tree.FolderList))
+	}
+	g := tree.FolderList[0]
+	if len(g.EnvList) != 2 {
+		t.Fatalf("EnvList len = %d, want 2", len(g.EnvList))
+	}
+	// 验证每条 EnvRef 三元组
+	byId := make(map[string]domain.EnvRef, 2)
+	for _, e := range g.EnvList {
+		byId[e.Id] = e
+	}
+	want := map[string]domain.EnvRef{
+		"env-a": {Id: "env-a", Code: "dev", FolderId: "f1-a"},
+		"env-b": {Id: "env-b", Code: "prod", FolderId: "f1-b"},
+	}
+	for envId, wantRef := range want {
+		got, ok := byId[envId]
+		if !ok {
+			t.Errorf("missing EnvRef for env %s", envId)
+			continue
+		}
+		if got != wantRef {
+			t.Errorf("EnvRef for env %s = %+v, want %+v", envId, got, wantRef)
+		}
+	}
+}
+
+// TestGetProjectFolderTree_AuthorizerErrorPropagates 验证 authorizer 非权限错误透传。
+func TestGetProjectFolderTree_AuthorizerErrorPropagates(t *testing.T) {
+	repo := &stubRepo{
+		projectFolders: []domain.FolderInProject{
+			{Id: "p1-a", Code: "payment", Name: "Payment", Level: 1, EnvironmentId: "env-a", ProjectId: "p1"},
+		},
+	}
+	// badAuthorizer 首次返非权限错误 → 应透传
+	authz := &badAuthorizer{firstErr: errors.New("boom")}
+	svc := NewTreeService(repo, nil, authz)
+	_, err := svc.GetProjectFolderTree(context.Background(), auth.UserInfo{UserId: "u1"},
+		domain.ProjectFolderRequest{ProjectId: "p1"})
+	if err == nil || err.Error() != "boom" {
+		t.Errorf("err = %v, want boom", err)
+	}
 }

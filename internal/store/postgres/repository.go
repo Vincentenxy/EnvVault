@@ -619,6 +619,208 @@ returning id, code, name, comment, created_by, updated_by, created_at, updated_a
 	return folder, tx.Commit()
 }
 
+// CreateFoldersAcrossEnvs 批量跨环境创建 level=2 folder(子 folder)。
+//
+// 适用场景:前端传 `{ "code":"stripe", "parentCode":"payment", "level":2,
+// "envList":["<dev-id>","<test-id>"] }`,后端在每个 env 下用 parentCode 反查
+// 同 code 的 level=1 sibling parent folder,挂子 folder 于此。
+//
+// 入参约束:
+//   - parentCode 非空,作为参考父 folder 的 code
+//   - envIds 非空,每项是 env id(UUID)
+//   - 任一 env 不存在 → ErrNotFound
+//   - 任一 env 下找不到 code = parentCode 的 level=1 sibling parent → ErrNotFound
+//   - 任一 (env, sibling parent) 下目标子 code 已存在 → ErrConflict
+//
+// 返回:按 envIds 顺序排列的 []Entity,Entity.ParentId 是该 env 下的 sibling parent id。
+// 任何一步失败返回 (nil, error) + rollback,error 类型沿用既有的 ErrNotFound / ErrConflict。
+//
+// 注:本方法没有显式校验 env 与 parent folder 属于同一 project——反查"code 相同的 level=1
+// folder"已经隐式证明该 env 在 parent folder 所属 project 链上;若 env 误传成其他
+// project 下的同名 env,sibling 反查自然返 ErrNotFound。
+func (r *Repository) CreateFoldersAcrossEnvs(
+	ctx context.Context,
+	parentCode, code, name, comment, actor string,
+	envIds []string,
+) ([]domain.Entity, error) {
+	if len(envIds) == 0 {
+		return nil, errors.New("CreateFoldersAcrossEnvs requires non-empty envIds")
+	}
+	if strings.TrimSpace(parentCode) == "" {
+		return nil, errors.New("CreateFoldersAcrossEnvs requires non-empty parentCode")
+	}
+
+	// 1. 校验每个 envId 存在 + 未软删;同 id 复用 map 缓存。
+	seenEnv := make(map[string]bool, len(envIds))
+	verifiedEnvIds := make([]string, 0, len(envIds))
+	for _, envId := range envIds {
+		if seenEnv[envId] {
+			verifiedEnvIds = append(verifiedEnvIds, envId)
+			continue
+		}
+		var isDeleted bool
+		qerr := r.db.QueryRowContext(ctx, `
+select is_deleted
+from environments
+where id = $1::uuid
+`, envId).Scan(&isDeleted)
+		if errors.Is(qerr, sql.ErrNoRows) {
+			return nil, fmt.Errorf("environment id %q not found: %w", envId, ErrNotFound)
+		}
+		if qerr != nil {
+			return nil, qerr
+		}
+		if isDeleted {
+			return nil, fmt.Errorf("environment id %q is soft-deleted: %w", envId, ErrNotFound)
+		}
+		seenEnv[envId] = true
+		verifiedEnvIds = append(verifiedEnvIds, envId)
+	}
+
+	// 2. 解析每个 env → sibling parent id(同 env 复用 map)。
+	type envPlan struct {
+		envId           string
+		siblingParentId string
+	}
+	plan := make([]envPlan, 0, len(verifiedEnvIds))
+	seenSibling := make(map[string]string) // envId -> siblingParentId
+	for _, envId := range verifiedEnvIds {
+		siblingParentId, ok := seenSibling[envId]
+		if !ok {
+			qerr := r.db.QueryRowContext(ctx, `
+select id::text
+from folders
+where environment_id = $1::uuid and code = $2 and level = 1 and is_deleted = false
+limit 1
+`, envId, parentCode).Scan(&siblingParentId)
+			if errors.Is(qerr, sql.ErrNoRows) {
+				return nil, fmt.Errorf("env %q has no level=1 folder with code %q: %w", envId, parentCode, ErrNotFound)
+			}
+			if qerr != nil {
+				return nil, qerr
+			}
+			seenSibling[envId] = siblingParentId
+		}
+		plan = append(plan, envPlan{envId: envId, siblingParentId: siblingParentId})
+	}
+
+	// 3. 单事务批量 INSERT + 每条 recordAudit。
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	created := make([]domain.Entity, 0, len(plan))
+	for _, p := range plan {
+		id, err := uuidgen.NewUUID()
+		if err != nil {
+			return nil, err
+		}
+		var folder Entity
+		err = tx.QueryRowContext(ctx, `
+insert into folders (id, environment_id, parent_id, level, code, name, comment, created_by, updated_by)
+values ($1, $2, $3, 2, $4, $5, $6, $7, $7)
+returning id, code, name, comment, created_by, updated_by, created_at, updated_at
+`, id, p.envId, p.siblingParentId, code, name, comment, actor).Scan(
+			&folder.Id, &folder.Code, &folder.Name, &folder.Comment,
+			&folder.CreatedBy, &folder.UpdatedBy, &folder.CreatedAt, &folder.UpdatedAt,
+		)
+		if err != nil {
+			// 唯一索引冲突 (env, parent_id, code) 翻译为 ErrConflict
+			return nil, translatePgErr(err)
+		}
+		folder.ParentId = p.siblingParentId
+		r.fillEntityLabels(&folder)
+		if err := recordAuditTx(ctx, tx, actor, "folder", folder.Id, "create", nil); err != nil {
+			return nil, err
+		}
+		created = append(created, folder)
+	}
+	return created, tx.Commit()
+}
+
+// CreateTopLevelFoldersInEnvs 批量跨环境创建 level=1 folder(顶层 folder,parent_id=NULL)。
+//
+// 与 CreateFoldersAcrossEnvs 的区别:不需要父 folder,只需 envIds + code/name/comment;
+// 每个 env 下创建 1 个 level=1 folder,parent_id=NULL,environment_id=env.id。
+//
+// 整批 1 个事务,任一 env 不存在 / 目标 code 已在该 env 下存在 → 整体回滚。
+// 适用场景:前端传 `{ "level": 1, "code": "globals", "envList": ["<env-id-1>",
+// "<env-id-2>", ...] }` 在多个 env 下一次性创建同名顶层 folder。
+func (r *Repository) CreateTopLevelFoldersInEnvs(
+	ctx context.Context,
+	code, name, comment, actor string,
+	envIds []string,
+) ([]domain.Entity, error) {
+	if len(envIds) == 0 {
+		return nil, errors.New("CreateTopLevelFoldersInEnvs requires non-empty envIds")
+	}
+
+	// 1. 校验每个 envId 存在 + 未软删;同 id 复用 map 缓存。
+	seenEnv := make(map[string]bool, len(envIds))
+	verifiedEnvIds := make([]string, 0, len(envIds))
+	for _, envId := range envIds {
+		if seenEnv[envId] {
+			verifiedEnvIds = append(verifiedEnvIds, envId)
+			continue
+		}
+		var isDeleted bool
+		qerr := r.db.QueryRowContext(ctx, `
+select is_deleted
+from environments
+where id = $1::uuid
+`, envId).Scan(&isDeleted)
+		if errors.Is(qerr, sql.ErrNoRows) {
+			return nil, fmt.Errorf("environment id %q not found: %w", envId, ErrNotFound)
+		}
+		if qerr != nil {
+			return nil, qerr
+		}
+		if isDeleted {
+			return nil, fmt.Errorf("environment id %q is soft-deleted: %w", envId, ErrNotFound)
+		}
+		seenEnv[envId] = true
+		verifiedEnvIds = append(verifiedEnvIds, envId)
+	}
+
+	// 2. 单事务批量 INSERT + 每条 recordAudit。
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	created := make([]domain.Entity, 0, len(verifiedEnvIds))
+	for _, envId := range verifiedEnvIds {
+		id, err := uuidgen.NewUUID()
+		if err != nil {
+			return nil, err
+		}
+		var folder Entity
+		err = tx.QueryRowContext(ctx, `
+insert into folders (id, environment_id, parent_id, level, code, name, comment, created_by, updated_by)
+values ($1, $2, NULL, 1, $3, $4, $5, $6, $6)
+returning id, code, name, comment, created_by, updated_by, created_at, updated_at
+`, id, envId, code, name, comment, actor).Scan(
+			&folder.Id, &folder.Code, &folder.Name, &folder.Comment,
+			&folder.CreatedBy, &folder.UpdatedBy, &folder.CreatedAt, &folder.UpdatedAt,
+		)
+		if err != nil {
+			// 唯一索引冲突 (env, parent_id=NULL, code) 翻译为 ErrConflict
+			return nil, translatePgErr(err)
+		}
+		// level=1 时 Entity.ParentId 多态语义是"父=env id",这里填 envId 与 CreateFolder 一致。
+		folder.ParentId = envId
+		r.fillEntityLabels(&folder)
+		if err := recordAuditTx(ctx, tx, actor, "folder", folder.Id, "create", nil); err != nil {
+			return nil, err
+		}
+		created = append(created, folder)
+	}
+	return created, tx.Commit()
+}
+
 // ListFolders 列 folder,按调用方给的过滤器分两路:
 //
 //   - environmentId 非空(level=1 列表):查该 env 下所有 parent_id IS NULL 的 folder
@@ -1198,8 +1400,9 @@ where s.is_deleted = false
   and o.is_deleted = false
   and ($3 = '' or e.id = $3::uuid)
   and ($4 = '' or s.folder_id = $4::uuid)
-  and ($5 = '' or s.key ilike '%%' || $5 || '%%')%s
-`, narrow), callerUserId, action, filter.EnvironmentId, filter.FolderId, filter.Keyword).Scan(&total)
+  and ($5 = '' or s.key ilike '%%' || $5 || '%%')
+  and ($6 = '' or p.id = $6::uuid)%s
+`, narrow), callerUserId, action, filter.EnvironmentId, filter.FolderId, filter.Keyword, filter.ProjectId).Scan(&total)
 	if err != nil {
 		return domain.PaginatedResult[Secret]{}, err
 	}
@@ -1220,10 +1423,11 @@ where s.is_deleted = false
   and o.is_deleted = false
   and ($3 = '' or e.id = $3::uuid)
   and ($4 = '' or s.folder_id = $4::uuid)
-  and ($5 = '' or s.key ilike '%%' || $5 || '%%')%s
+  and ($5 = '' or s.key ilike '%%' || $5 || '%%')
+  and ($6 = '' or p.id = $6::uuid)%s
 order by s.key asc
-limit $6 offset $7
-`, narrow), callerUserId, action, filter.EnvironmentId, filter.FolderId, filter.Keyword, pagination.Limit(), pagination.Offset())
+limit $7 offset $8
+`, narrow), callerUserId, action, filter.EnvironmentId, filter.FolderId, filter.Keyword, filter.ProjectId, pagination.Limit(), pagination.Offset())
 	if err != nil {
 		return domain.PaginatedResult[Secret]{}, err
 	}
@@ -1246,6 +1450,95 @@ limit $6 offset $7
 		return domain.PaginatedResult[Secret]{}, err
 	}
 	return domain.PaginatedResult[Secret]{Items: items, Total: total}, nil
+}
+
+// ListSecretsWithCiphertext 同 ListSecrets,额外返回 value_ciphertext(以
+// SecretCacheRecord 形式),专供 service.Search 在填 Values 字段时一次拿全
+// metadata + ciphertext,避免 N+1 拉 id 再批量取 ciphertext。
+//
+// cascade narrowing 用 caller 传入的 action(secret:search);Values 字段的
+// "是否有权解密"由 service 层对每行单独 authorizer.Allow("secret:reveal") 判定,
+// repo 不做这层判定(走的是 search 而非 reveal 的 narrowing)。
+func (r *Repository) ListSecretsWithCiphertext(
+	ctx context.Context,
+	callerUserId, action string,
+	filter domain.ListFilter,
+	pagination domain.Pagination,
+) (domain.PaginatedResult[SecretCacheRecord], error) {
+	cte := userReadScopeCTE()
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "secret", column: "s.id"},
+		{scopeType: "folder", column: "s.folder_id"},
+		{scopeType: "environment", column: "e.id"},
+		{scopeType: "project", column: "p.id"},
+		{scopeType: "organization", column: "o.id"},
+	})
+
+	var total int64
+	err := r.db.QueryRowContext(ctx, cte+fmt.Sprintf(`
+select count(*)
+from secrets s
+join folders f on f.id = s.folder_id
+join environments e on e.id = f.environment_id
+join projects p on p.id = e.project_id
+join organizations o on o.id = p.org_id
+where s.is_deleted = false
+  and f.is_deleted = false
+  and e.is_deleted = false
+  and p.is_deleted = false
+  and o.is_deleted = false
+  and ($3 = '' or e.id = $3::uuid)
+  and ($4 = '' or s.folder_id = $4::uuid)
+  and ($5 = '' or s.key ilike '%%' || $5 || '%%')
+  and ($6 = '' or p.id = $6::uuid)%s
+`, narrow), callerUserId, action, filter.EnvironmentId, filter.FolderId, filter.Keyword, filter.ProjectId).Scan(&total)
+	if err != nil {
+		return domain.PaginatedResult[SecretCacheRecord]{}, err
+	}
+
+	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.value_ciphertext, s.comment, s.version,
+       s.created_by, s.updated_by,
+       s.created_at, s.updated_at
+from secrets s
+join folders f on f.id = s.folder_id
+join environments e on e.id = f.environment_id
+join projects p on p.id = e.project_id
+join organizations o on o.id = p.org_id
+where s.is_deleted = false
+  and f.is_deleted = false
+  and e.is_deleted = false
+  and p.is_deleted = false
+  and o.is_deleted = false
+  and ($3 = '' or e.id = $3::uuid)
+  and ($4 = '' or s.folder_id = $4::uuid)
+  and ($5 = '' or s.key ilike '%%' || $5 || '%%')
+  and ($6 = '' or p.id = $6::uuid)%s
+order by s.key asc, e.code asc
+limit $7 offset $8
+`, narrow), callerUserId, action, filter.EnvironmentId, filter.FolderId, filter.Keyword, filter.ProjectId, pagination.Limit(), pagination.Offset())
+	if err != nil {
+		return domain.PaginatedResult[SecretCacheRecord]{}, err
+	}
+	defer rows.Close()
+
+	var items []SecretCacheRecord
+	for rows.Next() {
+		var record SecretCacheRecord
+		if err := rows.Scan(
+			&record.Secret.Id, &record.Secret.OrgId, &record.Secret.OrgCode, &record.Secret.ProjectId, &record.Secret.ProjectCode, &record.Secret.EnvironmentId, &record.Secret.EnvironmentCode, &record.Secret.FolderId, &record.Secret.FolderCode, &record.Secret.Key, &record.ValueCiphertext, &record.Secret.Comment, &record.Secret.Version,
+			&record.Secret.CreatedBy, &record.Secret.UpdatedBy, &record.Secret.CreatedAt, &record.Secret.UpdatedAt,
+		); err != nil {
+			return domain.PaginatedResult[SecretCacheRecord]{}, err
+		}
+		r.fillSecretLabels(&record.Secret)
+		record.Secret.Path = buildSecretPath(record.Secret)
+		items = append(items, record)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.PaginatedResult[SecretCacheRecord]{}, err
+	}
+	return domain.PaginatedResult[SecretCacheRecord]{Items: items, Total: total}, nil
 }
 
 // BatchRevealSecretsByPath 一次性按 folder 路径 + 可选 keys 拉取 secret 明文所需的 metadata + ciphertext。

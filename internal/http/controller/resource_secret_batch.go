@@ -133,6 +133,11 @@ func secretBatchCreateRequestToDomain(req secretBatchCreateRequest) (service.Bat
 
 // extractEnvs 把单个 item 的 4 个 env 字段展开成有序的 []BatchCreateEnvTarget。
 // 至少要有一个 env 非空,否则该 item 无效。
+//
+// 额外校验:同 item 内 4 个 env 字段的 folderId 必须互不相同。
+// 若 dev/test/sim/prod 共用同一个 folderId(或部分共用),整批会因
+// (folder_id, key) 唯一约束整批回滚,错误信息"secret 已存在"具有误导性。
+// 在 controller 层提前 4xx 拒绝,定位更准。
 func extractEnvs(itemIdx int, item secretBatchCreateItemRequest) ([]service.BatchCreateEnvTarget, error) {
 	var envs []service.BatchCreateEnvTarget
 	for _, b := range envFieldBindings {
@@ -152,5 +157,26 @@ func extractEnvs(itemIdx int, item secretBatchCreateItemRequest) ([]service.Batc
 	if len(envs) == 0 {
 		return nil, fmt.Errorf("secretList[%d] 至少需要指定一个 env(dev/test/sim/prod)", itemIdx)
 	}
+	if err := checkEnvsFolderUniqueness(itemIdx, envs); err != nil {
+		return nil, err
+	}
 	return envs, nil
+}
+
+// checkEnvsFolderUniqueness 校验单 item 内各 env 字段的 folderId 互不相同。
+// 重复时返回带 item index + 重复 env 列表 + 重复 folderId 的精确错误信息。
+func checkEnvsFolderUniqueness(itemIdx int, envs []service.BatchCreateEnvTarget) error {
+	folderIdToEnvs := make(map[string][]string, len(envs))
+	for _, e := range envs {
+		folderIdToEnvs[e.FolderId] = append(folderIdToEnvs[e.FolderId], e.EnvCode)
+	}
+	for folderId, envCodes := range folderIdToEnvs {
+		if len(envCodes) > 1 {
+			return fmt.Errorf(
+				"secretList[%d] 的 env %v 共用了同一个 folderId(%s),应分别指向 4 个 env 下各自的 folder",
+				itemIdx, envCodes, folderId,
+			)
+		}
+	}
+	return nil
 }

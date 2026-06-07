@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -145,10 +146,10 @@ func TestSecretService_Search_PassesActionSearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search with valid user should succeed, got %v", err)
 	}
-	if len(repo.listCalls) != 1 {
-		t.Fatalf("repo.ListSecrets calls = %d, want 1", len(repo.listCalls))
+	if len(repo.searchCalls) != 1 {
+		t.Fatalf("repo.ListSecretsWithCiphertext calls = %d, want 1", len(repo.searchCalls))
 	}
-	c := repo.listCalls[0]
+	c := repo.searchCalls[0]
 	if c.callerUserId != "u-1" {
 		t.Errorf("callerUserId = %q, want u-1", c.callerUserId)
 	}
@@ -172,6 +173,94 @@ func TestSecretService_Search_NoUserIdRejects(t *testing.T) {
 	}
 }
 
+// TestSecretService_Search_ScopePriority 锁住 v11 search 的"三选一"优先级:
+// folderId > environmentId > projectId。Keyword 必须原样透传,scope 之外的字段不动。
+func TestSecretService_Search_ScopePriority(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          domain.ListFilter
+		wantFolder  string
+		wantEnv     string
+		wantProject string
+		wantKeyword string
+	}{
+		{
+			name:        "folder wins over env and project",
+			in:          domain.ListFilter{FolderId: "f1", EnvironmentId: "e1", ProjectId: "p1", Keyword: "K"},
+			wantFolder:  "f1",
+			wantEnv:     "",
+			wantProject: "",
+			wantKeyword: "K",
+		},
+		{
+			name:        "env wins over project when folder empty",
+			in:          domain.ListFilter{EnvironmentId: "e1", ProjectId: "p1", Keyword: "K"},
+			wantFolder:  "",
+			wantEnv:     "e1",
+			wantProject: "",
+			wantKeyword: "K",
+		},
+		{
+			name:        "project kept when only project set",
+			in:          domain.ListFilter{ProjectId: "p1", Keyword: "K"},
+			wantFolder:  "",
+			wantEnv:     "",
+			wantProject: "p1",
+			wantKeyword: "K",
+		},
+		{
+			name:        "all empty scopes preserved (no narrowing)",
+			in:          domain.ListFilter{Keyword: "K"},
+			wantFolder:  "",
+			wantEnv:     "",
+			wantProject: "",
+			wantKeyword: "K",
+		},
+		{
+			name:        "empty keyword preserved as-is (means full scan in scope)",
+			in:          domain.ListFilter{ProjectId: "p1"},
+			wantFolder:  "",
+			wantEnv:     "",
+			wantProject: "p1",
+			wantKeyword: "",
+		},
+		{
+			name:        "folder id with whitespace treated as empty (env kicks in)",
+			in:          domain.ListFilter{FolderId: "   ", EnvironmentId: "e1"},
+			wantFolder:  "",
+			wantEnv:     "e1",
+			wantProject: "",
+			wantKeyword: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &recordingRepo{}
+			svc := &secretService{repo: repo}
+			_, err := svc.Search(context.Background(), auth.UserInfo{UserId: "u-1"}, tc.in, domain.Pagination{PageNum: 1, PageSize: 20})
+			if err != nil {
+				t.Fatalf("Search should succeed, got %v", err)
+			}
+			if len(repo.searchCalls) != 1 {
+				t.Fatalf("repo.ListSecretsWithCiphertext calls = %d, want 1", len(repo.searchCalls))
+			}
+			got := repo.searchCalls[0].filter
+			if got.FolderId != tc.wantFolder {
+				t.Errorf("FolderId = %q, want %q", got.FolderId, tc.wantFolder)
+			}
+			if got.EnvironmentId != tc.wantEnv {
+				t.Errorf("EnvironmentId = %q, want %q", got.EnvironmentId, tc.wantEnv)
+			}
+			if got.ProjectId != tc.wantProject {
+				t.Errorf("ProjectId = %q, want %q", got.ProjectId, tc.wantProject)
+			}
+			if got.Keyword != tc.wantKeyword {
+				t.Errorf("Keyword = %q, want %q", got.Keyword, tc.wantKeyword)
+			}
+		})
+	}
+}
+
 // TestSecretService_Get_NoUserIdRejects 锁住 service 入口对空 user.UserId 的拒绝。
 // 与 auth.RBACAuthorizer.Allow 的空 UserId 行为对齐:返 ErrPermissionDenied。
 func TestSecretService_Get_NoUserIdRejects(t *testing.T) {
@@ -181,6 +270,289 @@ func TestSecretService_Get_NoUserIdRejects(t *testing.T) {
 	if !errors.Is(err, auth.ErrPermissionDenied) {
 		t.Fatalf("Get with empty user should return ErrPermissionDenied, got %v", err)
 	}
+}
+
+// makeEncryptedPayload 构造一段 SecretCiphertext 的 JSON,供 recordingRepo
+// 模拟"已加密的 secret 值"。service 端解密会用真实 encryptor;这里我们
+// 直接走 svc.encrypt 生成一个真实可解密的 ciphertext,免去 mock 解密逻辑。
+func makeEncryptedPayload(t *testing.T, svc *secretService, plaintext string) []byte {
+	t.Helper()
+	if svc.encryptor == nil {
+		t.Fatalf("svc.encryptor is nil; need real encryptor for fixture")
+	}
+	ct, err := svc.encrypt(context.Background(), plaintext)
+	if err != nil {
+		t.Fatalf("encrypt fixture: %v", err)
+	}
+	raw, err := json.Marshal(ct)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	return raw
+}
+
+// TestSecretService_Search_ProjectScope_AggregatesValues 锁住 v12 project 维度 search
+// 的聚合行为:同一 (folderCode, key) 跨多 env 合并为一条 *domain.SecretGroup,Envs
+// 累积为 {envCode: <Secret metadata>};顶层 Code 字段 = secret key;**内层
+// Secret 不填 values / value 字段**——project 维度 search 是「跨 env 浏览」
+// 语义,前端通过顶层 envCode keys 拿存在性 + 元数据,明文走 reveal 单点接口。
+//
+// 关键点:跨 env 时每个 env 有自己的 folderId(因为 env 是 folder 的父,folder
+// 行持 environment_id,跨 env 不复用),所以分组 key 用 (folderCode, key)
+// 而非 (folderId, key)——只有 folderCode 在「同一逻辑 folder 跨 env」语义
+// 下是稳定的,这样 dev/test/sim/prod 下 folderCode="ana-svc"、key="URL"
+// 的 4 条 secret 才合并为 1 个 group(而非 4 个)。
+func TestSecretService_Search_ProjectScope_AggregatesValues(t *testing.T) {
+	repo := &recordingRepo{}
+	enc, err := secretcrypto.NewAESGCMEncryptorFromBase64("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	if err != nil {
+		t.Fatalf("encryptor: %v", err)
+	}
+	svc := &secretService{repo: repo, authorizer: &recordingAuthorizer{}, encryptor: enc}
+	ctDev := makeEncryptedPayload(t, svc, "dev-val")
+	ctTest := makeEncryptedPayload(t, svc, "test-val")
+	ctSim := makeEncryptedPayload(t, svc, "sim-val")
+	ctProd := makeEncryptedPayload(t, svc, "prod-val")
+
+	// 4 个 env 各自有 folderId 不一样的 folder("ana-svc"),共享同一 folderCode
+	// 和同一 secret key "URL"——这是用户期望的「跨 env 同名 folder + 同 key 合并
+	// 为 1 组」场景。再加一条 folderCode="globals" 的不应合并到本组。
+	repo.searchWithCiphertextResult = domain.PaginatedResult[domain.SecretCacheRecord]{
+		Items: []domain.SecretCacheRecord{
+			{Secret: domain.Secret{Id: "s-dev", FolderId: "F-dev", FolderCode: "ana-svc", Key: "URL", EnvironmentCode: "dev"}, ValueCiphertext: ctDev},
+			{Secret: domain.Secret{Id: "s-test", FolderId: "F-test", FolderCode: "ana-svc", Key: "URL", EnvironmentCode: "test"}, ValueCiphertext: ctTest},
+			{Secret: domain.Secret{Id: "s-sim", FolderId: "F-sim", FolderCode: "ana-svc", Key: "URL", EnvironmentCode: "sim"}, ValueCiphertext: ctSim},
+			{Secret: domain.Secret{Id: "s-prod", FolderId: "F-prod", FolderCode: "ana-svc", Key: "URL", EnvironmentCode: "prod"}, ValueCiphertext: ctProd},
+			{Secret: domain.Secret{Id: "s-globals", FolderId: "F-globals", FolderCode: "globals", Key: "URL", EnvironmentCode: "dev"}, ValueCiphertext: ctDev},
+		},
+		Total: 5,
+	}
+
+	result, err := svc.Search(context.Background(), auth.UserInfo{UserId: "u-1"},
+		domain.ListFilter{ProjectId: "P1"}, domain.Pagination{PageNum: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("Search project scope should succeed, got %v", err)
+	}
+	// 期望 2 组:ana-svc/URL(dev+test+sim+prod 合并),globals/URL(dev)。
+	if len(result.Items) != 2 {
+		t.Fatalf("got %d groups, want 2 (ana-svc/URL + globals/URL)", len(result.Items))
+	}
+
+	// 第一组 ana-svc/URL:Envs 应包含 4 个 env(不同 folderId 但同一 folderCode)。
+	g1, ok := result.Items[0].(*domain.SecretGroup)
+	if !ok {
+		t.Fatalf("result.Items[0] type = %T, want *domain.SecretGroup", result.Items[0])
+	}
+	if g1.Key != "URL" {
+		t.Errorf("group[0].Key = %q, want URL", g1.Key)
+	}
+	if len(g1.Envs) != 4 {
+		t.Fatalf("group[0].Envs has %d envs, want 4 (dev/test/sim/prod)", len(g1.Envs))
+	}
+	for _, envCode := range []string{"dev", "test", "sim", "prod"} {
+		envSecret, exists := g1.Envs[envCode]
+		if !exists {
+			t.Errorf("group[0].Envs missing %q key", envCode)
+			continue
+		}
+		// 关键断言:每个 env 的 Secret.folderId 不同(因为跨 env 各自有 folder),
+		// 但 folderCode 都是 "ana-svc"——这正是「按 folderCode 聚合」想要的效果。
+		if envSecret.FolderCode != "ana-svc" || envSecret.Key != "URL" || envSecret.EnvironmentCode != envCode {
+			t.Errorf("group[0].Envs[%s] = folderCode=%s key=%s envCode=%s, want ana-svc/URL/%s",
+				envCode, envSecret.FolderCode, envSecret.Key, envSecret.EnvironmentCode, envCode)
+		}
+		// 关键断言:project 维度 search 不填内层 Secret.values / value 字段——
+		// JSON 序列化时这两个字段(omitempty)应该不出现。
+		if len(envSecret.Values) != 0 {
+			t.Errorf("group[0].Envs[%s].Values should be empty (project scope never fills values), got %v",
+				envCode, envSecret.Values)
+		}
+		if envSecret.Value != "" {
+			t.Errorf("group[0].Envs[%s].Value should be empty, got %q", envCode, envSecret.Value)
+		}
+	}
+
+	// 第二组 globals/URL:Envs 仅有 dev。
+	g2, ok := result.Items[1].(*domain.SecretGroup)
+	if !ok {
+		t.Fatalf("result.Items[1] type = %T, want *domain.SecretGroup", result.Items[1])
+	}
+	if g2.Key != "URL" {
+		t.Errorf("group[1].Key = %q, want URL", g2.Key)
+	}
+	if len(g2.Envs) != 1 {
+		t.Fatalf("group[1].Envs has %d envs, want 1 (dev)", len(g2.Envs))
+	}
+	devSecret, ok := g2.Envs["dev"]
+	if !ok {
+		t.Fatalf("group[1].Envs[dev] missing")
+	}
+	if devSecret.FolderCode != "globals" {
+		t.Errorf("group[1].Envs[dev].FolderCode = %q, want globals", devSecret.FolderCode)
+	}
+	if len(devSecret.Values) != 0 {
+		t.Errorf("group[1].Envs[dev].Values should be empty, got %v", devSecret.Values)
+	}
+}
+
+// TestSecretService_Search_ProjectScope_NoValuesEvenWithRevealPerm 锁住 v12:
+// project 维度 search 不管用户有没有 secret:reveal 权限,内层 Secret 都不填 values / value。
+// 与 env/folder 维度(有 reveal → 填 Values map)形成对比,体现 project 维度的「浏览语义」:
+// 前端拿到 group 后用顶层 envCode 键判断存在性,再走 reveal 单点接口拿明文。
+func TestSecretService_Search_ProjectScope_NoValuesEvenWithRevealPerm(t *testing.T) {
+	repo := &recordingRepo{}
+	enc, err := secretcrypto.NewAESGCMEncryptorFromBase64("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	if err != nil {
+		t.Fatalf("encryptor: %v", err)
+	}
+	ct := makeEncryptedPayload(t, svcForFixture(enc, repo), "real-val")
+
+	// 用全放行的 authorizer(默认有 secret:reveal 权限)——仍不应填充 values。
+	svc := &secretService{repo: repo, authorizer: &recordingAuthorizer{}, encryptor: enc}
+	repo.searchWithCiphertextResult = domain.PaginatedResult[domain.SecretCacheRecord]{
+		Items: []domain.SecretCacheRecord{
+			{Secret: domain.Secret{Id: "s1", FolderId: "F1", FolderCode: "ana-svc", Key: "URL", EnvironmentCode: "dev"}, ValueCiphertext: ct},
+		},
+		Total: 1,
+	}
+
+	result, err := svc.Search(context.Background(), auth.UserInfo{UserId: "u-1"},
+		domain.ListFilter{ProjectId: "P1"}, domain.Pagination{PageNum: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("Search should not fail: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("got %d groups, want 1", len(result.Items))
+	}
+	g, ok := result.Items[0].(*domain.SecretGroup)
+	if !ok {
+		t.Fatalf("result.Items[0] type = %T, want *domain.SecretGroup", result.Items[0])
+	}
+	if g.Key != "URL" {
+		t.Errorf("group.Key = %q, want URL", g.Key)
+	}
+	devSecret, exists := g.Envs["dev"]
+	if !exists {
+		t.Fatalf("group.Envs[dev] should still exist")
+	}
+	// 关键断言:即便有 reveal 权限,project 维度 search 也不解密、不填 values。
+	if len(devSecret.Values) != 0 {
+		t.Errorf("group.Envs[dev].Values should be empty in project scope, got %v", devSecret.Values)
+	}
+	if devSecret.Value != "" {
+		t.Errorf("group.Envs[dev].Value should be empty, got %q", devSecret.Value)
+	}
+}
+
+// TestSecretService_Search_EnvScope_ValuesSingleEntry 锁住 env/folder 维度的 Values
+// 形态:items 元素是 domain.Secret(非 SecretGroup),Values 是单 entry map,key = 当前 envCode。
+func TestSecretService_Search_EnvScope_ValuesSingleEntry(t *testing.T) {
+	repo := &recordingRepo{}
+	enc, err := secretcrypto.NewAESGCMEncryptorFromBase64("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	if err != nil {
+		t.Fatalf("encryptor: %v", err)
+	}
+	ct := makeEncryptedPayload(t, svcForFixture(enc, repo), "env-val")
+
+	svc := &secretService{repo: repo, authorizer: &recordingAuthorizer{}, encryptor: enc}
+	repo.searchWithCiphertextResult = domain.PaginatedResult[domain.SecretCacheRecord]{
+		Items: []domain.SecretCacheRecord{
+			{Secret: domain.Secret{Id: "s1", FolderId: "F1", Key: "URL", EnvironmentCode: "dev"}, ValueCiphertext: ct},
+			{Secret: domain.Secret{Id: "s2", FolderId: "F1", Key: "DB", EnvironmentCode: "dev"}, ValueCiphertext: ct},
+		},
+		Total: 2,
+	}
+
+	result, err := svc.Search(context.Background(), auth.UserInfo{UserId: "u-1"},
+		domain.ListFilter{EnvironmentId: "E1"}, domain.Pagination{PageNum: 1, PageSize: 20})
+	if err != nil {
+		t.Fatalf("Search env scope should succeed, got %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("got %d items, want 2 (no aggregation in env scope)", len(result.Items))
+	}
+	for i := range result.Items {
+		// env/folder 维度:items 元素必须是 domain.Secret,不是 SecretGroup。
+		sec, ok := result.Items[i].(domain.Secret)
+		if !ok {
+			t.Fatalf("items[%d] type = %T, want domain.Secret (env scope should NOT be SecretGroup)", i, result.Items[i])
+		}
+		if len(sec.Values) != 1 {
+			t.Errorf("items[%d].Values has %d entries, want 1", i, len(sec.Values))
+		}
+		if v, ok := sec.Values["dev"]; !ok || v != "env-val" {
+			t.Errorf("items[%d].Values[dev] = %q, want env-val", i, v)
+		}
+	}
+}
+
+// svcForFixture 是上面 3 个测试共用的"建 svc 助手":传入 encryptor 和 repo,返
+// 回一个可调用 encrypt 的 svc(makeEncryptedPayload 需要它)。enc 与 svc 用同一
+// encryptor,保证密文可以被 svc.decrypt 解开。
+func svcForFixture(enc secretcrypto.Encryptor, repo *recordingRepo) *secretService {
+	return &secretService{repo: repo, authorizer: &recordingAuthorizer{}, encryptor: enc}
+}
+
+// denyAllAuthorizer 拒绝所有 Allow 请求,模拟"用户无 secret:reveal 权限"。
+type denyAllAuthorizer struct{}
+
+func (denyAllAuthorizer) Allow(_ context.Context, _ auth.UserInfo, _ string, _ auth.Resource) error {
+	return auth.ErrPermissionDenied
+}
+
+// TestSecretGroup_MarshalJSON_FlattensEnvs 锁住 v12 SecretGroup 的 JSON 序列化:
+// 顶层 code 字段 + 各 envCode 展平为顶层键,每个 envCode 对应一个完整 Secret。
+// 与产品要求「使用 projectId 查询时返回 {key, <envCode>: {...}}」一一对应。
+func TestSecretGroup_MarshalJSON_FlattensEnvs(t *testing.T) {
+	group := domain.SecretGroup{
+		Key: "OB_USER_11111111111",
+		Envs: map[string]domain.Secret{
+			"dev":  {Id: "s-dev", Key: "OB_USER_11111111111", EnvironmentCode: "dev", FolderCode: "ana-svc", ProjectCode: "proj-09", OrgCode: "org-01"},
+			"test": {Id: "s-test", Key: "OB_USER_11111111111", EnvironmentCode: "test", FolderCode: "ana-svc", ProjectCode: "proj-09", OrgCode: "org-01"},
+		},
+	}
+	raw, err := json.Marshal(group)
+	if err != nil {
+		t.Fatalf("MarshalJSON failed: %v", err)
+	}
+	// 反序列化为 generic map,确认顶层键形态。
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal back: %v", err)
+	}
+	if _, ok := m["key"]; !ok {
+		t.Errorf("top-level key 'key' missing, got keys: %v", keysOf(m))
+	}
+	if _, ok := m["dev"]; !ok {
+		t.Errorf("top-level envCode 'dev' missing, got keys: %v", keysOf(m))
+	}
+	if _, ok := m["test"]; !ok {
+		t.Errorf("top-level envCode 'test' missing, got keys: %v", keysOf(m))
+	}
+	// 反序列化 key 字符串确认内容(应该等于 secret key,与数据库 secrets.key 对齐)。
+	var key string
+	if err := json.Unmarshal(m["key"], &key); err != nil {
+		t.Fatalf("unmarshal key: %v", err)
+	}
+	if key != "OB_USER_11111111111" {
+		t.Errorf("key = %q, want OB_USER_11111111111", key)
+	}
+	// dev 内部应有完整 Secret 字段。
+	var devEnv domain.Secret
+	if err := json.Unmarshal(m["dev"], &devEnv); err != nil {
+		t.Fatalf("unmarshal dev env: %v", err)
+	}
+	if devEnv.Id != "s-dev" || devEnv.EnvironmentCode != "dev" {
+		t.Errorf("dev env = id=%s envCode=%s, want s-dev/dev", devEnv.Id, devEnv.EnvironmentCode)
+	}
+}
+
+func keysOf(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // TestSecretService_BatchRevealByPath_NoUserIdRejects 锁住 service 入口对空 user.UserId 的拒绝。
@@ -273,10 +645,15 @@ func (r *recordingAuthorizer) Allow(_ context.Context, user auth.UserInfo, actio
 }
 
 // recordingRepo 只为 List/Search 测试提供最小替身:实现 store.ResourceRepository,
-// 只把 ListSecrets 的入参(callerUserId, action, filter)记下来以便断言;
+// 只把 ListSecrets / ListSecretsWithCiphertext 的入参(callerUserId, action, filter)记下来以便断言;
 // 其他方法 panic,避免被误调用。
 type recordingRepo struct {
 	listCalls []struct {
+		callerUserId string
+		action       string
+		filter       domain.ListFilter
+	}
+	searchCalls []struct {
 		callerUserId string
 		action       string
 		filter       domain.ListFilter
@@ -298,6 +675,9 @@ type recordingRepo struct {
 	}
 	batchCreateCalls [][]store.BatchCreateSecretItem
 	batchCreateErr   error
+	// searchWithCiphertextResult 是 ListSecretsWithCiphertext 的预设返回值,
+	// 测试在创建 repo 时填好,Search 内部会原样透传给聚合函数。
+	searchWithCiphertextResult domain.PaginatedResult[domain.SecretCacheRecord]
 }
 
 func (r *recordingRepo) ListSecrets(_ context.Context, callerUserId, action string, filter domain.ListFilter, _ domain.Pagination) (domain.PaginatedResult[domain.Secret], error) {
@@ -307,6 +687,15 @@ func (r *recordingRepo) ListSecrets(_ context.Context, callerUserId, action stri
 		filter       domain.ListFilter
 	}{callerUserId: callerUserId, action: action, filter: filter})
 	return domain.PaginatedResult[domain.Secret]{}, nil
+}
+
+func (r *recordingRepo) ListSecretsWithCiphertext(_ context.Context, callerUserId, action string, filter domain.ListFilter, _ domain.Pagination) (domain.PaginatedResult[domain.SecretCacheRecord], error) {
+	r.searchCalls = append(r.searchCalls, struct {
+		callerUserId string
+		action       string
+		filter       domain.ListFilter
+	}{callerUserId: callerUserId, action: action, filter: filter})
+	return r.searchWithCiphertextResult, nil
 }
 
 func (r *recordingRepo) BatchRevealSecretsByPath(_ context.Context, callerUserId, action, orgCode, projectCode, envCode, folderCode string, keys []string) ([]domain.Secret, [][]byte, error) {
@@ -483,6 +872,15 @@ func (r *recordingRepo) ListAllEnvironmentsForTree(context.Context, string) ([]d
 	panic("not implemented")
 }
 func (r *recordingRepo) ListAllFoldersForTree(context.Context, string) ([]domain.FolderTreeEntry, error) {
+	panic("not implemented")
+}
+func (r *recordingRepo) ListFoldersInProject(context.Context, string, string) ([]domain.FolderInProject, error) {
+	panic("not implemented")
+}
+func (r *recordingRepo) CreateFoldersAcrossEnvs(context.Context, string, string, string, string, string, []string) ([]domain.Entity, error) {
+	panic("not implemented")
+}
+func (r *recordingRepo) CreateTopLevelFoldersInEnvs(context.Context, string, string, string, string, []string) ([]domain.Entity, error) {
 	panic("not implemented")
 }
 

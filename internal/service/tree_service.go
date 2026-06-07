@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
 	"envVault/internal/auth"
@@ -15,13 +16,14 @@ import (
 // 挂在同一根下,前端可以单独识别它(不要把它当作真实资源去 GET)。
 const orphanSentinelId = "__orphans__"
 
-// TreeRepository 是 tree service 需要的 repo 最小接口(只 4 个 ListAll*ForTree),
+// TreeRepository 是 tree service 需要的 repo 最小接口(4 个 ListAll*ForTree + 1 个按 project 列 folder),
 // 与 store.ResourceRepository 解耦便于测试 mock。
 type TreeRepository interface {
 	ListAllOrganizationsForTree(ctx context.Context, callerUserId string) ([]domain.Entity, error)
 	ListAllProjectsForTree(ctx context.Context, callerUserId string) ([]domain.Entity, error)
 	ListAllEnvironmentsForTree(ctx context.Context, callerUserId string) ([]domain.Entity, error)
 	ListAllFoldersForTree(ctx context.Context, callerUserId string) ([]domain.FolderTreeEntry, error)
+	ListFoldersInProject(ctx context.Context, callerUserId, projectId string) ([]domain.FolderInProject, error)
 }
 
 // treeCacheMetaReader 是 TreeService 读 cache 的最小接口,只暴露 ListAllMeta,
@@ -40,8 +42,13 @@ type treeCacheMetaReader interface {
 //     这里再走一次 4 个 :read 码的二次过滤,与 GlobalSearch 风格一致)
 //   - 父不可见子可见的孤儿节点:includeOrphans=true 时挂虚拟根,=false 时丢弃
 //   - maxDepth 控制截断:1=org / 2=+project / 3=+env / 4=+folder
+//
+// GetProjectFolderTree:按 project 维度聚合 folder 结构(level=1 按 code 聚合,
+// 每组带 envList;subFolders 跟随父层挂载)。不走 cache——单 project 量级小,
+// 走 DB 加 RBAC narrowing 一次 SQL 即可。
 type TreeService interface {
 	GetTree(ctx context.Context, user auth.UserInfo, req domain.TreeRequest) (domain.ResourceTree, error)
+	GetProjectFolderTree(ctx context.Context, user auth.UserInfo, req domain.ProjectFolderRequest) (domain.ProjectFolderTree, error)
 }
 
 type treeService struct {
@@ -455,4 +462,183 @@ func parentIdForNode(f domain.FolderTreeEntry) string {
 		return f.EnvironmentId
 	}
 	return f.ParentId
+}
+
+// GetProjectFolderTree 按 project 维度返回 folder 结构(level=1 按 code 聚合,每组带
+// envList;level=2 子层跟随父层挂载在 SubFolders 下,同样按 code 聚合)。
+//
+// 流程:
+//  1. repo.ListFoldersInProject(callerUserId, projectId) 一次 SQL 拉所有 level=1+2 folder
+//     (RBAC narrowing 已在 SQL 层做)
+//  2. service 按 (code) 聚合 level=1,生成 FolderGroup 列表(envList 按 env id 去重保持顺序)
+//  3. 按 (parent_id → 父 group, child_code) 聚合 level=2,挂到父 group.SubFolders
+//  4. 二次 authorizer.Allow("folder:read", folder) 过滤(与 GetTree 一致,SQL 之外的兜底)
+//
+// 返回的 envList 元素是 env id(UUID);id / name / comment 从该 code 在第一个 env 中
+// 的实例取(同名 folder 的 name/comment 通常一致;不一致以第一个为准,前端如需精确
+// 可按 env 拉详情)。
+//
+// 关键约定:只要父 group 出现在结果里,它的所有 subFolders(由 SQL narrowing 限制)
+// 都一定存在——SQL 同时拉父子两层,service 不可能出现"父在但子丢"的情况。
+func (s *treeService) GetProjectFolderTree(
+	ctx context.Context, user auth.UserInfo, req domain.ProjectFolderRequest,
+) (domain.ProjectFolderTree, error) {
+	tree := domain.ProjectFolderTree{FolderList: []domain.FolderGroup{}}
+
+	rows, err := s.repo.ListFoldersInProject(ctx, user.UserId, req.ProjectId)
+	if err != nil {
+		return tree, err
+	}
+	if len(rows) == 0 {
+		return tree, nil
+	}
+
+	// 1. 二次 RBAC 收窄:SQL 已带 narrowing,这里 per-folder 再过 authorizer.Allow。
+	//    单条失败仅过滤掉,其他错误透传(例如 authorizer 内部 DB 故障)。
+	visible := make([]domain.FolderInProject, 0, len(rows))
+	for i := range rows {
+		rid := rows[i].Id
+		if err := s.authorizer.Allow(ctx, user, "folder:read", auth.Resource{Type: "folder", Id: rid}); err != nil {
+			if errors.Is(err, auth.ErrPermissionDenied) || errors.Is(err, domain.ErrNotFound) {
+				continue
+			}
+			return tree, err
+		}
+		visible = append(visible, rows[i])
+	}
+
+	// 2. 按 level 分桶(level=1 一组,level=2 一组;rows 已按 level asc 排序)。
+	var level1 []domain.FolderInProject
+	var level2 []domain.FolderInProject
+	for i := range visible {
+		if visible[i].Level == 1 {
+			level1 = append(level1, visible[i])
+		} else {
+			level2 = append(level2, visible[i])
+		}
+	}
+
+	// 3. 聚合 level=1:按 code 聚合(envList 按出现顺序去重,id/name/comment 取首个)。
+	byCodeL1 := make(map[string]*l1Aggregate)
+	for i := range level1 {
+		f := level1[i]
+		a, ok := byCodeL1[f.Code]
+		if !ok {
+			a = &l1Aggregate{
+				group: &domain.FolderGroup{
+					Id:      f.Id,
+					Code:    f.Code,
+					Name:    f.Name,
+					Comment: f.Comment,
+					EnvList: []domain.EnvRef{},
+					// SubFolders 在聚合 level=2 时填充,初始化为 [] 防 JSON null
+					SubFolders: []domain.SubFolderGroup{},
+				},
+				envSet: make(map[string]struct{}),
+			}
+			byCodeL1[f.Code] = a
+		}
+		if _, dup := a.envSet[f.EnvironmentId]; !dup {
+			a.envSet[f.EnvironmentId] = struct{}{}
+			a.envList = append(a.envList, domain.EnvRef{
+				Id:       f.EnvironmentId,
+				Code:     f.EnvironmentCode,
+				FolderId: f.Id,
+			})
+		}
+	}
+
+	// 4. 聚合 level=2:按 (父 folder code, 子 code) 聚合(不是按 parent_id)。
+	//    理由:同一 code 的父 folder 在不同 env 下 id 不同(分别 <uuid>),如果按 parent_id
+	//    聚合,同名子 stripe 会被分裂到 2 个父 group 下;但用户的契约是
+	//    "子目录跟随父目录"——只要父的 code 相同,子层就合并。
+	//    聚合 key 形如 "payment/stripe",envList 跨所有父实例合并(去重保序)。
+	//    反向契约:父 group 不可见(RBAC 收窄)时,其所有子实例被整体跳过。
+	parentIdToCode := make(map[string]string, len(level1))
+	for i := range level1 {
+		parentIdToCode[level1[i].Id] = level1[i].Code
+	}
+	// 按 (parentCode, childCode) 聚合
+	type childAggKey struct {
+		parentCode string
+		childCode  string
+	}
+	childAgg := make(map[childAggKey]*l2Aggregate)
+	for i := range level2 {
+		f := level2[i]
+		parentCode, ok := parentIdToCode[f.ParentId]
+		if !ok {
+			// 父不可见 → 子层跳过
+			continue
+		}
+		key := childAggKey{parentCode: parentCode, childCode: f.Code}
+		a, ok := childAgg[key]
+		if !ok {
+			a = &l2Aggregate{
+				group: &domain.SubFolderGroup{
+					Id:      f.Id,
+					Code:    f.Code,
+					Name:    f.Name,
+					Comment: f.Comment,
+					EnvList: []domain.EnvRef{},
+				},
+				envSet: make(map[string]struct{}),
+			}
+			childAgg[key] = a
+		}
+		if _, dup := a.envSet[f.EnvironmentId]; !dup {
+			a.envSet[f.EnvironmentId] = struct{}{}
+			a.group.EnvList = append(a.group.EnvList, domain.EnvRef{
+				Id:       f.EnvironmentId,
+				Code:     f.EnvironmentCode,
+				FolderId: f.Id,
+			})
+		}
+	}
+	// 把聚合结果挂到对应父 group 下,按 child code 字母序输出
+	childrenByParent := make(map[string][]*l2Aggregate)
+	for key, a := range childAgg {
+		childrenByParent[key.parentCode] = append(childrenByParent[key.parentCode], a)
+	}
+	for _, parentGroup := range byCodeL1 {
+		children := childrenByParent[parentGroup.group.Code]
+		// 按 child code 字母序
+		sort.SliceStable(children, func(i, j int) bool {
+			return children[i].group.Code < children[j].group.Code
+		})
+		for _, c := range children {
+			parentGroup.group.SubFolders = append(parentGroup.group.SubFolders, *c.group)
+		}
+	}
+
+	// 5. 按 code 字母序输出 level=1 group
+	for _, code := range sortedStringKeys(byCodeL1) {
+		a := byCodeL1[code]
+		a.group.EnvList = a.envList
+		tree.FolderList = append(tree.FolderList, *a.group)
+	}
+	return tree, nil
+}
+
+// l1Aggregate / l2Aggregate 是 GetProjectFolderTree 内部聚合的中间结构。
+// envSet + envList 保序去重(envList 是最终返回的 EnvRef 列表)。
+type l1Aggregate struct {
+	group   *domain.FolderGroup
+	envSet  map[string]struct{}
+	envList []domain.EnvRef
+}
+type l2Aggregate struct {
+	group  *domain.SubFolderGroup
+	envSet map[string]struct{}
+}
+
+// sortedStringKeys 返回 map 所有 key 排序后的字符串切片(泛用 helper,避免为
+// 每个 map 类型都写一个排序 wrapper)。
+func sortedStringKeys[T any](m map[string]T) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

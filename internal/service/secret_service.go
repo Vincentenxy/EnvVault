@@ -59,7 +59,15 @@ type SecretService interface {
 	BatchCreate(ctx context.Context, user auth.UserInfo, req BatchCreateRequest, actor string) error
 
 	List(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
-	Search(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
+	// Search returns secret hits in scope-defined shape:
+	//   - filter.ProjectId != "" → items 元素为 *domain.SecretGroup(按 folder,key 聚合,
+	//     每个 env 一个完整 Secret,JSON 序列化为 {code, <envCode>: {...}, ...})
+	//   - filter.EnvironmentId / FolderId 维度 → items 元素为 domain.Secret(1 行 1 secret,
+	//     Values 是单 entry map)
+	//   - scope 全空(items 来自 RBAC 收窄后的全量)走 env/folder 维度同形态
+	// 用 PaginatedResult[any] 承载两种不同 item 形态,handler 端用 type assertion 区分;
+	// JSON 序列化由每种类型各自的 MarshalJSON/Marshal 决定,handler 不需要关心。
+	Search(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[any], error)
 }
 
 // BatchCreateRequest 是 SecretService.BatchCreate 的入参。
@@ -449,20 +457,224 @@ func (s *secretService) listScope(ctx context.Context, user auth.UserInfo, actio
 // List 按 caller 的 user_role_bindings 自动收窄可见 secret(scope 链:
 // secret > folder > env > project > org);caller 无 binding → 返空 list。
 // cache 不感知 user,无法收窄,List 走 repo 直查。
+//
+// v11 起和 Search 一样复用 narrowSecretSearchScope:folder > env > project 三选一,
+// 全空走 RBAC 收窄后的全量。响应只填 metadata(无 Values 字段),与 Search 的区别仅
+// 在 action("secret:list" vs "secret:search")。
 func (s *secretService) List(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error) {
 	if strings.TrimSpace(user.UserId) == "" {
 		return domain.PaginatedResult[domain.Secret]{}, auth.ErrPermissionDenied
 	}
+	filter = narrowSecretSearchScope(filter)
 	return s.repo.ListSecrets(ctx, user.UserId, "secret:list", filter, pagination)
 }
 
 // Search 同 List,差别只在 action("secret:search")。
 // 同样不走 cache(cache 不感知 user);keyword 模糊搜索本就走 DB 索引,影响可控。
-func (s *secretService) Search(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error) {
+//
+// 优先级收敛(folder > env > project):caller 一次性传多个 scope id 时,只取最细
+// 的一个,其他忽略。空 keyword 表示"该 scope 内全量"——repo 的 `($5 = '' or ...)`
+// 已经天然支持,这里不用特判。
+//
+// v12:scope=project 时,响应按 (folderCode, key) 聚合为 *domain.SecretGroup(顶层
+// key 字段 = secret key,与数据库 secrets.key 字段名对齐,后续每个 envCode 展
+// 开为一个完整 Secret 元数据,**内层不填 values / value 字段**——project 维
+// 度的 search 是「跨 env 浏览」语义,明文走 reveal 单点接口);env/folder scope
+// 时,响应保持 []domain.Secret(Values 单 entry map,沿用 v11 形态)。返回类型
+// 用 PaginatedResult[any] 统一承载,JSON 由各 item 类型的 MarshalJSON/Marshal
+// 决定。env/folder 维度的 value 填充仍受 secret:reveal 权限约束——无权限或
+// 无 ciphertext 时填空串。
+func (s *secretService) Search(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[any], error) {
 	if strings.TrimSpace(user.UserId) == "" {
-		return domain.PaginatedResult[domain.Secret]{}, auth.ErrPermissionDenied
+		return domain.PaginatedResult[any]{}, auth.ErrPermissionDenied
 	}
-	return s.repo.ListSecrets(ctx, user.UserId, "secret:search", filter, pagination)
+	filter = narrowSecretSearchScope(filter)
+
+	records, err := s.repo.ListSecretsWithCiphertext(ctx, user.UserId, "secret:search", filter, pagination)
+	if err != nil {
+		return domain.PaginatedResult[any]{}, err
+	}
+
+	if filter.ProjectId != "" {
+		groups, total, err := s.aggregateSecretsByProject(records, pagination)
+		if err != nil {
+			return domain.PaginatedResult[any]{}, err
+		}
+		items := make([]any, 0, len(groups))
+		for i := range groups {
+			items = append(items, groups[i])
+		}
+		return domain.PaginatedResult[any]{Items: items, Total: total}, nil
+	}
+
+	secrets, err := s.fillValuesPerSecret(ctx, user, records)
+	if err != nil {
+		return domain.PaginatedResult[any]{}, err
+	}
+	items := make([]any, 0, len(secrets.Items))
+	for i := range secrets.Items {
+		items = append(items, secrets.Items[i])
+	}
+	return domain.PaginatedResult[any]{Items: items, Total: secrets.Total}, nil
+}
+
+// narrowSecretSearchScope 按 folder > env > project 优先级收敛三选一,空 scope
+// 全保留为兜底(全量走 RBAC narrowing)。先 trim 全部 scope 字段,再按优先级收敛,
+// 避免 repo 收到纯空白字符串去撞 UUID 列。
+func narrowSecretSearchScope(filter domain.ListFilter) domain.ListFilter {
+	filter.FolderId = strings.TrimSpace(filter.FolderId)
+	filter.EnvironmentId = strings.TrimSpace(filter.EnvironmentId)
+	filter.ProjectId = strings.TrimSpace(filter.ProjectId)
+	switch {
+	case filter.FolderId != "":
+		filter.EnvironmentId = ""
+		filter.ProjectId = ""
+	case filter.EnvironmentId != "":
+		filter.ProjectId = ""
+	}
+	return filter
+}
+
+// fillValuesPerSecret 用于 env/folder 维度的 search:响应保持 1 行 1 secret(原
+// 状),Values 是单 entry map {envCode: value}。每条 secret 的值受 secret:reveal
+// 权限约束,无权限时填 ""。
+func (s *secretService) fillValuesPerSecret(
+	ctx context.Context,
+	user auth.UserInfo,
+	records domain.PaginatedResult[domain.SecretCacheRecord],
+) (domain.PaginatedResult[domain.Secret], error) {
+	items := make([]domain.Secret, 0, len(records.Items))
+	for i := range records.Items {
+		rec := records.Items[i]
+		plaintext, err := s.revealIfPermitted(ctx, user, rec.Secret.Id, rec.ValueCiphertext)
+		if err != nil {
+			return domain.PaginatedResult[domain.Secret]{}, err
+		}
+		if plaintext != "" || rec.Secret.EnvironmentCode != "" {
+			rec.Secret.Values = map[string]string{rec.Secret.EnvironmentCode: plaintext}
+		}
+		items = append(items, rec.Secret)
+	}
+	return domain.PaginatedResult[domain.Secret]{Items: items, Total: records.Total}, nil
+}
+
+// aggregateSecretsByProject 用于 project 维度的 search:repo 已经把匹配 secret
+// 按 (key asc, env code asc) 排好,我们按 (folderCode, key) 滚动聚合,每组
+// 生成一个 *domain.SecretGroup,Envs 累积为 {envCode: <Secret metadata>, ...}。
+//
+// 关键设计:分组 key 用 (folderCode, key) 而非 (folderId, key)。原因是
+// level-1 folder 在每个 env 下都有一个独立的 folderId(env 是 folder 的父,
+// folder 行同时持 environment_id 字段,跨 env 不复用 id),所以同一「逻辑
+// folder」在不同 env 是 4 个不同 folderId 行;只有 folderCode 在「同一
+// folder 跨 env」语义下是稳定的。grouping by folderCode 才能把
+// dev/test/sim/prod 下 folderCode="ana-svc"、key="URL" 的 4 条 secret
+// 聚合成 1 个 group,响应形如 {key: "URL", dev: {...}, test: {...}, ...}。
+//
+// 如果将来需要支持 level=2 folder(其 folderCode 跨 env 也可能相同),分
+// 组 key 仍能正确工作,因为 level=2 folder 的 folderCode 在「同一逻辑
+// folder 跨 env」下也是稳定标识;若是同 env 下两个 level=2 folder 同
+// code,那是数据模型冲突(folder code 唯一约束在 (env, parent_id, code)
+// 上,同 env 下同 code 是 unique violation),不会出现在结果集里。
+//
+// 输出 JSON 形如 { "key": "<key>", "dev": {<Secret>}, "test": {<Secret>}, ... }
+// (envCode 由 SecretGroup.MarshalJSON 展平到顶层);顶层 "key" 字段名与数据库
+// secrets.key 对齐。每个 env 一条完整 Secret 元数据(包含 path / 4 级 codes /
+// version / audit 字段)。**不在内层 Secret 上填 values / value 字段**——
+// project 维度的 search 是「跨 env 浏览」语义,前端想要的是「同一 key 在不
+// 同 env 的存在性 + 元数据对比」,不是「明文值」;明文走 reveal 单点接口
+// (同 id)或 batchRevealByPath(同 folder)。所以这里不做 reveal 权限 check
+// 也不解密,ValueCiphertext 字段直接忽略(repo 仍走 ListSecretsWithCiphertext
+// 一次拿全 metadata + ciphertext,主要是为了不引入第二条 SQL 路径,牺牲一点
+// 点 IO 换实现简单;如要优化可改成 ListSecrets,见 List 方法)。
+//
+// 分页:repo 返回的 records 已经是 paginated rows;聚合后的"组"数量会少于
+// 或等于 records 数量,这里直接在 Go 里截断 limit / offset,牺牲一点对超
+// 大项目的可扩展性换实现简单。后续如要支持 10k+ secret 的项目,可以把分组
+// 下推到 SQL(GROUP BY + json_object_agg 等)。
+func (s *secretService) aggregateSecretsByProject(
+	records domain.PaginatedResult[domain.SecretCacheRecord],
+	pagination domain.Pagination,
+) ([]*domain.SecretGroup, int64, error) {
+	type groupKey struct {
+		folderCode string
+		key        string
+	}
+
+	groups := make(map[groupKey]*domain.SecretGroup, len(records.Items))
+	order := make([]groupKey, 0, len(records.Items))
+
+	for i := range records.Items {
+		rec := records.Items[i]
+		// 关键:用 folderCode 而非 folderId 分组,这样「同一逻辑 folder 跨 env」的
+		// 4 条 secret 才能聚合成 1 个 group(folderId 跨 env 一定不同,会拆成 4 组)。
+		k := groupKey{folderCode: rec.Secret.FolderCode, key: rec.Secret.Key}
+		g, ok := groups[k]
+		if !ok {
+			// 同组内所有 env 共享同一个 key,顶层 key 字段就用这个 secret key(与
+			// 数据库 secrets.key 字段名对齐,前端无歧义对应)。
+			g = &domain.SecretGroup{
+				Key:  rec.Secret.Key,
+				Envs: map[string]domain.Secret{},
+			}
+			groups[k] = g
+			order = append(order, k)
+		}
+		if rec.Secret.EnvironmentCode != "" {
+			// 内层 Secret 保留 repo 返回的 metadata 原样:不填 Values、不解密密文。
+			// 上一层 caller 不会用到 envSecret.Value / Values(omitempty 也会让
+			// 这两个空字段不出现于 JSON),所以无后续副作用。
+			g.Envs[rec.Secret.EnvironmentCode] = rec.Secret
+		}
+	}
+
+	all := make([]*domain.SecretGroup, 0, len(order))
+	for _, k := range order {
+		all = append(all, groups[k])
+	}
+
+	total := records.Total
+	if total == 0 {
+		total = int64(len(all))
+	}
+
+	limit := pagination.Limit()
+	offset := pagination.Offset()
+	if offset > len(all) {
+		offset = len(all)
+	}
+	end := offset + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	return all[offset:end], total, nil
+}
+
+// revealIfPermitted 对单条 secret 做 secret:reveal 判定 + 解密,封装 N+1
+// 的小循环:无权限 / 无 ciphertext / 解密失败 一律返回空串(不阻断搜索)。
+func (s *secretService) revealIfPermitted(
+	ctx context.Context,
+	user auth.UserInfo,
+	secretId string,
+	ciphertext []byte,
+) (string, error) {
+	if len(ciphertext) == 0 {
+		return "", nil
+	}
+	if err := s.authorizer.Allow(ctx, user, "secret:reveal", secretSecretScope(secretId)); err != nil {
+		if errors.Is(err, auth.ErrPermissionDenied) {
+			return "", nil
+		}
+		return "", err
+	}
+	var ct domain.SecretCiphertext
+	if err := json.Unmarshal(ciphertext, &ct); err != nil {
+		return "", nil
+	}
+	plain, err := s.decrypt(ctx, ct)
+	if err != nil {
+		return "", nil
+	}
+	return string(plain), nil
 }
 
 func (s *secretService) encrypt(ctx context.Context, value string) (domain.SecretCiphertext, error) {

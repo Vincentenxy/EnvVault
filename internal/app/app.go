@@ -24,14 +24,22 @@ func Run() error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Database.ConnectTimeout)
-	defer cancel()
-
-	gormDB, db, err := postgres.OpenGORM(ctx, cfg.Database)
+	// pingCtx 只用于 DB 连接探测:5s ConnectTimeout 仅约束 Ping,ping 完即 cancel,
+	// 避免后续启动流程的 ctx 被这个 5s 误伤(切到远程 DB/Redis 后 WarmSecrets 等
+	// 长任务会触发 deadline exceeded)。
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), cfg.Database.ConnectTimeout)
+	gormDB, db, err := postgres.OpenGORM(pingCtx, cfg.Database)
+	pingCancel()
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+
+	// 启动流程用独立 ctx(无超时),与 server 生命周期对齐;ListenAndServe 退出时
+	// 由 defer cancel 释放。EnsureSystemData / userCache.Load 等都走它,不再受
+	// ConnectTimeout 影响。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	encryptor, err := secretcrypto.NewAESGCMEncryptorFromBase64(cfg.Security.EncryptionKey)
 	if err != nil {
@@ -74,14 +82,12 @@ func Run() error {
 		defer cache.Close()
 
 		if cfg.Redis.WarmUpOnStart {
-			records, err := repository.ListSecretCacheRecords(ctx)
-			if err != nil {
-				return err
-			}
-			if err := cache.WarmSecrets(ctx, records); err != nil {
-				return err
-			}
-			logging.Info(ctx, "AppRun", "redis cache warmup completed", logging.F("count", len(records)))
+			// secret 缓存预热放后台跑:warmUpCtx 不挂到 5s pingCtx 上,
+			// 与 server 生命周期绑定(Run 退出时 cancel),失败仅 logging.Error 上报,
+			// 不阻塞主启动流程。
+			warmUpCtx, warmUpCancel := context.WithCancel(context.Background())
+			defer warmUpCancel()
+			go warmupSecretCache(warmUpCtx, repository, cache)
 		}
 		secretSvc = service.NewSecretService(repository, encryptor, cache, authorizer)
 		treeSvc = service.NewTreeService(repository, cache, authorizer)
@@ -158,3 +164,25 @@ type noopLimiter struct{}
 
 func (noopLimiter) Check(_ context.Context, _ string) error          { return nil }
 func (noopLimiter) Record(_ context.Context, _ string, _ bool) error { return nil }
+
+// warmupSecretCache 在独立 goroutine 里跑 ListSecretCacheRecords + WarmSecrets,
+// 与主启动流程解耦:
+//   - 使用独立的 ctx(无 ConnectTimeout 限制),失败/成功都通过 logging 上报,
+//     不返回 error,绝不阻塞主启动;
+//   - ctx 由调用方通过 defer warmUpCancel() 释放,server 退出时随之 cancel。
+func warmupSecretCache(ctx context.Context, repo *postgres.Repository, cache *rediscache.Cache) {
+	records, err := repo.ListSecretCacheRecords(ctx)
+	if err != nil {
+		logging.Error(ctx, "AppRun.Warmup", "list secret cache records failed",
+			logging.F("error", err.Error()))
+		return
+	}
+	if err := cache.WarmSecrets(ctx, records); err != nil {
+		logging.Error(ctx, "AppRun.Warmup", "warm secrets failed",
+			logging.F("error", err.Error()),
+			logging.F("count", len(records)))
+		return
+	}
+	logging.Info(ctx, "AppRun.Warmup", "redis cache warmup completed",
+		logging.F("count", len(records)))
+}

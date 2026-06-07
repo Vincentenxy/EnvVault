@@ -168,3 +168,61 @@ order by t.name asc
 	}
 	return items, rows.Err()
 }
+
+// ListFoldersInProject 列 caller 在指定 project 下可见的所有 level=1 + level=2 folder,
+// 一次 SQL 返回,service 层按 code 聚合为 FolderGroup(子层挂在父层 SubFolders)。
+//
+// 与 ListAllFoldersForTree 的区别:本方法带 projectId 过滤,避免大项目场景下
+// 拉全量 folder 再内存过滤。RBAC narrowing 走与 ListFolders 相同的 4 层链
+// (folder, environment, project, organization)。
+//
+// 排序固定:level ASC, code ASC, environment_id ASC,environment_id 稳定时
+// id ASC;保证前端遍历可重现。
+func (r *Repository) ListFoldersInProject(
+	ctx context.Context,
+	callerUserId, projectId string,
+) ([]domain.FolderInProject, error) {
+	cte := userReadScopeCTE()
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "folder", column: "t.id"},
+		{scopeType: "environment", column: "t.environment_id"},
+		{scopeType: "project", column: "e.project_id"},
+		{scopeType: "organization", column: "p.org_id"},
+	})
+	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
+select t.id::text,
+       t.code,
+       t.name,
+       t.comment,
+       t.level,
+       t.environment_id::text,
+       e.code,
+       coalesce(t.parent_id::text, ''),
+       e.project_id::text
+from folders t
+join environments e on e.id = t.environment_id
+join projects p on p.id = e.project_id
+where t.is_deleted = false
+  and e.is_deleted = false
+  and p.is_deleted = false
+  and p.id = $3::uuid
+  and t.level in (1, 2)%s
+order by t.level asc, t.code asc, t.environment_id asc, t.id asc
+`, narrow), callerUserId, "folder:read", projectId)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]domain.FolderInProject, 0)
+	for rows.Next() {
+		var f domain.FolderInProject
+		if err := rows.Scan(
+			&f.Id, &f.Code, &f.Name, &f.Comment,
+			&f.Level, &f.EnvironmentId, &f.EnvironmentCode, &f.ParentId, &f.ProjectId,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, f)
+	}
+	return items, rows.Err()
+}

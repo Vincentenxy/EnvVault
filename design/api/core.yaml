@@ -23,6 +23,11 @@ tags:
   - name: Folders
   - name: Secrets
   - name: Audit
+  - name: Tree
+    description: |
+      Hierarchical resource tree for frontend cascading filters. Returns the
+      full `org → project → env → folder(l1) → folder(l2)` shape in a single
+      call, with RBAC narrowing applied per node. Backed by Redis cache.
 paths:
   /healthz:
     get:
@@ -769,16 +774,38 @@ paths:
       tags: [Folders]
       summary: Create folder
       description: |
-        Creates a folder under an environment, supporting up to 2 levels:
+        Creates one folder per env in `envList`, in a single transaction. The
+        API is deliberately batch-only: there is no single-env shortcut on
+        this endpoint. To create a folder in just one env, pass
+        `envList: ["<env-id>"]`.
 
-        - `level=1` (top-level): `parentId` carries the **environment id**; the folder
-          sits directly under that environment.
-        - `level=2` (sub-folder): `parentId` carries the **parent folder id**; the
-          parent must be a `level=1` folder. The environment is inferred from the
-          parent folder on the server side — clients do not (and should not) pass it.
+        **`envList` is REQUIRED and must be non-empty.** Each element is the
+        **id of an environment (UUID)**, not the env code. If the array is
+        missing or empty, the response is `{"code": -1, "msg": "envList is
+        required and cannot be empty", "data": null}`.
 
-        The `Entity.parentId` field in the response is polymorphic: for `level=1`
-        it is the environment id; for `level=2` it is the parent folder id.
+        **Two flavors** keyed by `level`:
+
+        - `level=1` (top-level folder, `parent_id=NULL`): `parentCode` is
+          ignored. The server creates one `level=1` folder per env in
+          `envList`. The response's `parentId` on each created entity
+          carries that env's id.
+        - `level=2` (sub-folder): `parentCode` is **required** and carries
+          the **code** of the `level=1` parent folder. The server looks up
+          the `level=1` folder with `code = parentCode` inside each env in
+          `envList` and creates a `level=2` child under it. The response's
+          `parentId` on each created entity carries the matching sibling
+          parent's id in that env.
+
+        The legacy `parentId` (folder uuid) field is **gone**; callers no
+        longer need to first look up a parent folder's id before they can
+        replicate the same tree across envs.
+
+        **Atomicity**: the entire batch runs in one transaction. Any of the
+        following fails the whole batch and rolls back to the pre-call state:
+        any `envId` not found, any `level=1` sibling parent with the
+        requested `parentCode` missing in an env (level=2 only), or the
+        new `code` already exists at the target location.
       requestBody:
         required: true
         content:
@@ -786,31 +813,118 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateFolderRequest"
             examples:
-              topLevel:
+              topLevelBatch:
+                summary: Top-level folder batch (level=1, no parentCode)
                 value:
                   level: 1
-                  parentId: "11111111-1111-1111-1111-111111111111"
                   code: globals
                   name: Globals
-              subFolder:
+                  envList:
+                    - "11111111-1111-1111-1111-111111111111"
+                    - "22222222-2222-2222-2222-222222222222"
+                    - "33333333-3333-3333-3333-333333333333"
+              subFolderBatch:
+                summary: Sub-folder batch (level=2 + parentCode)
                 value:
                   level: 2
-                  parentId: "22222222-2222-2222-2222-222222222222"
-                  code: payment
-                  name: Payment Providers
+                  code: child-folder-aaaa
+                  name: child-folder aaaa
+                  comment: 测试子folder aaa
+                  parentCode: payment
+                  envList:
+                    - "11111111-1111-1111-1111-111111111111"
+                    - "22222222-2222-2222-2222-222222222222"
+                    - "33333333-3333-3333-3333-333333333333"
       responses:
         "200":
-          $ref: "#/components/responses/Entity"
+          description: |
+            Successful batch creation. `data` is `{ "created": [Entity, ...] }`,
+            in the same order as `envList`. For each created entity, the
+            polymorphic `parentId` is set as follows:
+
+            - `level=1`: the env id (the folder's direct parent in the hierarchy).
+            - `level=2`: the matching `level=1` sibling parent's id in that env.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResponseOfCreateFoldersBatch"
+              examples:
+                batchTopLevel:
+                  summary: "Top-level batch (level=1): data.created[i].parentId = env id"
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      created:
+                        - id: "66666666-6666-6666-6666-666666666661"
+                          code: globals
+                          name: Globals
+                          parentId: "11111111-1111-1111-1111-111111111111"
+                        - id: "66666666-6666-6666-6666-666666666662"
+                          code: globals
+                          name: Globals
+                          parentId: "22222222-2222-2222-2222-222222222222"
+                        - id: "66666666-6666-6666-6666-666666666663"
+                          code: globals
+                          name: Globals
+                          parentId: "33333333-3333-3333-3333-333333333333"
+                batchSubFolder:
+                  summary: "Sub-folder batch (level=2): data.created[i].parentId = sibling parent id"
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      created:
+                        - id: "33333333-3333-3333-3333-333333333333"
+                          code: child-folder-aaaa
+                          name: child-folder aaaa
+                          parentId: "<dev env's sibling parent id (parentCode=payment)>"
+                        - id: "44444444-4444-4444-4444-444444444444"
+                          code: child-folder-aaaa
+                          name: child-folder aaaa
+                          parentId: "<test env's sibling parent id (parentCode=payment)>"
+                        - id: "55555555-5555-5555-5555-555555555555"
+                          code: child-folder-aaaa
+                          name: child-folder aaaa
+                          parentId: "<sim env's sibling parent id (parentCode=payment)>"
+        "200-with-error":
+          description: |
+            **Business error returned with HTTP 200 and `data.code = -1`**
+            (envVault convention for generic business failures):
+
+            - `envList` missing or empty
+              ```json
+              {"code": -1, "msg": "envList is required and cannot be empty", "data": null}
+              ```
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          description: |
+            - `level` not in {1, 2}
+            - `code` doesn't match `^[a-z0-9]+(-[a-z0-9]+)*$`
+            - any element of `envList` is not a UUID
+            - `level=2` without `parentCode`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/NotFound"
+          description: |
+            - Any `envId` in `envList` does not exist (or is soft-deleted).
+            - For `level=2`: any target env has no `level=1` folder with
+              the requested `parentCode`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
         "409":
           description: |
-            Returned when the level/parent combination is invalid, e.g. a `level=2`
-            folder with a `level=2` parent.
+            The new `code` already exists at the target location. The whole
+            batch is rolled back.
           content:
             application/json:
               schema:
@@ -847,6 +961,116 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/Deleted"
+
+  /api/v1/folder/listByProject:
+    post:
+      tags: [Folders]
+      summary: List all folders in a project, aggregated by code
+      description: |
+        Returns the full folder structure under a project, grouped by `code` —
+        a single `FolderGroup` is emitted per unique `level=1` code, with the
+        set of envs in which that folder exists as `envList`. Each group's
+        `subFolders` lists its `level=2` children (also grouped by code).
+
+        **Use case**: the frontend wants to render a "folder tree" filtered to
+        a single project, with per-code multi-env awareness. A typical
+        rendering walks `folderList[*]` and, for each group, draws the
+        folder's chip + a small badge showing how many envs it spans, then
+        expands `subFolders` on click.
+
+        **Contract — "子目录跟随父目录"**: when a parent (level=1) group
+        appears in the result, all of its level=2 children (within the same
+        project, narrowed by caller's `folder:read` permission) are
+        guaranteed to be present in `subFolders`. The reverse is not
+        guaranteed: if a parent is hidden by RBAC, its children are
+        discarded along with it (no orphan entries).
+
+        **Per-instance fields**: `id`, `name`, `comment` are taken from the
+        first env instance of that code (typical deployments keep these
+        consistent across envs). If you need exact per-env values, follow
+        up with `/api/v1/folder/info`.
+
+        **RBAC**: narrowed server-side by the caller's `user_role_bindings`
+        on the (folder, environment, project, organization) chain. The
+        response only includes folders the caller is allowed to read.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectFolderRequest"
+            examples:
+              acmeWeb:
+                summary: "List all folders in project <web>"
+                value:
+                  projectId: "11111111-1111-1111-1111-111111111111"
+      responses:
+        "200":
+          description: |
+            Aggregated folder tree. `folderList` is sorted by `code` ascending;
+            each group's `subFolders` is also sorted by `code` ascending.
+            `folderList` is **always** a JSON array (possibly empty) — never
+            `null` — so the client can iterate unconditionally.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ProjectFolderTree"
+              examples:
+                twoEnvs:
+                  summary: "Project with 2 level-1 folders in 3 envs and 1 shared sub-folder"
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      folderList:
+                        - id: "22222222-2222-2222-2222-222222222222"
+                          code: globals
+                          name: Globals
+                          comment: 默认全局
+                          envList:
+                            - "33333333-3333-3333-3333-333333333331"
+                            - "33333333-3333-3333-3333-333333333332"
+                            - "33333333-3333-3333-3333-333333333333"
+                          subFolders: []
+                        - id: "44444444-4444-4444-4444-444444444441"
+                          code: payment
+                          name: Payment Providers
+                          envList:
+                            - "33333333-3333-3333-3333-333333333331"
+                            - "33333333-3333-3333-3333-333333333332"
+                          subFolders:
+                            - id: "55555555-5555-5555-5555-555555555551"
+                              code: stripe
+                              name: Stripe
+                              envList:
+                                - "33333333-3333-3333-3333-333333333331"
+                                - "33333333-3333-3333-3333-333333333332"
+                emptyProject:
+                  summary: "Empty result for a project with no folders"
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      folderList: []
+        "400":
+          description: "`projectId` missing or not a valid UUID."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: "Tree service is not configured (deps not wired at startup)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
 
   /api/v1/secret/list:
     post:
@@ -1189,6 +1413,166 @@ paths:
                         $ref: "#/components/schemas/GlobalSearchResult"
         "400":
           $ref: "#/components/responses/BadRequest"
+
+  /api/v1/tree/get:
+    post:
+      tags: [Tree]
+      summary: Get the full org/project/env/folder resource tree
+      description: |
+        Returns the complete resource hierarchy as a tree of nodes, intended for
+        frontend cascading filters (e.g. "select project → list its envs → select
+        env → list its folders"). The response is shaped as a forest of
+        `organization` roots, each containing nested `project` → `environment` →
+        `folder(level=1)` → `folder(level=2)` chains.
+
+        ## Performance model
+
+        - **Read path**: the server tries the Redis cache first (4 separate hash
+          sets: `org`, `project`, `env`, `folder`). On a cache miss, it falls
+          back to the database via 4 unbounded `ListAll*ForTree` queries
+          (narrowed by the caller's `user_role_bindings`) and warms the cache
+          asynchronously before returning.
+        - **Write path**: every CRUD on org/project/env/folder updates the
+          cache synchronously (UpsertXxx) or invalidates it on cascade delete
+          (DeleteXxx returns a `CascadeScope` and the handler iterates
+          `DeleteXxx` for each affected type).
+
+        ## RBAC
+
+        No dedicated `tree:read` permission is required. The endpoint only
+        requires a valid JWT; the visible set is naturally narrowed by the
+        existing `org:read` / `project:read` / `env:read` / `folder:read`
+        permission codes — same as the `List*` endpoints. A user with no
+        bindings at all gets `data.roots: []` and all stats at zero.
+
+        ## Orphan handling
+
+        RBAC narrowing can produce "parent invisible, child visible" — e.g. a
+        user with a direct `folder:read` grant on a sub-folder but no grant
+        on its parent env. When `includeOrphans=true` (default), these
+        orphaned nodes are attached to a synthetic root node
+        (`id = "__orphans__"`, `code = "__orphans__"`, `name = "Orphan nodes
+        (parent not accessible)"`). When `includeOrphans=false`, the orphans
+        are dropped from the tree but `data.stats.orphans` still records the
+        count for auditing.
+
+        ## Depth truncation
+
+        `maxDepth` (default `4`) limits the depth of the returned tree:
+
+        - `1` → only `organization` nodes (`children` arrays are empty)
+        - `2` → `+ project` (env/folder nodes omitted)
+        - `3` → `+ environment` (folder nodes omitted)
+        - `4` → `+ folder(level=1)` and `+ folder(level=2)` (the full tree)
+
+        Stats fields reflect the **RBAC-narrowed** set before depth
+        truncation, so `maxDepth=2` still reports `environments: 6` and
+        `folders: 12` if those nodes are visible to the caller, even though
+        they are not present in the truncated `roots` payload.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TreeRequest"
+            examples:
+              defaults:
+                summary: Default request (all 4 levels, orphans included)
+                value: {}
+              explicit:
+                summary: Org/project only, no orphans
+                value:
+                  includeOrphans: false
+                  maxDepth: 2
+      responses:
+        "200":
+          description: Tree assembled from cache (or DB on cache miss).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ResourceTree"
+              examples:
+                cacheHit:
+                  summary: Cache hit, three orgs with full subtree
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      roots:
+                        - id: "<org-uuid-1>"
+                          type: organization
+                          code: acme
+                          name: Acme Corp
+                          children:
+                            - id: "<project-uuid-1>"
+                              type: project
+                              parentId: "<org-uuid-1>"
+                              code: web
+                              name: Web
+                              children:
+                                - id: "<env-uuid-1>"
+                                  type: environment
+                                  parentId: "<project-uuid-1>"
+                                  code: prod
+                                  name: Production
+                                  children:
+                                    - id: "<folder-uuid-1>"
+                                      type: folder
+                                      level: 1
+                                      parentId: "<env-uuid-1>"
+                                      code: db
+                                      name: Database
+                                      children:
+                                        - id: "<folder-uuid-2>"
+                                          type: folder
+                                          level: 2
+                                          parentId: "<folder-uuid-1>"
+                                          code: pg-main
+                                          name: Postgres Main
+                                          children: []
+                      stats:
+                        organizations: 1
+                        projects: 1
+                        environments: 1
+                        folders: 2
+                        dropped: 0
+                        orphans: 0
+                      generatedAt: "2026-06-06T12:34:56Z"
+                      source: cache
+                noBindings:
+                  summary: Caller has no role bindings → empty forest
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      roots: []
+                      stats:
+                        organizations: 0
+                        projects: 0
+                        environments: 0
+                        folders: 0
+                        dropped: 0
+                        orphans: 0
+                      generatedAt: "2026-06-06T12:34:56Z"
+                      source: database
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: |
+            Returned when the tree service is not configured (typically because
+            both the database and the Redis cache are unavailable, or the
+            service failed to wire up at startup).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
 
   /api/v1/audit/list:
     post:
@@ -1673,22 +2057,21 @@ components:
 
     CreateFolderRequest:
       type: object
-      required: [level, parentId, code, name]
+      description: |
+        **Batch-only folder creation** — there is no single-env shortcut on
+        this endpoint. `envList` is always required; the legacy `parentId`
+        field is removed; `parentCode` is used in its place for `level=2`.
+
+        See `/api/v1/folder/create` description for the full contract.
+      required: [level, code, name, envList]
       properties:
         level:
           type: integer
           enum: [1, 2]
           description: |
-            1 = top-level folder (parent is the environment).
-            2 = sub-folder (parent is another folder, which must be `level=1`).
-        parentId:
-          type: string
-          format: uuid
-          description: |
-            For `level=1`: the environment id (the folder's direct parent).
-            For `level=2`: the parent folder id (must be a `level=1` folder in the
-            same environment). The environment is inferred from the parent on the
-            server side, so the client does not need to pass it.
+            1 = top-level folder (parent is the environment itself).
+            2 = sub-folder (parent is a `level=1` folder identified by
+            `parentCode` in each listed env).
         code:
           type: string
           pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
@@ -1698,6 +2081,57 @@ components:
           example: Globals
         comment:
           type: string
+        parentCode:
+          type: string
+          pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+          description: |
+            **Required for `level=2`**, ignored for `level=1`. The code of the
+            `level=1` parent folder. The server looks up the matching
+            `level=1` folder with this code inside each env in `envList` and
+            creates the new sub-folder under it.
+          example: payment
+        envList:
+          type: array
+          minItems: 1
+          description: |
+            **Required, must be non-empty.** Each element is the **id of an
+            environment (UUID)**, not the env code. The server creates one
+            folder per element, in a single transaction.
+
+            If the array is missing, empty, or contains any value that isn't a
+            valid UUID, the request is rejected (see responses below).
+          items:
+            type: string
+            format: uuid
+            example: "11111111-1111-1111-1111-111111111111"
+          example:
+            - "11111111-1111-1111-1111-111111111111"
+            - "22222222-2222-2222-2222-222222222222"
+            - "33333333-3333-3333-3333-333333333333"
+
+    CreateFoldersBatchResponse:
+      type: object
+      description: |
+        Returned by `/api/v1/folder/create` — the API is batch-only, so this
+        is the only successful response shape. The list is in the same order
+        as the request's `envList`, and `data.created[i].parentId` carries
+        the id of either the env (for `level=1`) or the matching sibling
+        `level=1` parent (for `level=2`).
+      required: [created]
+      properties:
+        created:
+          type: array
+          items:
+            $ref: "#/components/schemas/Entity"
+
+    ResponseOfCreateFoldersBatch:
+      description: Standard success envelope wrapping the batch creation result.
+      allOf:
+        - $ref: "#/components/schemas/Response"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/CreateFoldersBatchResponse"
 
     EnvSpec:
       type: object
@@ -2369,13 +2803,14 @@ components:
       properties:
         includeOrphans:
           type: boolean
-          default: false
+          default: true
           description: |
-            When `true`, nodes whose parent is not visible to the caller
-            (e.g. an env whose parent project is hidden, but the env is
-            bound at a higher scope) are attached to a virtual root and
-            counted in `stats.orphans`. When `false` (default), such
-            nodes are dropped and counted in `stats.dropped`.
+            When `true` (default), nodes whose parent is not visible to the
+            caller (e.g. an env whose parent project is hidden, but the env
+            is bound at a higher scope) are attached to a virtual root
+            (`id = "__orphans__"`) and counted in `stats.orphans`. When
+            `false`, such nodes are dropped from `roots` but still counted
+            in `stats.orphans` for audit.
         maxDepth:
           type: integer
           format: int32
@@ -2387,7 +2822,7 @@ components:
             values are normalized to 4 server-side.
       example:
         maxDepth: 4
-        includeOrphans: false
+        includeOrphans: true
 
     TreeNode:
       type: object
@@ -2471,6 +2906,136 @@ components:
             parent is not visible to the caller AND `includeOrphans`
             was `true`. Only meaningful when `includeOrphans` is enabled.
 
+    ProjectFolderRequest:
+      type: object
+      description: |
+        Request body for `POST /api/v1/folder/listByProject`. Currently
+        just carries the `projectId` to scope the aggregation.
+      required: [projectId]
+      properties:
+        projectId:
+          type: string
+          format: uuid
+          description: |
+            The project whose folder structure should be returned. Must be
+            a UUID. Folders the caller is not allowed to read are filtered
+            server-side; if the caller has no `folder:read` grants under
+            the project, `data.folderList` will be empty.
+          example: "11111111-1111-1111-1111-111111111111"
+
+    ProjectFolderTree:
+      type: object
+      description: |
+        Response body for `POST /api/v1/folder/listByProject`. Wraps a
+        `folderList` of `FolderGroup` nodes; each group aggregates all
+        envs in which a unique `level=1` code exists under the project.
+      required: [folderList]
+      properties:
+        folderList:
+          type: array
+          description: |
+            Sorted by `code` ascending. Always a JSON array (possibly
+            empty) — never `null` — so the client can iterate
+            unconditionally.
+          items:
+            $ref: "#/components/schemas/FolderGroup"
+
+    FolderGroup:
+      type: object
+      description: |
+        Aggregated `level=1` folder node. Groups every env in which the
+        folder exists under the same `code`; per-instance `id`/`name`/
+        `comment` come from the first env instance.
+      required: [id, code, name, envList, subFolders]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Id of the first env instance of this code.
+        code:
+          type: string
+          example: payment
+        name:
+          type: string
+          example: Payment Providers
+        comment:
+          type: string
+          description: Optional human-readable comment.
+        envList:
+          type: array
+          description: |
+            Envs in which this folder exists, with the per-env folder id
+            inlined so the client can issue `/secret/list`/`/secret/reveal`
+            without an extra `/folder/list` round-trip.
+            Order is deterministic, matching the SQL `ORDER BY` clause.
+          items:
+            $ref: "#/components/schemas/EnvRef"
+        subFolders:
+          type: array
+          description: |
+            Sorted by `code` ascending. Each element is an aggregated
+            `level=2` sub-folder (also grouped by code across envs).
+            Per the "子目录跟随父目录" contract, this array is
+            guaranteed to contain every `level=2` sub-folder the caller
+            can read under this parent in this project.
+          items:
+            $ref: "#/components/schemas/SubFolderGroup"
+
+    SubFolderGroup:
+      type: object
+      description: |
+        Aggregated `level=2` sub-folder node under a `FolderGroup`.
+        Carries no further nesting — `level=2` is the deepest folder
+        layer in the current data model.
+      required: [id, code, name, envList]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Id of the first env instance of this code.
+        code:
+          type: string
+          example: stripe
+        name:
+          type: string
+          example: Stripe
+        comment:
+          type: string
+        envList:
+          type: array
+          description: |
+            Envs in which this sub-folder exists (each element is an
+            `EnvRef` carrying env id / env code / the env-specific folder
+            id). When the parent `FolderGroup` exists in more envs than
+            the sub-folder (e.g. parent in 3 envs, sub in only 2), the
+            sub-folder's `envList` is a subset of the parent's `envList`.
+          items:
+            $ref: "#/components/schemas/EnvRef"
+
+    EnvRef:
+      type: object
+      description: |
+        Triple (envId, envCode, folderId) describing "this folder code
+        exists in env X as folder Y". Returned inside `FolderGroup.envList`
+        and `SubFolderGroup.envList`.
+      required: [id, code, folderId]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Env id.
+        code:
+          type: string
+          description: Env code (e.g. dev / test / sim / prod).
+          example: dev
+        folderId:
+          type: string
+          format: uuid
+          description: |
+            The id of the folder instance in this env that shares the
+            enclosing group's `code`. Lets the client go directly to
+            `/secret/list` or `/secret/reveal` for this env.
+
     ResourceTreeResponse:
       type: object
       required: [roots, stats, generatedAt, source]
@@ -2492,10 +3057,10 @@ components:
             Used by the client to detect stale caches.
         source:
           type: string
-          enum: [cache, database, mixed]
+          enum: [cache, database]
           description: |
             Where the tree was assembled from. Debug / metrics only;
             clients can ignore this field.
-            - `cache`: fully served from Redis snapshots.
-            - `database`: at least one level fell back to DB.
-            - `mixed`: some levels came from cache, some from DB.
+            - `cache`: served entirely from Redis snapshots.
+            - `database`: cache was unavailable or empty; assembled from DB
+              and the snapshot was queued for an async warm-up.

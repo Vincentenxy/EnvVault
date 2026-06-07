@@ -137,6 +137,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 					folder.POST("/info", ctrl.GetFolder)
 					folder.POST("/update", ctrl.UpdateFolder)
 					folder.POST("/delete", ctrl.DeleteFolder)
+					folder.POST("/listByProject", ctrl.ListFoldersByProject)
 				}
 
 				secret := protected.Group("/secret")

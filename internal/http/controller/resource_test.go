@@ -268,16 +268,17 @@ func TestCreateFolderRequestLevelRequired(t *testing.T) {
 	}
 }
 
-// TestCreateFolderRequestFields 锁住请求体 shape:ParentId / Level / Code / Name / Comment。
-// 故意没有 EnvironmentId 字段——env 由后端从 parent 反查,客户端不带。
+// TestCreateFolderRequestFields 锁住请求体 shape:Level / Code / Name / Comment / ParentCode / EnvList。
+// 旧版 ParentId 字段已废弃,envList 必填(无 omitempty)。
 func TestCreateFolderRequestFields(t *testing.T) {
 	rt := reflect.TypeOf(createFolderRequest{})
 	expected := map[string]string{
-		"ParentId": "parentId,omitempty",
-		"Level":    "level",
-		"Code":     "code",
-		"Name":     "name",
-		"Comment":  "comment",
+		"Level":      "level",
+		"Code":       "code",
+		"Name":       "name",
+		"Comment":    "comment",
+		"ParentCode": "parentCode,omitempty",
+		"EnvList":    "envList",
 	}
 	for name, want := range expected {
 		f, ok := rt.FieldByName(name)
@@ -289,9 +290,19 @@ func TestCreateFolderRequestFields(t *testing.T) {
 			t.Errorf("%s json tag = %q, want %q", name, got, want)
 		}
 	}
+	// 反向断言:旧 ParentId 字段必须不存在
+	if _, ok := rt.FieldByName("ParentId"); ok {
+		t.Errorf("createFolderRequest should NOT have ParentId field; use ParentCode + EnvList instead")
+	}
 	// 反向断言:EnvironmentId 字段必须不存在
 	if _, ok := rt.FieldByName("EnvironmentId"); ok {
-		t.Errorf("createFolderRequest should NOT have EnvironmentId field; env is inferred from parent")
+		t.Errorf("createFolderRequest should NOT have EnvironmentId field; env is selected via EnvList")
+	}
+	// EnvList 必填:tag 中不应有 omitempty
+	if f, ok := rt.FieldByName("EnvList"); ok {
+		if strings.Contains(f.Tag.Get("json"), "omitempty") {
+			t.Errorf("EnvList should be required (no omitempty), got tag %q", f.Tag.Get("json"))
+		}
 	}
 }
 
@@ -532,6 +543,60 @@ func TestSecretBatchCreateRequestToDomain_PartialEnvs(t *testing.T) {
 	}
 	if domainReq.SecretList[0].Envs[1].EnvCode != "prod" {
 		t.Errorf("second env = %q, want prod", domainReq.SecretList[0].Envs[1].EnvCode)
+	}
+}
+
+// TestSecretBatchCreateRequestToDomain_DuplicateFolderId 锁住 v12 预检:
+// 单 item 内 4 个 env 字段共用同一个 folderId → 拒绝。
+//
+// 历史背景:v11 的 extractEnvs 不查这个,导致 service 层整批事务回滚后
+// 返回 "secret 已存在",client 误以为 DB 已有数据。v12 改在 controller 层
+// 4xx 拒绝,错误信息直接指出哪几个 env 共用了哪个 folderId。
+func TestSecretBatchCreateRequestToDomain_DuplicateFolderId(t *testing.T) {
+	req := secretBatchCreateRequest{
+		SecretList: []secretBatchCreateItemRequest{
+			{
+				Key:  "DB_USER_11111",
+				Dev:  &secretBatchEnvValue{FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
+				Test: &secretBatchEnvValue{FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
+				Sim:  &secretBatchEnvValue{FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
+				Prod: &secretBatchEnvValue{FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
+			},
+		},
+	}
+	_, err := secretBatchCreateRequestToDomain(req)
+	if err == nil {
+		t.Fatalf("4 env sharing the same folderId should be rejected")
+	}
+	msg := err.Error()
+	// 错误信息应同时含 item index、复用的 env 列表、复用的 folderId。
+	for _, want := range []string{"secretList[0]", "folderId(b53bd384-5c4a-4894-87e2-ff921df48635)"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing %q: %s", want, msg)
+		}
+	}
+}
+
+// TestSecretBatchCreateRequestToDomain_PartialDuplicateFolderId 锁住 v12 预检:
+// 单 item 内 3 个 env 共用同一 folderId、另 1 个 env 独立 → 同样拒绝。
+func TestSecretBatchCreateRequestToDomain_PartialDuplicateFolderId(t *testing.T) {
+	req := secretBatchCreateRequest{
+		SecretList: []secretBatchCreateItemRequest{
+			{
+				Key:  "DB_HOST",
+				Dev:  &secretBatchEnvValue{FolderId: "dup-id", Value: "x"},
+				Test: &secretBatchEnvValue{FolderId: "dup-id", Value: "x"},
+				Sim:  &secretBatchEnvValue{FolderId: "dup-id", Value: "x"},
+				Prod: &secretBatchEnvValue{FolderId: "prod-only", Value: "x"},
+			},
+		},
+	}
+	_, err := secretBatchCreateRequestToDomain(req)
+	if err == nil {
+		t.Fatalf("3 env sharing the same folderId should be rejected")
+	}
+	if !strings.Contains(err.Error(), "dup-id") {
+		t.Errorf("error should mention the duplicate folderId, got: %s", err.Error())
 	}
 }
 

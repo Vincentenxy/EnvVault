@@ -64,6 +64,21 @@ type ResourceRepository interface {
 
 	// ---- Folder ----
 	CreateFolder(ctx context.Context, environmentId, parentFolderId, code, name, comment, actor string, level int) (domain.Entity, error)
+	// CreateFoldersAcrossEnvs 批量跨环境创建 level=2 folder(子 folder):
+	//   - parentCode 必填,作为参考父 folder 的 code;在每个 envId 下反查同 code 的
+	//     level=1 sibling parent folder,挂子 folder 于此
+	//   - envIds 是 env id 列表(UUID);任一 env 不存在 → 整批回滚
+	//   - 任一 env 下 sibling parent 不存在 / 目标子 code 已存在 → 整批回滚
+	//   - 返回所有创建的 Entity,顺序与 envIds 一致
+	CreateFoldersAcrossEnvs(ctx context.Context, parentCode, code, name, comment, actor string, envIds []string) ([]domain.Entity, error)
+
+	// CreateTopLevelFoldersInEnvs 批量跨环境创建 level=1 folder(顶层 folder,无父):
+	//   - envIds 是 env id 列表(UUID);任一 env 不存在 → 整批回滚
+	//   - 目标 code 在 (env, parent_id=NULL) 下未占用(否则 unique 冲突 → ErrConflict)
+	//   - 返回所有创建的 Entity,顺序与 envIds 一致
+	// 用于前端"在多个 env 下一次性创建同名顶层 folder"的批量场景;
+	// parent 字段在请求体里无需提供(顶层 folder 的父是 env 本身,不由 folder 表达)。
+	CreateTopLevelFoldersInEnvs(ctx context.Context, code, name, comment, actor string, envIds []string) ([]domain.Entity, error)
 	// ListFolders 按 caller 在 (folder, environment, project, organization) 层的 binding 收窄。
 	ListFolders(ctx context.Context, callerUserId, envId, parentId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Entity], error)
 	// ListFolderChildren 批量拉取多个父 folder 下的 level=2 子 folder;按 caller 在
@@ -91,6 +106,12 @@ type ResourceRepository interface {
 	// level/environmentId/parentId 3 个 folder 专属字段(Entity.ParentId 多态,不够用)。
 	ListAllFoldersForTree(ctx context.Context, callerUserId string) ([]domain.FolderTreeEntry, error)
 
+	// ListFoldersInProject 列 caller 在指定 project 下可见的所有 level=1 + level=2 folder,
+	// 一次 SQL 同时返回(level=1 必返回,level=2 也返回便于 service 层组装 subFolders)。
+	// RBAC narrowing 与 ListFolders 一致:在 (folder, env, project, org) 链收窄。
+	// 返回顺序:按 level ASC, code ASC, environment_id ASC,保证前端遍历可重现。
+	ListFoldersInProject(ctx context.Context, callerUserId, projectId string) ([]domain.FolderInProject, error)
+
 	// ---- Secret ----
 	CreateSecret(ctx context.Context, folderId, key, comment, actor string, ciphertext domain.SecretCiphertext) (domain.Secret, error)
 	// BatchCreateSecrets 在单事务里完成 N 条 INSERT + 1 条 batch audit,
@@ -106,6 +127,11 @@ type ResourceRepository interface {
 	// ListSecrets 按 caller 在 (secret, folder, environment, project, organization) 层的 binding 收窄;
 	// action 是 caller 调的权限码("secret:list" 或 "secret:search"),用于 CTE 内匹配 role_permissions.code。
 	ListSecrets(ctx context.Context, callerUserId, action string, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
+	// ListSecretsWithCiphertext 同 ListSecrets,但额外返回 value_ciphertext(以 SecretCacheRecord
+	// 形式),专供 service.Search 填 Values 字段——避免先 list 拿 id 再批量取 ciphertext 的 N+1。
+	// 仍按 action(默认 secret:search)做 cascade narrowing;每条 secret 的"是否可解密"
+	// 仍由 service 层对每行单独 authorizer.Allow("secret:reveal") 判定。
+	ListSecretsWithCiphertext(ctx context.Context, callerUserId, action string, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.SecretCacheRecord], error)
 	// BatchRevealSecretsByPath 一次性按 folder 路径 + 可选 keys 列表拉取 secret 明文。
 	// caller 需持有 secret:reveal 权限(v7 cascade narrowing: secret / folder / env / project / org);
 	// keys 为空时返回 folder 下所有 secret(无分页、无上限)。

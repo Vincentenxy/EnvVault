@@ -29,9 +29,9 @@ type recordingAuthRepo struct {
 	createdUser domain.User
 	createErr   error
 
-	// 可控:GetUserByExternalId 返回
-	getByExtUser domain.User
-	getByExtErr  error
+	// 可控:GetUserById 返回
+	getByIdUser domain.User
+	getByIdErr  error
 
 	// 调用记录
 	createCalls []createCall
@@ -47,7 +47,7 @@ type createCall struct {
 }
 
 type updateCall struct {
-	ExternalUserId, Hash, Algo string
+	UserId, Hash, Algo string
 }
 
 func (r *recordingAuthRepo) GetUserByEmail(_ context.Context, email string) (domain.User, error) {
@@ -57,13 +57,13 @@ func (r *recordingAuthRepo) GetUserByEmail(_ context.Context, email string) (dom
 }
 
 func (r *recordingAuthRepo) GetUserById(_ context.Context, _ string) (domain.User, error) {
-	return domain.User{}, errors.New("not used")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.getByIdUser, r.getByIdErr
 }
 
 func (r *recordingAuthRepo) GetUserByExternalId(_ context.Context, _ string) (domain.User, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.getByExtUser, r.getByExtErr
+	return domain.User{}, errors.New("not used")
 }
 
 func (r *recordingAuthRepo) CreatePasswordUser(_ context.Context, email, name, hash, algo string) (domain.User, error) {
@@ -76,31 +76,31 @@ func (r *recordingAuthRepo) CreatePasswordUser(_ context.Context, email, name, h
 	return r.createdUser, nil
 }
 
-func (r *recordingAuthRepo) UpdatePasswordHash(_ context.Context, _, _, _ string) (domain.User, error) {
-	return domain.User{}, errors.New("not used")
-}
-
-func (r *recordingAuthRepo) UpdatePasswordHashByExternalId(_ context.Context, extId, hash, algo string) (domain.User, error) {
+func (r *recordingAuthRepo) UpdatePasswordHash(_ context.Context, userId, hash, algo string) (domain.User, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.updCalls = append(r.updCalls, updateCall{extId, hash, algo})
+	r.updCalls = append(r.updCalls, updateCall{userId, hash, algo})
 	r.tva = time.Now()
-	u := r.getByExtUser
+	u := r.getByIdUser
 	ptr := r.tva
 	u.TokensValidAfter = &ptr
 	return u, nil
 }
 
-func (r *recordingAuthRepo) BumpTokensValidAfter(_ context.Context, _ string) (time.Time, error) {
-	return time.Time{}, errors.New("not used")
+func (r *recordingAuthRepo) UpdatePasswordHashByExternalId(_ context.Context, extId, hash, algo string) (domain.User, error) {
+	return domain.User{}, errors.New("not used")
+}
+
+func (r *recordingAuthRepo) BumpTokensValidAfter(_ context.Context, userId string) (time.Time, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bumpCalls = append(r.bumpCalls, userId)
+	r.tva = time.Now()
+	return r.tva, nil
 }
 
 func (r *recordingAuthRepo) BumpTokensValidAfterByExternalId(_ context.Context, extId string) (time.Time, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.bumpCalls = append(r.bumpCalls, extId)
-	r.tva = time.Now()
-	return r.tva, nil
+	return time.Time{}, errors.New("not used")
 }
 
 func (r *recordingAuthRepo) GetTokensValidAfter(_ context.Context, _ string) (time.Time, error) {
@@ -320,11 +320,11 @@ func (blockingLimiter) Record(_ context.Context, _ string, _ bool) error { retur
 func TestLogout_BumpTokensValidAfter(t *testing.T) {
 	repo := &recordingAuthRepo{}
 	svc := newTestAuthService(t, repo)
-	if err := svc.Logout(context.Background(), "email:test@example.com"); err != nil {
+	if err := svc.Logout(context.Background(), "uuid-1"); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
-	if len(repo.bumpCalls) != 1 || repo.bumpCalls[0] != "email:test@example.com" {
-		t.Fatalf("expected 1 bump call for email:test@example.com, got %+v", repo.bumpCalls)
+	if len(repo.bumpCalls) != 1 || repo.bumpCalls[0] != "uuid-1" {
+		t.Fatalf("expected 1 bump call for uuid-1, got %+v", repo.bumpCalls)
 	}
 }
 
@@ -332,7 +332,7 @@ func TestChangePassword_WrongOldPassword(t *testing.T) {
 	hasher := auth.NewArgon2idHasher(auth.DefaultPasswordParams())
 	hash, _ := hasher.Hash("correct-horse-battery-staple")
 	repo := &recordingAuthRepo{
-		getByExtUser: domain.User{
+		getByIdUser: domain.User{
 			Id:             "uuid-1",
 			ExternalUserId: "email:test@example.com",
 			Email:          "test@example.com",
@@ -341,7 +341,7 @@ func TestChangePassword_WrongOldPassword(t *testing.T) {
 		},
 	}
 	svc := newTestAuthService(t, repo)
-	err := svc.ChangePassword(context.Background(), "email:test@example.com", "wrong-old-pass-12+chars", "new-correct-horse-12+chars")
+	err := svc.ChangePassword(context.Background(), "uuid-1", "wrong-old-pass-12+chars", "new-correct-horse-12+chars")
 	if !errors.Is(err, ErrBadCredentials) {
 		t.Fatalf("expected ErrBadCredentials, got %v", err)
 	}
@@ -354,7 +354,7 @@ func TestChangePassword_HappyPath(t *testing.T) {
 	hasher := auth.NewArgon2idHasher(auth.DefaultPasswordParams())
 	hash, _ := hasher.Hash("correct-horse-battery-staple")
 	repo := &recordingAuthRepo{
-		getByExtUser: domain.User{
+		getByIdUser: domain.User{
 			Id:             "uuid-1",
 			ExternalUserId: "email:test@example.com",
 			Email:          "test@example.com",
@@ -363,7 +363,7 @@ func TestChangePassword_HappyPath(t *testing.T) {
 		},
 	}
 	svc := newTestAuthService(t, repo)
-	err := svc.ChangePassword(context.Background(), "email:test@example.com", "correct-horse-battery-staple", "new-correct-horse-12+chars")
+	err := svc.ChangePassword(context.Background(), "uuid-1", "correct-horse-battery-staple", "new-correct-horse-12+chars")
 	if err != nil {
 		t.Fatalf("ChangePassword: %v", err)
 	}
@@ -378,16 +378,16 @@ func TestChangePassword_HappyPath(t *testing.T) {
 func TestChangePassword_ShortNewPassword(t *testing.T) {
 	repo := &recordingAuthRepo{}
 	svc := newTestAuthService(t, repo)
-	err := svc.ChangePassword(context.Background(), "email:test@example.com", "old-pass-12+chars", "short")
+	err := svc.ChangePassword(context.Background(), "uuid-1", "old-pass-12+chars", "short")
 	if !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("expected ErrInvalidArgument, got %v", err)
 	}
 }
 
 func TestChangePassword_UserNotFound(t *testing.T) {
-	repo := &recordingAuthRepo{getByExtErr: domain.ErrNotFound}
+	repo := &recordingAuthRepo{getByIdErr: domain.ErrNotFound}
 	svc := newTestAuthService(t, repo)
-	err := svc.ChangePassword(context.Background(), "missing-user", "old-pass-12+chars", "new-pass-12+chars")
+	err := svc.ChangePassword(context.Background(), "missing-uuid", "old-pass-12+chars", "new-pass-12+chars")
 	if !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("expected ErrInvalidArgument (user not found), got %v", err)
 	}

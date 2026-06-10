@@ -15,6 +15,7 @@ import (
 	"github.com/golang-jwt/jwt/v4"
 
 	"envVault/internal/http/response"
+	idutil "envVault/internal/id"
 	"envVault/internal/logging"
 )
 
@@ -26,6 +27,7 @@ var (
 	ErrInvalidPublicKey   = errors.New("jwt public key is invalid")
 	ErrMissingPrivateKey  = errors.New("jwt private key is not configured")
 	ErrInvalidPrivateKey  = errors.New("jwt private key is invalid")
+	ErrInvalidUserID      = errors.New("jwt userId must be a database uuid")
 	// ErrTokenRevoked 在 JWT iat 早于用户 tokens_valid_after 时由 middleware 返回,
 	// 等价于「曾被强制登出」,handler 应当 401。
 	ErrTokenRevoked = errors.New("jwt token has been revoked")
@@ -34,7 +36,7 @@ var (
 // Claims 是 envVault 自定义 JWT 负载。
 //
 // 字段语义:
-//   - UserId:外部用户 ID(对应 users.external_user_id,也是 RBAC authorizer 的输入)
+//   - UserId:EnvVault 用户 ID(对应 users.id,也是 RBAC authorizer 的输入)
 //   - Name:用户显示名
 //   - JWT / Cookie:保留字段,现版本未使用(给未来「内嵌前一个 token」之类场景)
 //   - TokensValidAfterAt:登录时刻的 tokens_valid_after 快照(unix 秒)。
@@ -112,6 +114,11 @@ func JWTMiddleware(cfg JWTConfig) gin.HandlerFunc {
 			abort(c, http.StatusUnauthorized, jwt.ErrTokenInvalidClaims)
 			return
 		}
+		if !idutil.IsUUID(claims.UserId) {
+			logging.Warn(c.Request.Context(), "JWTMiddleware", "invalid jwt userId", logging.F("user_id", claims.UserId))
+			abort(c, http.StatusUnauthorized, ErrInvalidUserID)
+			return
+		}
 
 		// v9: 强制登出校验。cache 未配置时降级放行;cache miss 时 loader 拉 DB,
 		// 拉不到/失败时同样放行(降级,记录 warn)。
@@ -134,6 +141,11 @@ func JWTMiddleware(cfg JWTConfig) gin.HandlerFunc {
 
 func StaticUserMiddleware(user UserInfo) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !idutil.IsUUID(user.UserId) {
+			logging.Error(c.Request.Context(), "StaticUserMiddleware", "invalid static userId", logging.F("user_id", user.UserId))
+			abort(c, http.StatusServiceUnavailable, ErrInvalidUserID)
+			return
+		}
 		claims := &Claims{
 			UserId: user.UserId,
 			Name:   user.Name,
@@ -156,7 +168,7 @@ func SignToken(privateKeyPEM string, claims Claims) (string, error) {
 }
 
 // JWTRegisteredClaimsAt 构造 iat/exp/sub 三件套。
-//   - subject 取 externalUserId(与 Claims.UserId 一致)
+//   - subject 取 userId(与 Claims.UserId 一致)
 //   - iat = issuedAt
 //   - exp = expiresAt
 //

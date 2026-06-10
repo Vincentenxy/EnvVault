@@ -11,6 +11,7 @@ import (
 
 	"envVault/internal/auth"
 	"envVault/internal/http/response"
+	idutil "envVault/internal/id"
 	"envVault/internal/logging"
 )
 
@@ -42,6 +43,11 @@ func (ctrl *Controller) CreateDevJWT(c *gin.Context) {
 	if req.UserId == "" {
 		logging.Warn(c.Request.Context(), "CreateDevJWT", "userId is required but empty")
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "userId is required")
+		return
+	}
+	if !idutil.IsUUID(req.UserId) {
+		logging.Warn(c.Request.Context(), "CreateDevJWT", "userId must be a database uuid", logging.F("user_id", req.UserId))
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "userId must be a database uuid")
 		return
 	}
 	if req.ExpiresInSeconds <= 0 {

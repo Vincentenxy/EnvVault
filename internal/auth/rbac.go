@@ -31,7 +31,7 @@ type Authorizer interface {
 
 type PermissionStore interface {
 	ResourceScopes(ctx context.Context, resource Resource) ([]Scope, error)
-	UserPermissions(ctx context.Context, externalUserId string, scopes []Scope) (map[string]struct{}, error)
+	UserPermissions(ctx context.Context, userId string, scopes []Scope) (map[string]struct{}, error)
 }
 
 type RBACAuthorizer struct {

@@ -64,6 +64,7 @@ create table if not exists environments (
     code text not null,
     name text not null,
     comment text not null default '',
+    sort_order integer not null default 100,
     is_deleted boolean not null default false,
     deleted_at timestamptz,
     deleted_by text not null default '',
@@ -80,6 +81,10 @@ create unique index if not exists environments_project_code_active_uidx
 
 create index if not exists environments_project_idx
     on environments (project_id)
+    where is_deleted = false;
+
+create index if not exists environments_project_sort_idx
+    on environments (project_id, sort_order, created_at)
     where is_deleted = false;
 
 -- v3: org 层 env 模板汇总,只读快照;以首次写入为准

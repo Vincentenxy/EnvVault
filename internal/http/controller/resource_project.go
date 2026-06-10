@@ -27,7 +27,7 @@ func (ctrl *Controller) CreateProject(c *gin.Context) {
 	}
 	specs := make([]domain.EnvSpec, 0, len(req.Environments))
 	for _, e := range req.Environments {
-		specs = append(specs, domain.EnvSpec{Code: e.Code, Name: e.Name, Comment: e.Comment})
+		specs = append(specs, domain.EnvSpec{Code: e.Code, Name: e.Name, Comment: e.Comment, SortOrder: e.SortOrder})
 	}
 	ctrl.log(c, "CreateProject", logging.F("org_id", req.ParentId), logging.F("code", req.Code), logging.F("env_count", len(specs)))
 	item, err := ctrl.repo.CreateProject(c.Request.Context(), req.ParentId, req.Code, req.Name, req.Comment, ctrl.actor(c), specs)

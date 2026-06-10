@@ -10,17 +10,15 @@ import (
 // ListAllOrganizationsForTree 列 caller 可见的全量 organization(无分页),
 // 复用 ListOrganizations 的 narrowing 子句,去掉 count/limit/offset。
 func (r *Repository) ListAllOrganizationsForTree(ctx context.Context, callerUserId string) ([]domain.Entity, error) {
-	cte := userReadScopeCTE()
+	cte := organizationNavigationCTE()
 	cols, scanInto := entityReadColumns(parentColumn("organizations"))
-	narrow := scopeNarrowingWhere([]narrowingEntry{
-		{scopeType: "organization", column: "t.id"},
-	})
 	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
 select %s
 from organizations t
-where t.is_deleted = false%s
+where t.is_deleted = false
+  and t.id in (select org_id from visible_organizations)
 order by t.name asc
-`, cols, narrow), callerUserId, "org:read")
+	`, cols), callerUserId)
 	if err != nil {
 		return nil, err
 	}
@@ -39,18 +37,15 @@ order by t.name asc
 
 // ListAllProjectsForTree 列 caller 可见的全量 project(无分页)。
 func (r *Repository) ListAllProjectsForTree(ctx context.Context, callerUserId string) ([]domain.Entity, error) {
-	cte := userReadScopeCTE()
+	cte := projectNavigationCTE()
 	cols, scanInto := entityReadColumns(parentColumn("projects"))
-	narrow := scopeNarrowingWhere([]narrowingEntry{
-		{scopeType: "project", column: "t.id"},
-		{scopeType: "organization", column: "t.org_id"},
-	})
 	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
 select %s
 from projects t
-where t.is_deleted = false%s
+where t.is_deleted = false
+  and t.id in (select project_id from visible_projects)
 order by t.name asc
-`, cols, narrow), callerUserId, "project:read")
+	`, cols), callerUserId)
 	if err != nil {
 		return nil, err
 	}
@@ -70,21 +65,17 @@ order by t.name asc
 // ListAllEnvironmentsForTree 列 caller 可见的全量 environment(无分页)。
 // environments 表不持 org_id,join projects 暴露 p.org_id 用于 narrowing。
 func (r *Repository) ListAllEnvironmentsForTree(ctx context.Context, callerUserId string) ([]domain.Entity, error) {
-	cte := userReadScopeCTE()
-	cols, scanInto := entityReadColumns(parentColumn("environments"))
-	narrow := scopeNarrowingWhere([]narrowingEntry{
-		{scopeType: "environment", column: "t.id"},
-		{scopeType: "project", column: "t.project_id"},
-		{scopeType: "organization", column: "p.org_id"},
-	})
+	cte := environmentNavigationCTE()
+	cols, scanInto := environmentReadColumns()
 	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
 select %s
 from environments t
 join projects p on p.id = t.project_id
 where t.is_deleted = false
-  and p.is_deleted = false%s
-order by t.name asc
-`, cols, narrow), callerUserId, "env:read")
+  and p.is_deleted = false
+  and t.id in (select environment_id from visible_environments)
+order by p.code asc, t.sort_order asc, t.created_at asc
+	`, cols), callerUserId)
 	if err != nil {
 		return nil, err
 	}

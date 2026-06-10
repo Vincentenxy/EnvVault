@@ -191,23 +191,23 @@ func (s *authService) Login(ctx context.Context, email, password, ip string) (Au
 	return token, nil
 }
 
-func (s *authService) Logout(ctx context.Context, externalUserId string) error {
-	if externalUserId == "" {
+func (s *authService) Logout(ctx context.Context, userId string) error {
+	if userId == "" {
 		return ErrInvalidArgument
 	}
-	tva, err := s.opts.AuthRepo.BumpTokensValidAfterByExternalId(ctx, externalUserId)
+	tva, err := s.opts.AuthRepo.BumpTokensValidAfter(ctx, userId)
 	if err != nil {
 		return err
 	}
 	// 立即让本进程 cache 看到新值,避免下一个请求被「cache 还显示旧 tva → iat 通过」放行
 	if s.opts.TokensCache != nil {
-		s.opts.TokensCache.Set(externalUserId, tva)
+		s.opts.TokensCache.Set(userId, tva)
 	}
 	return nil
 }
 
-func (s *authService) ChangePassword(ctx context.Context, externalUserId, oldPassword, newPassword string) error {
-	if externalUserId == "" {
+func (s *authService) ChangePassword(ctx context.Context, userId, oldPassword, newPassword string) error {
+	if userId == "" {
 		return ErrInvalidArgument
 	}
 	if oldPassword == "" || newPassword == "" {
@@ -216,7 +216,7 @@ func (s *authService) ChangePassword(ctx context.Context, externalUserId, oldPas
 	if err := validatePassword(newPassword, s.opts.PasswordMinLen); err != nil {
 		return err
 	}
-	user, err := s.opts.AuthRepo.GetUserByExternalId(ctx, externalUserId)
+	user, err := s.opts.AuthRepo.GetUserById(ctx, userId)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return ErrInvalidArgument
@@ -236,13 +236,13 @@ func (s *authService) ChangePassword(ctx context.Context, externalUserId, oldPas
 	if err != nil {
 		return err
 	}
-	updated, err := s.opts.AuthRepo.UpdatePasswordHashByExternalId(ctx, externalUserId, newHash, s.opts.PasswordHasher.Algo())
+	updated, err := s.opts.AuthRepo.UpdatePasswordHash(ctx, userId, newHash, s.opts.PasswordHasher.Algo())
 	if err != nil {
 		return err
 	}
-	// cache 同步:UpdatePasswordHashByExternalId 内部已 bump,但进程内 cache 需主动 Set
+	// cache 同步:UpdatePasswordHash 内部已 bump,但进程内 cache 需主动 Set
 	if s.opts.TokensCache != nil && updated.TokensValidAfter != nil {
-		s.opts.TokensCache.Set(externalUserId, *updated.TokensValidAfter)
+		s.opts.TokensCache.Set(userId, *updated.TokensValidAfter)
 	}
 	return nil
 }
@@ -271,16 +271,16 @@ func (s *authService) issueToken(user domain.User) (AuthToken, error) {
 	now := time.Now()
 	exp := now.Add(s.opts.TokenTTL)
 	claims := auth.Claims{
-		UserId:           user.ExternalUserId,
+		UserId:           user.Id,
 		Name:             user.Name,
-		RegisteredClaims: auth.JWTRegisteredClaimsAt(now, exp, user.ExternalUserId),
+		RegisteredClaims: auth.JWTRegisteredClaimsAt(now, exp, user.Id),
 	}
 	tokenStr, err := auth.SignToken(s.opts.PrivateKeyPEM, claims)
 	if err != nil {
 		return AuthToken{}, err
 	}
 	return AuthToken{
-		UserId:    user.ExternalUserId,
+		UserId:    user.Id,
 		Email:     user.Email,
 		Name:      user.Name,
 		Token:     tokenStr,

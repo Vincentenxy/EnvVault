@@ -17,7 +17,7 @@ func TestCoreSecretRevealRouteIsRegistered(t *testing.T) {
 			},
 			Auth: config.AuthConfig{
 				Enabled:     false,
-				DevUserId:   "dev-user",
+				DevUserId:   "00000000-0000-4000-8000-000000000001",
 				DevUserName: "Dev User",
 			},
 		},
@@ -43,7 +43,7 @@ func TestCoreRoutesAreRegistered(t *testing.T) {
 			Auth: config.AuthConfig{
 				Enabled:         false,
 				DevTokenEnabled: true,
-				DevUserId:       "dev-user",
+				DevUserId:       "00000000-0000-4000-8000-000000000001",
 				DevUserName:     "Dev User",
 			},
 		},

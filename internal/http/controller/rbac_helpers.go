@@ -44,7 +44,7 @@ type roleRequest struct {
 }
 
 type roleGrantRequest struct {
-	// 旧字段(保留兼容)
+	// 兼容字段:当前按 users.id(UUID) 解析,不再作为外部用户标识参与授权。
 	ExternalUserId string     `json:"externalUserId"`
 	Name           string     `json:"name"`
 	Email          string     `json:"email"`
@@ -53,7 +53,7 @@ type roleGrantRequest struct {
 	ScopeId        string     `json:"scopeId"`
 	ExpiresAt      *time.Time `json:"expiresAt"`
 
-	// 新 alias 字段(SDK 友好);非空时优先于旧字段
+	// 新字段(SDK 友好);非空时优先于兼容字段。
 	UserId       string `json:"userId,omitempty"`
 	RoleType     string `json:"roleType,omitempty"`
 	ResourceType string `json:"resourceType,omitempty"`
@@ -86,23 +86,25 @@ func (r roleGrantRequest) resolve() resolvedRoleGrant {
 }
 
 type userLookupRequest struct {
+	// 兼容字段:当前按 users.id(UUID) 解析。
 	ExternalUserId string `json:"externalUserId"`
 	ScopeType      string `json:"scopeType"`
 	ScopeId        string `json:"scopeId"`
 
-	// alias
+	// 推荐字段:users.id(UUID)。
 	UserId string `json:"userId,omitempty"`
 }
 
 type pagedUserLookupRequest struct {
 	PageRequest
+	// 兼容字段:当前按 users.id(UUID) 解析。
 	ExternalUserId string `json:"externalUserId"`
 
-	// alias
+	// 推荐字段:users.id(UUID)。
 	UserId string `json:"userId,omitempty"`
 }
 
-// pickAlias 在 alias 优先;空时回退到旧字段,空字符串走 TrimSpace 防御。
+// pickAlias 在推荐字段优先;空时回退到兼容字段,空字符串走 TrimSpace 防御。
 func pickAlias(newVal, oldVal string) string {
 	if v := strings.TrimSpace(newVal); v != "" {
 		return v

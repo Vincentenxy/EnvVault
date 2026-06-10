@@ -37,6 +37,7 @@ type Entity struct {
 	Code           string    `json:"code"`
 	Name           string    `json:"name"`
 	Comment        string    `json:"comment,omitempty"`
+	SortOrder      int       `json:"sortOrder,omitempty"`
 	CreatedBy      string    `json:"createdBy"`
 	CreatedByLabel string    `json:"createdByLabel"`
 	UpdatedBy      string    `json:"updatedBy"`
@@ -48,9 +49,10 @@ type Entity struct {
 // EnvSpec is the minimal input used to declare an environment when
 // creating a project (or driving the env template upsert).
 type EnvSpec struct {
-	Code    string
-	Name    string
-	Comment string
+	Code      string
+	Name      string
+	Comment   string
+	SortOrder int
 }
 
 // EnvironmentTemplate is the org-level read-only snapshot of an env code

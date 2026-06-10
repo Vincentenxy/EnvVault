@@ -50,7 +50,7 @@ auth:
     ryCtJJ435GWsBdlMO8HNSdBpUlEo9LWdFgzKJltDJDu835l4KkpwJrQEQhkgMUWa
     52JHSWzN3fIrUpG3/SxM+ybM
     -----END PRIVATE KEY-----
-  dev_user_id: "dev-user"
+  dev_user_id: "00000000-0000-4000-8000-000000000001"
   dev_user_name: "Dev User"
 
 security:
@@ -58,8 +58,8 @@ security:
   encryption_key: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
 database:
-  host: "192.168.1.110"
-  #host: "127.0.0.1"
+  #host: "192.168.1.110"
+  host: "127.0.0.1"
   port: 5432
   user: "admin"
   password: "123456"
@@ -74,8 +74,8 @@ redis:
   enabled: true
   mode: "single"
   addrs:
-    #- "127.0.0.1:6379"
-    - "192.168.1.110:6379"
+    - "127.0.0.1:6379"
+    #- "192.168.1.110:6379"
   password: "123456"
   db: 0
   key_prefix: "envvault"

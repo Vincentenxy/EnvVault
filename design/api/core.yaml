@@ -335,6 +335,10 @@ paths:
           `org_admin`): returns all projects under `orgId` (cascading).
         - Caller with no active binding: returns an empty list.
 
+        Results are ordered by `sortOrder ASC, createdAt ASC`. Standard
+        environment codes default to `dev=10`, `test=20`, `sim=30`,
+        `prod=40`; custom codes default to `100`.
+
         See `design/DESIGN.md` §"List 接口按 caller 权限收窄（v7）".
       requestBody:
         required: true
@@ -944,6 +948,22 @@ paths:
     post:
       tags: [Folders]
       summary: Update folder
+      description: |
+        Updates a folder's `name` and `comment` only.
+
+        **Field contract** (locked, do not extend without revisiting auth):
+          - Modifiable: `name`, `comment`
+          - Immutable through this endpoint: `id`, `code`, `environmentId`,
+            `parentId`, `level`, `createdBy`, `createdAt`
+          - The `parentId` field in the request body, if present, is **only**
+            used as a lookup helper together with `code` to resolve the folder
+            id; it is never written to the folder row.
+
+        **Permission**: requires `folder:update` on the target folder. No
+        additional permission checks.
+
+        Use `code`-based addressing only when `id` is unknown; when both are
+        supplied `id` wins and `code` is ignored.
       requestBody:
         $ref: "#/components/requestBodies/UpdateByIdOrCode"
       responses:
@@ -2147,6 +2167,10 @@ components:
         comment:
           type: string
           example: shared dev env
+        sortOrder:
+          type: integer
+          example: 10
+          description: Optional display order. When omitted, backend defaults by code.
       description: |
         Inline spec used in /api/v1/project/create to declare an environment to create.
         The matching `environment_templates` row is upserted on first write only; subsequent
@@ -2187,15 +2211,18 @@ components:
           type: string
         comment:
           type: string
+        sortOrder:
+          type: integer
+          description: Present for environments. Other entity types omit this field.
         createdBy:
           type: string
-          example: dev-user
+          example: 00000000-0000-4000-8000-000000000001
         createdByLabel:
           type: string
           example: Dev User
         updatedBy:
           type: string
-          example: dev-user
+          example: 00000000-0000-4000-8000-000000000001
         updatedByLabel:
           type: string
           example: Dev User
@@ -2211,6 +2238,7 @@ components:
       properties:
         userId:
           type: string
+          format: uuid
         name:
           type: string
 
@@ -2219,7 +2247,8 @@ components:
       properties:
         userId:
           type: string
-          example: dev-user
+          format: uuid
+          example: 00000000-0000-4000-8000-000000000001
         name:
           type: string
           example: Dev User

@@ -21,7 +21,7 @@ func (c *UserCache) Load(ctx context.Context, db *sql.DB) error {
 		return nil
 	}
 	rows, err := db.QueryContext(ctx, `
-select external_user_id, name
+select id, name
 from users
 `)
 	if err != nil {
@@ -31,15 +31,15 @@ from users
 
 	labels := make(map[string]string)
 	for rows.Next() {
-		var externalUserId, name string
-		if err := rows.Scan(&externalUserId, &name); err != nil {
+		var userId, name string
+		if err := rows.Scan(&userId, &name); err != nil {
 			return err
 		}
-		externalUserId = strings.TrimSpace(externalUserId)
-		if externalUserId == "" {
+		userId = strings.TrimSpace(userId)
+		if userId == "" {
 			continue
 		}
-		labels[externalUserId] = userLabel(externalUserId, name)
+		labels[userId] = userLabel(userId, name)
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -51,40 +51,40 @@ from users
 	return nil
 }
 
-func (c *UserCache) CacheUserLabel(externalUserId, name string) {
+func (c *UserCache) CacheUserLabel(userId, name string) {
 	if c == nil {
 		return
 	}
-	externalUserId = strings.TrimSpace(externalUserId)
-	if externalUserId == "" {
+	userId = strings.TrimSpace(userId)
+	if userId == "" {
 		return
 	}
 	c.mu.Lock()
-	c.labels[externalUserId] = userLabel(externalUserId, name)
+	c.labels[userId] = userLabel(userId, name)
 	c.mu.Unlock()
 }
 
-func (c *UserCache) Label(externalUserId string) string {
-	externalUserId = strings.TrimSpace(externalUserId)
-	if externalUserId == "" {
+func (c *UserCache) Label(userId string) string {
+	userId = strings.TrimSpace(userId)
+	if userId == "" {
 		return ""
 	}
 	if c == nil {
-		return externalUserId
+		return userId
 	}
 	c.mu.RLock()
-	label, ok := c.labels[externalUserId]
+	label, ok := c.labels[userId]
 	c.mu.RUnlock()
 	if ok && strings.TrimSpace(label) != "" {
 		return label
 	}
-	return externalUserId
+	return userId
 }
 
-func userLabel(externalUserId, name string) string {
+func userLabel(userId, name string) string {
 	name = strings.TrimSpace(name)
 	if name != "" {
 		return name
 	}
-	return externalUserId
+	return userId
 }

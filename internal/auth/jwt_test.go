@@ -18,10 +18,11 @@ func TestJWTMiddlewareAcceptsValidToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	privateKey, publicKeyPEM := testRSAKeyPair(t)
+	userId := "00000000-0000-4000-8000-000000000001"
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, Claims{
-		UserId: "user-1",
+		UserId: userId,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject: "user-1",
+			Subject: userId,
 		},
 	})
 	tokenString, err := token.SignedString(privateKey)
@@ -47,6 +48,37 @@ func TestJWTMiddlewareAcceptsValidToken(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJWTMiddlewareRejectsNonUUIDUserId(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	privateKey, publicKeyPEM := testRSAKeyPair(t)
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, Claims{
+		UserId: "dev-user",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject: "dev-user",
+		},
+	})
+	tokenString, err := token.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("SignedString() error = %v", err)
+	}
+
+	router := gin.New()
+	router.Use(JWTMiddleware(JWTConfig{PublicKey: publicKeyPEM}))
+	router.GET("/me", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }
 
@@ -195,10 +227,11 @@ func TestJWTMiddleware_RevokedByTokensValidAfter(t *testing.T) {
 	privateKey, publicKeyPEM := testRSAKeyPair(t)
 
 	iat := time.Now().Add(-time.Hour) // 1h 前签发
+	userId := "00000000-0000-4000-8000-000000000001"
 	claims := Claims{
-		UserId: "user-1",
+		UserId: userId,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   "user-1",
+			Subject:   userId,
 			IssuedAt:  jwt.NewNumericDate(iat),
 			ExpiresAt: jwt.NewNumericDate(iat.Add(2 * time.Hour)),
 		},
@@ -211,7 +244,7 @@ func TestJWTMiddleware_RevokedByTokensValidAfter(t *testing.T) {
 
 	// cache: tokensValidAfter 在 iat 之后 → 应被 401
 	cache := NewTokensCache(TokensCacheOptions{})
-	cache.Set("user-1", iat.Add(time.Minute))
+	cache.Set(userId, iat.Add(time.Minute))
 
 	router := gin.New()
 	router.Use(JWTMiddleware(JWTConfig{PublicKey: publicKeyPEM, TokensCache: cache}))
@@ -232,10 +265,11 @@ func TestJWTMiddleware_AllowedWhenTokensValidAfterBeforeIAT(t *testing.T) {
 	privateKey, publicKeyPEM := testRSAKeyPair(t)
 
 	iat := time.Now().Add(-time.Hour)
+	userId := "00000000-0000-4000-8000-000000000001"
 	claims := Claims{
-		UserId: "user-1",
+		UserId: userId,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   "user-1",
+			Subject:   userId,
 			IssuedAt:  jwt.NewNumericDate(iat),
 			ExpiresAt: jwt.NewNumericDate(iat.Add(2 * time.Hour)),
 		},
@@ -248,7 +282,7 @@ func TestJWTMiddleware_AllowedWhenTokensValidAfterBeforeIAT(t *testing.T) {
 
 	// cache: tokensValidAfter 在 iat 之前 → 200
 	cache := NewTokensCache(TokensCacheOptions{})
-	cache.Set("user-1", iat.Add(-time.Minute))
+	cache.Set(userId, iat.Add(-time.Minute))
 
 	router := gin.New()
 	router.Use(JWTMiddleware(JWTConfig{PublicKey: publicKeyPEM, TokensCache: cache}))
@@ -269,8 +303,9 @@ func TestJWTMiddleware_NoCache_Allows(t *testing.T) {
 	privateKey, publicKeyPEM := testRSAKeyPair(t)
 
 	iat := time.Now()
+	userId := "00000000-0000-4000-8000-000000000001"
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, Claims{
-		UserId: "user-1",
+		UserId: userId,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(iat),
 			ExpiresAt: jwt.NewNumericDate(iat.Add(time.Hour)),

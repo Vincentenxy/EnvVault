@@ -99,8 +99,8 @@ on conflict do nothing
 	return tx.Commit()
 }
 
-func (s *RBACStore) EnsureBootstrapAdmin(ctx context.Context, externalUserId, name string) error {
-	if strings.TrimSpace(externalUserId) == "" {
+func (s *RBACStore) EnsureBootstrapAdmin(ctx context.Context, userId, name string) error {
+	if strings.TrimSpace(userId) == "" {
 		return nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -109,7 +109,7 @@ func (s *RBACStore) EnsureBootstrapAdmin(ctx context.Context, externalUserId, na
 	}
 	defer tx.Rollback()
 
-	userId, err := upsertUserTx(ctx, tx, externalUserId, name, "")
+	storedUserId, err := upsertUserByIdTx(ctx, tx, userId, name, "")
 	if err != nil {
 		return err
 	}
@@ -117,7 +117,7 @@ func (s *RBACStore) EnsureBootstrapAdmin(ctx context.Context, externalUserId, na
 	if err != nil {
 		return err
 	}
-	existingId, err := activeBindingIdTx(ctx, tx, userId, roleId, "global", "")
+	existingId, err := activeBindingIdTx(ctx, tx, storedUserId, roleId, "global", "")
 	if err != nil {
 		return err
 	}
@@ -125,7 +125,7 @@ func (s *RBACStore) EnsureBootstrapAdmin(ctx context.Context, externalUserId, na
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		s.cacheUserLabel(externalUserId, name)
+		s.cacheUserLabel(storedUserId, name)
 		return nil
 	}
 	bindingId, err := uuidgen.NewUUID()
@@ -135,14 +135,14 @@ func (s *RBACStore) EnsureBootstrapAdmin(ctx context.Context, externalUserId, na
 	_, err = tx.ExecContext(ctx, `
 insert into user_role_bindings (id, user_id, role_id, scope_type, scope_id, granted_by)
 values ($1, $2, $3, 'global', null, 'bootstrap')
-`, bindingId, userId, roleId)
+`, bindingId, storedUserId, roleId)
 	if err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.cacheUserLabel(externalUserId, name)
+	s.cacheUserLabel(storedUserId, name)
 	return nil
 }
 
@@ -175,18 +175,18 @@ func (s *RBACStore) ResourceScopes(ctx context.Context, resource auth.Resource) 
 	}
 }
 
-func (s *RBACStore) UserPermissions(ctx context.Context, externalUserId string, scopes []auth.Scope) (map[string]struct{}, error) {
+func (s *RBACStore) UserPermissions(ctx context.Context, userId string, scopes []auth.Scope) (map[string]struct{}, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if s == nil || s.db == nil {
 		return nil, errors.New("rbac store is not configured")
 	}
-	if strings.TrimSpace(externalUserId) == "" || len(scopes) == 0 {
+	if strings.TrimSpace(userId) == "" || len(scopes) == 0 {
 		return map[string]struct{}{}, nil
 	}
 
-	query, args := buildUserPermissionsQuery(externalUserId, scopes)
+	query, args := buildUserPermissionsQuery(userId, scopes)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -214,23 +214,23 @@ func (s *RBACStore) ListPermissions(ctx context.Context) ([]Permission, error) {
 	return items, nil
 }
 
-func (s *RBACStore) SyncUser(ctx context.Context, externalUserId, name, email string) (User, error) {
+func (s *RBACStore) SyncUser(ctx context.Context, userId, name, email string) (User, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return User{}, err
 	}
 	defer tx.Rollback()
-	if _, err := upsertUserTx(ctx, tx, externalUserId, name, email); err != nil {
+	if _, err := upsertUserByIdTx(ctx, tx, userId, name, email); err != nil {
 		return User{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return User{}, err
 	}
-	user, err := s.GetUserByExternalId(ctx, externalUserId)
+	user, err := s.GetUserById(ctx, userId)
 	if err != nil {
 		return User{}, err
 	}
-	s.cacheUserLabel(user.ExternalUserId, user.Name)
+	s.cacheUserLabel(user.Id, user.Name)
 	return user, nil
 }
 
@@ -389,14 +389,161 @@ func (s *RBACStore) ListRoleBindings(ctx context.Context, scopeType, scopeId str
 	return s.listRoleBindings(ctx, "", []auth.Scope{{Type: scopeType, Id: scopeId}}, pagination)
 }
 
-func (s *RBACStore) GrantRole(ctx context.Context, externalUserId, name, email, roleCode, scopeType, scopeId string, expiresAt *time.Time, actor string) (RoleBinding, error) {
+// ListRoleBindingsCascading 列 (scopeType, scopeId) 自身 + 全部下级 scope 上的
+// active binding。service 层在调用前已经校验 caller 在该 scope 或其父级持有
+// rbac:binding:read,store 不再做 caller 校验。
+//
+// 用一个递归 CTE(scope_descendants)把目标 scope 的整棵子树展开成
+// (scope_type, scope_id) 集合,然后跟 user_role_bindings 做 (scope_type,
+// scope_id) OR 匹配(包含 global 这种 scope_id IS NULL 的情况)。
+//
+// 层级链:global → organization → project → environment → folder → secret。
+// (global, "") 命中所有 scope_type='global' 且 scope_id IS NULL 的行;
+// (organization, X) 自身 + projects(X) + envs(X 下) + folders(X 下) + secrets(X 下);
+// 其余 scope 同理向下展开。
+func (s *RBACStore) ListRoleBindingsCascading(ctx context.Context, scopeType, scopeId string, pagination Pagination) (domain.PaginatedResult[RoleBinding], error) {
+	scopeType = strings.TrimSpace(scopeType)
+	scopeId = strings.TrimSpace(scopeId)
+	if scopeType == "" {
+		return domain.PaginatedResult[RoleBinding]{}, fmt.Errorf("empty scope type")
+	}
+	if scopeType != "global" && scopeId == "" {
+		return domain.PaginatedResult[RoleBinding]{}, fmt.Errorf("non-global scope requires scopeId")
+	}
+
+	cte := `
+with recursive scope_descendants(scope_type, scope_id) as (
+  -- anchor: target scope 自身
+  select $1::text, case when $1 = 'global' then null::uuid else $2::uuid end
+
+  union all
+
+  -- organization → projects
+  select 'project'::text, p.id
+  from projects p
+  join scope_descendants sd on p.org_id = sd.scope_id
+  where sd.scope_type = 'organization'
+    and p.is_deleted = false
+
+  union all
+
+  -- project → environments
+  select 'environment'::text, e.id
+  from environments e
+  join scope_descendants sd on e.project_id = sd.scope_id
+  where sd.scope_type = 'project'
+    and e.is_deleted = false
+
+  union all
+
+  -- environment → folders
+  select 'folder'::text, f.id
+  from folders f
+  join scope_descendants sd on f.environment_id = sd.scope_id
+  where sd.scope_type = 'environment'
+    and f.is_deleted = false
+
+  union all
+
+  -- folder → secrets
+  select 'secret'::text, sec.id
+  from secrets sec
+  join scope_descendants sd on sec.folder_id = sd.scope_id
+  where sd.scope_type = 'folder'
+    and sec.is_deleted = false
+)
+`
+	var total int64
+	countQuery := cte + `
+select count(*)
+from user_role_bindings urb
+where urb.is_deleted = false
+  and exists (
+    select 1 from scope_descendants sd
+    where (
+      (sd.scope_type = 'global' and urb.scope_type = 'global' and urb.scope_id is null)
+      or (urb.scope_type = sd.scope_type and urb.scope_id = sd.scope_id)
+    )
+  )
+`
+	if err := s.db.QueryRowContext(ctx, countQuery, scopeType, scopeId).Scan(&total); err != nil {
+		return domain.PaginatedResult[RoleBinding]{}, err
+	}
+
+	rows, err := s.db.QueryContext(ctx, cte+`
+select
+  urb.id,
+  u.id,
+  u.external_user_id,
+  u.name,
+  u.email,
+  u.source,
+  u.is_disabled,
+  u.last_seen_at,
+  r.id,
+  r.code,
+  urb.scope_type,
+  coalesce(urb.scope_id::text, ''),
+  urb.granted_by,
+  urb.expires_at,
+  urb.created_at
+from user_role_bindings urb
+join users u on u.id = urb.user_id
+join roles r on r.id = urb.role_id
+where urb.is_deleted = false
+  and exists (
+    select 1 from scope_descendants sd
+    where (
+      (sd.scope_type = 'global' and urb.scope_type = 'global' and urb.scope_id is null)
+      or (urb.scope_type = sd.scope_type and urb.scope_id = sd.scope_id)
+    )
+  )
+order by urb.created_at desc
+limit $3 offset $4
+`, scopeType, scopeId, pagination.Limit(), pagination.Offset())
+	if err != nil {
+		return domain.PaginatedResult[RoleBinding]{}, err
+	}
+	defer rows.Close()
+
+	var items []RoleBinding
+	for rows.Next() {
+		var binding RoleBinding
+		if err := rows.Scan(
+			&binding.Id,
+			&binding.User.Id,
+			&binding.User.ExternalUserId,
+			&binding.User.Name,
+			&binding.User.Email,
+			&binding.User.Source,
+			&binding.User.IsDisabled,
+			&binding.User.LastSeenAt,
+			&binding.RoleId,
+			&binding.RoleCode,
+			&binding.ScopeType,
+			&binding.ScopeId,
+			&binding.GrantedBy,
+			&binding.ExpiresAt,
+			&binding.CreatedAt,
+		); err != nil {
+			return domain.PaginatedResult[RoleBinding]{}, err
+		}
+		items = append(items, binding)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.PaginatedResult[RoleBinding]{}, err
+	}
+	return domain.PaginatedResult[RoleBinding]{Items: items, Total: total}, nil
+}
+
+func (s *RBACStore) GrantRole(ctx context.Context, userId, name, email, roleCode, scopeType, scopeId string, expiresAt *time.Time, actor string) (RoleBinding, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return RoleBinding{}, err
 	}
 	defer tx.Rollback()
 
-	userId, err := upsertUserTx(ctx, tx, externalUserId, name, email)
+	storedUserId, err := upsertUserByIdTx(ctx, tx, userId, name, email)
 	if err != nil {
 		return RoleBinding{}, err
 	}
@@ -404,7 +551,7 @@ func (s *RBACStore) GrantRole(ctx context.Context, externalUserId, name, email, 
 	if err != nil {
 		return RoleBinding{}, err
 	}
-	existingId, err := activeBindingIdTx(ctx, tx, userId, roleId, scopeType, scopeId)
+	existingId, err := activeBindingIdTx(ctx, tx, storedUserId, roleId, scopeType, scopeId)
 	if err != nil {
 		return RoleBinding{}, err
 	}
@@ -412,7 +559,7 @@ func (s *RBACStore) GrantRole(ctx context.Context, externalUserId, name, email, 
 		if err := tx.Commit(); err != nil {
 			return RoleBinding{}, err
 		}
-		s.cacheUserLabel(externalUserId, name)
+		s.cacheUserLabel(storedUserId, name)
 		return s.GetRoleBinding(ctx, existingId)
 	}
 
@@ -423,21 +570,21 @@ func (s *RBACStore) GrantRole(ctx context.Context, externalUserId, name, email, 
 	_, err = tx.ExecContext(ctx, `
 insert into user_role_bindings (id, user_id, role_id, scope_type, scope_id, granted_by, expires_at)
 values ($1, $2, $3, $4, nullif($5, '')::uuid, $6, $7)
-`, id, userId, roleId, scopeType, scopeId, actor, expiresAt)
+`, id, storedUserId, roleId, scopeType, scopeId, actor, expiresAt)
 	if err != nil {
 		return RoleBinding{}, err
 	}
-	if err := recordRoleBindingAuditTx(ctx, tx, actor, "grant_role", userId, roleId, scopeType, scopeId, nil); err != nil {
+	if err := recordRoleBindingAuditTx(ctx, tx, actor, "grant_role", storedUserId, roleId, scopeType, scopeId, nil); err != nil {
 		return RoleBinding{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return RoleBinding{}, err
 	}
-	s.cacheUserLabel(externalUserId, name)
+	s.cacheUserLabel(storedUserId, name)
 	return s.GetRoleBinding(ctx, id)
 }
 
-func (s *RBACStore) RevokeRole(ctx context.Context, externalUserId, roleCode, scopeType, scopeId, actor string) error {
+func (s *RBACStore) RevokeRole(ctx context.Context, targetUserId, roleCode, scopeType, scopeId, actor string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -450,12 +597,12 @@ select urb.id, u.id, r.id
 from user_role_bindings urb
 join users u on u.id = urb.user_id
 join roles r on r.id = urb.role_id
-where u.external_user_id = $1
+where u.id = $1
   and r.code = $2
   and urb.scope_type = $3
   and (($4 = '' and urb.scope_id is null) or urb.scope_id = nullif($4, '')::uuid)
   and urb.is_deleted = false
-`, externalUserId, roleCode, scopeType, scopeId).Scan(&bindingId, &userId, &roleId)
+`, targetUserId, roleCode, scopeType, scopeId).Scan(&bindingId, &userId, &roleId)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -501,6 +648,18 @@ func (s *RBACStore) GetUserByExternalId(ctx context.Context, externalUserId stri
 	return user, nil
 }
 
+func (s *RBACStore) GetUserById(ctx context.Context, userId string) (User, error) {
+	var user User
+	err := s.gormDB.WithContext(ctx).Where("id = ?", userId).First(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return User{}, ErrNotFound
+	}
+	if err != nil {
+		return User{}, err
+	}
+	return user, nil
+}
+
 func (s *RBACStore) ListUsers(ctx context.Context, scopeType, scopeId string, pagination Pagination) (domain.PaginatedResult[User], error) {
 	var items []User
 	baseQuery := s.gormDB.WithContext(ctx).
@@ -526,11 +685,11 @@ func (s *RBACStore) ListUsers(ctx context.Context, scopeType, scopeId string, pa
 	return domain.PaginatedResult[User]{Items: items, Total: total}, err
 }
 
-func (s *RBACStore) ListUserGrants(ctx context.Context, externalUserId string, pagination Pagination) (domain.PaginatedResult[RoleBinding], error) {
-	return s.listRoleBindings(ctx, externalUserId, nil, pagination)
+func (s *RBACStore) ListUserGrants(ctx context.Context, userId string, pagination Pagination) (domain.PaginatedResult[RoleBinding], error) {
+	return s.listRoleBindings(ctx, userId, nil, pagination)
 }
 
-func (s *RBACStore) EffectivePermissions(ctx context.Context, externalUserId, scopeType, scopeId string) (EffectivePermissions, error) {
+func (s *RBACStore) EffectivePermissions(ctx context.Context, userId, scopeType, scopeId string) (EffectivePermissions, error) {
 	scopes := []auth.Scope{{Type: "global"}}
 	if scopeType != "global" {
 		resourceScopes, err := s.ResourceScopes(ctx, auth.Resource{Type: scopeType, Id: scopeId})
@@ -539,7 +698,7 @@ func (s *RBACStore) EffectivePermissions(ctx context.Context, externalUserId, sc
 		}
 		scopes = resourceScopes
 	}
-	permissions, err := s.UserPermissions(ctx, externalUserId, scopes)
+	permissions, err := s.UserPermissions(ctx, userId, scopes)
 	if err != nil {
 		return EffectivePermissions{}, err
 	}
@@ -547,7 +706,7 @@ func (s *RBACStore) EffectivePermissions(ctx context.Context, externalUserId, sc
 	for code := range permissions {
 		codes = append(codes, code)
 	}
-	sourceGrantResult, err := s.listRoleBindings(ctx, externalUserId, scopes, Pagination{PageNum: 1, PageSize: 1000})
+	sourceGrantResult, err := s.listRoleBindings(ctx, userId, scopes, Pagination{PageNum: 1, PageSize: 1000})
 	if err != nil {
 		return EffectivePermissions{}, err
 	}
@@ -699,12 +858,12 @@ func (s *RBACStore) rolePermissionCodes(ctx context.Context, roleId string) ([]s
 	return codes, err
 }
 
-func (s *RBACStore) listRoleBindings(ctx context.Context, externalUserId string, scopes []auth.Scope, pagination Pagination) (domain.PaginatedResult[RoleBinding], error) {
+func (s *RBACStore) listRoleBindings(ctx context.Context, userId string, scopes []auth.Scope, pagination Pagination) (domain.PaginatedResult[RoleBinding], error) {
 	where := []string{"urb.is_deleted = false"}
 	args := []any{}
-	if strings.TrimSpace(externalUserId) != "" {
-		args = append(args, externalUserId)
-		where = append(where, fmt.Sprintf("u.external_user_id = $%d", len(args)))
+	if strings.TrimSpace(userId) != "" {
+		args = append(args, userId)
+		where = append(where, fmt.Sprintf("u.id = $%d", len(args)))
 	}
 	if len(scopes) > 0 {
 		scopeConditions := make([]string, 0, len(scopes))
@@ -816,8 +975,8 @@ limit `+limitPlaceholder+` offset `+offsetPlaceholder+`
 	return domain.PaginatedResult[RoleBinding]{Items: items, Total: total}, nil
 }
 
-func buildUserPermissionsQuery(externalUserId string, scopes []auth.Scope) (string, []any) {
-	args := []any{externalUserId}
+func buildUserPermissionsQuery(userId string, scopes []auth.Scope) (string, []any) {
+	args := []any{userId}
 	conditions := make([]string, 0, len(scopes))
 	for _, scope := range scopes {
 		scopeType := normalizeScopeType(scope.Type)
@@ -850,7 +1009,7 @@ join user_role_bindings urb on urb.user_id = u.id
 join roles r on r.id = urb.role_id
 join role_permissions rp on rp.role_id = r.id
 join permissions p on p.id = rp.permission_id
-where u.external_user_id = $1
+where u.id = $1
   and u.is_disabled = false
   and urb.is_deleted = false
   and (urb.expires_at is null or urb.expires_at > now())
@@ -873,11 +1032,11 @@ func normalizeResourceType(value string) string {
 	}
 }
 
-func (s *RBACStore) cacheUserLabel(externalUserId, name string) {
+func (s *RBACStore) cacheUserLabel(userId, name string) {
 	if s == nil {
 		return
 	}
-	s.userCache.CacheUserLabel(externalUserId, name)
+	s.userCache.CacheUserLabel(userId, name)
 }
 
 func normalizeScopeType(value string) string {
@@ -992,6 +1151,25 @@ returning id
 	return storedId, err
 }
 
+func upsertUserByIdTx(ctx context.Context, tx *sql.Tx, userId, name, email string) (string, error) {
+	userId = strings.TrimSpace(userId)
+	if userId == "" {
+		return "", ErrNotFound
+	}
+	var storedId string
+	err := tx.QueryRowContext(ctx, `
+insert into users (id, external_user_id, name, email, source, last_seen_at)
+values ($1, $2, $3, $4, 'jwt', now())
+on conflict (id) do update
+set name = case when excluded.name <> '' then excluded.name else users.name end,
+    email = case when excluded.email <> '' then excluded.email else users.email end,
+    last_seen_at = now(),
+    updated_at = now()
+returning id
+`, userId, userId, name, email).Scan(&storedId)
+	return storedId, translatePgErr(err)
+}
+
 func roleIdByCodeTx(ctx context.Context, tx *sql.Tx, code string) (string, error) {
 	var id string
 	err := tx.QueryRowContext(ctx, `
@@ -1087,6 +1265,10 @@ func defaultRoles() []systemRole {
 		{Code: "project_developer", Name: "Project Developer", ScopeType: "project", Permissions: []string{"project:read", "env:read", "folder:read", "secret:list", "secret:search", "secret:read", "secret:reveal", "secret:create", "secret:update"}},
 		{Code: "project_viewer", Name: "Project Viewer", ScopeType: "project", Permissions: []string{"project:read", "env:read", "folder:read", "secret:list", "secret:search", "secret:read"}},
 		{Code: "project_auditor", Name: "Project Auditor", ScopeType: "project", Permissions: []string{"project:read", "env:read", "folder:read", "secret:list", "secret:read", "audit:read"}},
+		{Code: "environment_admin", Name: "Environment Admin", Description: "Manage folders, secrets, members, and audit records in one environment", ScopeType: "environment", Permissions: []string{"env:read", "env:update", "folder:create", "folder:read", "folder:update", "folder:delete", "secret:list", "secret:search", "secret:read", "secret:reveal", "secret:create", "secret:update", "secret:delete", "rbac:binding:read", "rbac:binding:manage", "audit:read"}},
+		{Code: "environment_developer", Name: "Environment Developer", Description: "Read, reveal, create, and update secrets in one environment", ScopeType: "environment", Permissions: []string{"env:read", "folder:read", "secret:list", "secret:search", "secret:read", "secret:reveal", "secret:create", "secret:update"}},
+		{Code: "environment_viewer", Name: "Environment Viewer", Description: "Read environment metadata and secret keys without revealing values", ScopeType: "environment", Permissions: []string{"env:read", "folder:read", "secret:list", "secret:search", "secret:read"}},
+		{Code: "environment_auditor", Name: "Environment Auditor", Description: "Read environment metadata, secret keys, and audit records", ScopeType: "environment", Permissions: []string{"env:read", "folder:read", "secret:list", "secret:read", "audit:read"}},
 		{Code: "folder_admin", Name: "Folder Admin", ScopeType: "folder", Permissions: secretManage},
 		{Code: "folder_editor", Name: "Folder Editor", ScopeType: "folder", Permissions: []string{"secret:list", "secret:search", "secret:read", "secret:reveal", "secret:create", "secret:update"}},
 		{Code: "folder_viewer", Name: "Folder Viewer", ScopeType: "folder", Permissions: []string{"secret:list", "secret:search", "secret:read"}},

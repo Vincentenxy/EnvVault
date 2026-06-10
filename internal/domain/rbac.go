@@ -24,7 +24,7 @@ type Role struct {
 	OrgId       string   `json:"orgId,omitempty"`
 	ProjectId   string   `json:"projectId,omitempty"`
 	IsSystem    bool     `json:"isSystem"`
-	Permissions []string `json:"permissions,omitempty"`
+	Permissions []string `json:"permissions,omitempty" gorm:"-"`
 }
 
 // User is the read shape for users table.
@@ -70,7 +70,7 @@ type EffectivePermissions struct {
 // RoleGrant 是 RoleBinding 的语义别名:SDK 视角下的"user_id / role_type / resource_id"三段式。
 // 内部仍走 user_role_bindings 表(scope_id/scope_type),此处仅为 API 友好。
 // 字段语义:
-//   - UserId:外部用户 ID(对应 users.external_user_id)
+//   - UserId:用户数据库 ID(对应 users.id)
 //   - RoleType:角色码(对应 roles.code,例如 "org_admin")
 //   - ResourceType:作用域类型(对应 user_role_bindings.scope_type,例如 "organization")
 //   - ResourceId:作用域 ID(对应 user_role_bindings.scope_id,global 时为空)

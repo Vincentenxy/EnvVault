@@ -68,11 +68,11 @@ func NewRepository(db *sql.DB, userCache ...*UserCache) *Repository {
 	return &Repository{db: db, userCache: cache}
 }
 
-func (r *Repository) CacheUserLabel(externalUserId, name string) {
-	if r == nil {
+func (r *Repository) CacheUserLabel(userId, name string) {
+	if r == nil || r.userCache == nil {
 		return
 	}
-	r.userCache.CacheUserLabel(externalUserId, name)
+	r.userCache.CacheUserLabel(userId, name)
 }
 
 func (r *Repository) CreateOrganization(ctx context.Context, code, name, comment, actor string) (Entity, error) {
@@ -80,17 +80,15 @@ func (r *Repository) CreateOrganization(ctx context.Context, code, name, comment
 }
 
 func (r *Repository) ListOrganizations(ctx context.Context, callerUserId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
-	cte := userReadScopeCTE()
+	cte := organizationNavigationCTE()
 	cols, scanInto := entityReadColumns(parentColumn("organizations"))
-	narrow := scopeNarrowingWhere([]narrowingEntry{
-		{scopeType: "organization", column: "t.id"},
-	})
+	narrow := " and t.id in (select org_id from visible_organizations)"
 	var total int64
 	countQuery := cte + fmt.Sprintf(`
 select count(*) from organizations t
 where t.is_deleted = false%s
-`, narrow)
-	if err := r.db.QueryRowContext(ctx, countQuery, callerUserId, "org:read").Scan(&total); err != nil {
+	`, narrow)
+	if err := r.db.QueryRowContext(ctx, countQuery, callerUserId).Scan(&total); err != nil {
 		return domain.PaginatedResult[Entity]{}, err
 	}
 	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
@@ -98,8 +96,8 @@ select %s
 from organizations t
 where t.is_deleted = false%s
 order by t.name asc
-limit $3 offset $4
-`, cols, narrow), callerUserId, "org:read", pagination.Limit(), pagination.Offset())
+limit $2 offset $3
+	`, cols, narrow), callerUserId, pagination.Limit(), pagination.Offset())
 	if err != nil {
 		return domain.PaginatedResult[Entity]{}, err
 	}
@@ -197,7 +195,7 @@ func (r *Repository) CreateProject(ctx context.Context, orgId, code, name, comme
 
 	// v3:env 归属 project,逐个创建 + upsert 模板。folder 由调用方按需显式创建。
 	for _, env := range envs {
-		if _, err := r.createEntityTx(ctx, tx, "environments", "project_id", project.Id, env.Code, env.Name, env.Comment, actor); err != nil {
+		if _, err := r.createEnvironmentTx(ctx, tx, project.Id, env.Code, env.Name, env.Comment, actor, env.SortOrder); err != nil {
 			return Entity{}, err
 		}
 		if err := r.upsertEnvironmentTemplateTx(ctx, tx, orgId, env.Code, env.Name, env.Comment, actor); err != nil {
@@ -212,28 +210,25 @@ func (r *Repository) CreateProject(ctx context.Context, orgId, code, name, comme
 }
 
 func (r *Repository) ListProjects(ctx context.Context, callerUserId, orgId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
-	cte := userReadScopeCTE()
+	cte := projectNavigationCTE()
 	cols, scanInto := entityReadColumns(parentColumn("projects"))
-	narrow := scopeNarrowingWhere([]narrowingEntry{
-		{scopeType: "project", column: "t.id"},
-		{scopeType: "organization", column: "t.org_id"},
-	})
+	narrow := " and t.id in (select project_id from visible_projects)"
 	var total int64
 	if err := r.db.QueryRowContext(ctx, cte+fmt.Sprintf(`
 select count(*) from projects t
 where t.is_deleted = false
-  and t.org_id = $3::uuid%s
-`, narrow), callerUserId, "project:read", orgId).Scan(&total); err != nil {
+  and t.org_id = $2::uuid%s
+	`, narrow), callerUserId, orgId).Scan(&total); err != nil {
 		return domain.PaginatedResult[Entity]{}, err
 	}
 	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
 select %s
 from projects t
 where t.is_deleted = false
-  and t.org_id = $3::uuid%s
+  and t.org_id = $2::uuid%s
 order by t.name asc
-limit $4 offset $5
-`, cols, narrow), callerUserId, "project:read", orgId, pagination.Limit(), pagination.Offset())
+limit $3 offset $4
+	`, cols, narrow), callerUserId, orgId, pagination.Limit(), pagination.Offset())
 	if err != nil {
 		return domain.PaginatedResult[Entity]{}, err
 	}
@@ -316,7 +311,7 @@ select org_id from projects where id = $1::uuid and is_deleted = false
 		return Entity{}, err
 	}
 
-	env, err := r.createEntityTx(ctx, tx, "environments", "project_id", projectId, code, name, comment, actor)
+	env, err := r.createEnvironmentTx(ctx, tx, projectId, code, name, comment, actor, 0)
 	if err != nil {
 		return Entity{}, err
 	}
@@ -334,14 +329,9 @@ select org_id from projects where id = $1::uuid and is_deleted = false
 }
 
 func (r *Repository) ListEnvironments(ctx context.Context, callerUserId, projectId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
-	cte := userReadScopeCTE()
-	cols, scanInto := entityReadColumns(parentColumn("environments"))
-	// environments 表不持 org_id,需要 join projects 暴露 p.org_id。
-	narrow := scopeNarrowingWhere([]narrowingEntry{
-		{scopeType: "environment", column: "t.id"},
-		{scopeType: "project", column: "t.project_id"},
-		{scopeType: "organization", column: "p.org_id"},
-	})
+	cte := environmentNavigationCTE()
+	cols, scanInto := environmentReadColumns()
+	narrow := " and t.id in (select environment_id from visible_environments)"
 	var total int64
 	if err := r.db.QueryRowContext(ctx, cte+fmt.Sprintf(`
 select count(*)
@@ -349,8 +339,8 @@ from environments t
 join projects p on p.id = t.project_id
 where t.is_deleted = false
   and p.is_deleted = false
-  and t.project_id = $3::uuid%s
-`, narrow), callerUserId, "env:read", projectId).Scan(&total); err != nil {
+  and t.project_id = $2::uuid%s
+	`, narrow), callerUserId, projectId).Scan(&total); err != nil {
 		return domain.PaginatedResult[Entity]{}, err
 	}
 	rows, err := r.db.QueryContext(ctx, cte+fmt.Sprintf(`
@@ -359,10 +349,10 @@ from environments t
 join projects p on p.id = t.project_id
 where t.is_deleted = false
   and p.is_deleted = false
-  and t.project_id = $3::uuid%s
-order by t.name asc
-limit $4 offset $5
-`, cols, narrow), callerUserId, "env:read", projectId, pagination.Limit(), pagination.Offset())
+  and t.project_id = $2::uuid%s
+order by t.sort_order asc, t.created_at asc
+limit $3 offset $4
+	`, cols, narrow), callerUserId, projectId, pagination.Limit(), pagination.Offset())
 	if err != nil {
 		return domain.PaginatedResult[Entity]{}, err
 	}
@@ -1745,7 +1735,7 @@ func (r *Repository) createEntity(ctx context.Context, table, parentColumn, pare
 
 func (r *Repository) listEntities(ctx context.Context, table, parentId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
 	countQuery := fmt.Sprintf("select count(*) from %s where is_deleted = false", table)
-	cols, scanInto := entityReadColumns(parentColumn(table))
+	cols, scanInto := entityReadColumnsForTable(table)
 	query := fmt.Sprintf(`
 select %s
 from %s t
@@ -1787,7 +1777,7 @@ where t.is_deleted = false`, cols, table)
 
 func (r *Repository) getEntity(ctx context.Context, table, id string) (Entity, error) {
 	var entity Entity
-	cols, scanInto := entityReadColumns(parentColumn(table))
+	cols, scanInto := entityReadColumnsForTable(table)
 	query := fmt.Sprintf(`
 select %s
 from %s t
@@ -1805,7 +1795,7 @@ where t.id = $1 and t.is_deleted = false`, cols, table)
 
 func (r *Repository) getEntityByCode(ctx context.Context, table, code string) (Entity, error) {
 	var entity Entity
-	cols, scanInto := entityReadColumns(parentColumn(table))
+	cols, scanInto := entityReadColumnsForTable(table)
 	query := fmt.Sprintf(`
 select %s
 from %s t
@@ -1824,7 +1814,7 @@ where t.code = $1 and t.is_deleted = false`, cols, table)
 func (r *Repository) getEntityByCodeWithParent(ctx context.Context, table, parentColumn, parentId, code string) (Entity, error) {
 	var entity Entity
 	// 参数 parentColumn 遮蔽了包级 parentColumn 函数;此处值与 parentColumn(table) 等价,直接传。
-	cols, scanInto := entityReadColumns(parentColumn)
+	cols, scanInto := entityReadColumnsForTable(table)
 	query := fmt.Sprintf(`
 select %s
 from %s t
@@ -1847,7 +1837,7 @@ func (r *Repository) updateEntity(ctx context.Context, table, id, name, comment,
 	}
 	defer tx.Rollback()
 
-	returning, scanInto := entityReturning(parentColumn(table))
+	returning, scanInto := entityReturningForTable(table)
 	var entity Entity
 	query := fmt.Sprintf("update %s set name = $2, comment = $3, updated_by = $4, updated_at = now() where id = $1 and is_deleted = false returning %s", table, returning)
 	err = tx.QueryRowContext(ctx, query, id, name, comment, actor).Scan(scanInto(&entity)...)
@@ -2134,6 +2124,27 @@ func (r *Repository) createEntityTx(ctx context.Context, tx *sql.Tx, table, pare
 	return entity, nil
 }
 
+func (r *Repository) createEnvironmentTx(ctx context.Context, tx *sql.Tx, projectId, code, name, comment, actor string, sortOrder int) (Entity, error) {
+	id, err := uuidgen.NewUUID()
+	if err != nil {
+		return Entity{}, err
+	}
+	if sortOrder <= 0 {
+		sortOrder = defaultEnvironmentSortOrder(code)
+	}
+	returning, scanInto := environmentReturning()
+	var entity Entity
+	query := fmt.Sprintf(`
+insert into environments (id, project_id, code, name, comment, sort_order, created_by, updated_by)
+values ($1, $2, $3, $4, $5, $6, $7, $7)
+returning %s`, returning)
+	if err := tx.QueryRowContext(ctx, query, id, projectId, code, name, comment, sortOrder, actor).Scan(scanInto(&entity)...); err != nil {
+		return Entity{}, translatePgErr(err)
+	}
+	r.fillEntityLabels(&entity)
+	return entity, nil
+}
+
 func (r *Repository) fillEntityLabels(entity *Entity) {
 	entity.CreatedByLabel = r.userLabel(entity.CreatedBy)
 	entity.UpdatedByLabel = r.userLabel(entity.UpdatedBy)
@@ -2199,6 +2210,49 @@ func parentColumn(table string) string {
 		return "org_id"
 	default:
 		return ""
+	}
+}
+
+func entityReadColumnsForTable(table string) (cols string, scan func(*Entity) []any) {
+	if table == "environments" {
+		return environmentReadColumns()
+	}
+	return entityReadColumns(parentColumn(table))
+}
+
+func entityReturningForTable(table string) (cols string, scan func(*Entity) []any) {
+	if table == "environments" {
+		return environmentReturning()
+	}
+	return entityReturning(parentColumn(table))
+}
+
+func environmentReadColumns() (cols string, scan func(*Entity) []any) {
+	return "t.id, t.project_id, t.code, t.name, t.comment, t.sort_order, t.created_by, t.updated_by, t.created_at, t.updated_at",
+		func(e *Entity) []any {
+			return []any{&e.Id, &e.ParentId, &e.Code, &e.Name, &e.Comment, &e.SortOrder, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt}
+		}
+}
+
+func environmentReturning() (cols string, scan func(*Entity) []any) {
+	return "id, project_id, code, name, comment, sort_order, created_by, updated_by, created_at, updated_at",
+		func(e *Entity) []any {
+			return []any{&e.Id, &e.ParentId, &e.Code, &e.Name, &e.Comment, &e.SortOrder, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt}
+		}
+}
+
+func defaultEnvironmentSortOrder(code string) int {
+	switch strings.TrimSpace(code) {
+	case "dev":
+		return 10
+	case "test":
+		return 20
+	case "sim":
+		return 30
+	case "prod":
+		return 40
+	default:
+		return 100
 	}
 }
 
@@ -2271,12 +2325,197 @@ func userReadScopeCTE() string {
   join roles r on r.id = urb.role_id
   join role_permissions rp on rp.role_id = r.id
   join permissions p on p.id = rp.permission_id
-  where u.external_user_id = $1
+  where u.id = $1
     and p.code = $2
     and (urb.expires_at is null or urb.expires_at > now())
     and urb.is_deleted = false
     and r.is_deleted = false
     and u.is_disabled = false
+) `
+}
+
+// navigationScopeCTE 是级联选择器使用的权限基础集合。它保留权限所属的
+// resource_type，使上级列表可以从下级授权反推出导航祖先，而不把下级权限
+// 提升为真正的上级 read 权限。
+func navigationScopeCTE() string {
+	return `with user_navigation_scopes as (
+  select distinct urb.scope_type, urb.scope_id, p.resource_type
+  from user_role_bindings urb
+  join users u on u.id = urb.user_id
+  join roles r on r.id = urb.role_id
+  join role_permissions rp on rp.role_id = r.id
+  join permissions p on p.id = rp.permission_id
+  where u.id = $1
+    and (urb.expires_at is null or urb.expires_at > now())
+    and urb.is_deleted = false
+    and r.is_deleted = false
+    and u.is_disabled = false
+) `
+}
+
+func organizationNavigationCTE() string {
+	return navigationScopeCTE() + `,
+visible_organizations as (
+  select o.id as org_id
+  from organizations o
+  where o.is_deleted = false
+    and exists (
+      select 1 from user_navigation_scopes s
+      where s.scope_type = 'global'
+        and s.resource_type in ('org', 'project', 'env', 'folder', 'secret')
+    )
+  union
+  select s.scope_id
+  from user_navigation_scopes s
+  where s.scope_type = 'organization'
+    and s.scope_id is not null
+    and s.resource_type in ('org', 'project', 'env', 'folder', 'secret')
+  union
+  select p.org_id
+  from user_navigation_scopes s
+  join projects p on p.id = s.scope_id
+  where s.scope_type = 'project'
+    and s.resource_type in ('project', 'env', 'folder', 'secret')
+    and p.is_deleted = false
+  union
+  select p.org_id
+  from user_navigation_scopes s
+  join environments e on e.id = s.scope_id
+  join projects p on p.id = e.project_id
+  where s.scope_type = 'environment'
+    and s.resource_type in ('env', 'folder', 'secret')
+    and e.is_deleted = false
+    and p.is_deleted = false
+  union
+  select p.org_id
+  from user_navigation_scopes s
+  join folders f on f.id = s.scope_id
+  join environments e on e.id = f.environment_id
+  join projects p on p.id = e.project_id
+  where s.scope_type = 'folder'
+    and s.resource_type in ('folder', 'secret')
+    and f.is_deleted = false
+    and e.is_deleted = false
+    and p.is_deleted = false
+  union
+  select p.org_id
+  from user_navigation_scopes s
+  join secrets sec on sec.id = s.scope_id
+  join folders f on f.id = sec.folder_id
+  join environments e on e.id = f.environment_id
+  join projects p on p.id = e.project_id
+  where s.scope_type = 'secret'
+    and s.resource_type = 'secret'
+    and sec.is_deleted = false
+    and f.is_deleted = false
+    and e.is_deleted = false
+    and p.is_deleted = false
+) `
+}
+
+func projectNavigationCTE() string {
+	return navigationScopeCTE() + `,
+visible_projects as (
+  select p.id as project_id
+  from projects p
+  where p.is_deleted = false
+    and exists (
+      select 1 from user_navigation_scopes s
+      where s.scope_type = 'global'
+        and s.resource_type in ('project', 'env', 'folder', 'secret')
+    )
+  union
+  select p.id
+  from user_navigation_scopes s
+  join projects p on p.org_id = s.scope_id
+  where s.scope_type = 'organization'
+    and s.resource_type in ('project', 'env', 'folder', 'secret')
+    and p.is_deleted = false
+  union
+  select s.scope_id
+  from user_navigation_scopes s
+  where s.scope_type = 'project'
+    and s.scope_id is not null
+    and s.resource_type in ('project', 'env', 'folder', 'secret')
+  union
+  select e.project_id
+  from user_navigation_scopes s
+  join environments e on e.id = s.scope_id
+  where s.scope_type = 'environment'
+    and s.resource_type in ('env', 'folder', 'secret')
+    and e.is_deleted = false
+  union
+  select e.project_id
+  from user_navigation_scopes s
+  join folders f on f.id = s.scope_id
+  join environments e on e.id = f.environment_id
+  where s.scope_type = 'folder'
+    and s.resource_type in ('folder', 'secret')
+    and f.is_deleted = false
+    and e.is_deleted = false
+  union
+  select e.project_id
+  from user_navigation_scopes s
+  join secrets sec on sec.id = s.scope_id
+  join folders f on f.id = sec.folder_id
+  join environments e on e.id = f.environment_id
+  where s.scope_type = 'secret'
+    and s.resource_type = 'secret'
+    and sec.is_deleted = false
+    and f.is_deleted = false
+    and e.is_deleted = false
+) `
+}
+
+func environmentNavigationCTE() string {
+	return navigationScopeCTE() + `,
+visible_environments as (
+  select e.id as environment_id
+  from environments e
+  where e.is_deleted = false
+    and exists (
+      select 1 from user_navigation_scopes s
+      where s.scope_type = 'global'
+        and s.resource_type in ('env', 'folder', 'secret')
+    )
+  union
+  select e.id
+  from user_navigation_scopes s
+  join projects p on p.org_id = s.scope_id
+  join environments e on e.project_id = p.id
+  where s.scope_type = 'organization'
+    and s.resource_type in ('env', 'folder', 'secret')
+    and p.is_deleted = false
+    and e.is_deleted = false
+  union
+  select e.id
+  from user_navigation_scopes s
+  join environments e on e.project_id = s.scope_id
+  where s.scope_type = 'project'
+    and s.resource_type in ('env', 'folder', 'secret')
+    and e.is_deleted = false
+  union
+  select s.scope_id
+  from user_navigation_scopes s
+  where s.scope_type = 'environment'
+    and s.scope_id is not null
+    and s.resource_type in ('env', 'folder', 'secret')
+  union
+  select f.environment_id
+  from user_navigation_scopes s
+  join folders f on f.id = s.scope_id
+  where s.scope_type = 'folder'
+    and s.resource_type in ('folder', 'secret')
+    and f.is_deleted = false
+  union
+  select f.environment_id
+  from user_navigation_scopes s
+  join secrets sec on sec.id = s.scope_id
+  join folders f on f.id = sec.folder_id
+  where s.scope_type = 'secret'
+    and s.resource_type = 'secret'
+    and sec.is_deleted = false
+    and f.is_deleted = false
 ) `
 }
 

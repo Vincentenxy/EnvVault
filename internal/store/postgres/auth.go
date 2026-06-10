@@ -17,7 +17,7 @@ import (
 // AuthStore 持久化 v9 自注册 / 登录 / 强制登出 / 改密 相关数据。
 //
 // 边界:
-//   - 与 RBACStore 共享 users 表(都通过 external_user_id 关联),但 RBACStore
+//   - 与 RBACStore 共享 users 表(新授权路径都通过 users.id 关联),但 RBACStore
 //     不感知 password_hash / tokens_valid_after,AuthStore 也不感知 role binding
 //     的业务规则。
 //   - "首用户自动 platform_admin" 的 grant 走 user_role_bindings,这里复用
@@ -130,7 +130,7 @@ on conflict do nothing
 	if err != nil {
 		return domain.User{}, err
 	}
-	s.cacheUserLabel(user.ExternalUserId, user.Name)
+	s.cacheUserLabel(user.Id, user.Name)
 	return user, nil
 }
 
@@ -310,11 +310,11 @@ where ip = $1 and success = false and created_at > now() - $2::interval
 
 // ---- helpers ----
 
-func (s *AuthStore) cacheUserLabel(externalUserId, name string) {
+func (s *AuthStore) cacheUserLabel(userId, name string) {
 	if s == nil || s.userCache == nil {
 		return
 	}
-	s.userCache.CacheUserLabel(externalUserId, name)
+	s.userCache.CacheUserLabel(userId, name)
 }
 
 // GetUserById 通过内部 id (uuid) 反查 user。给 ChangePassword / Logout 入口用。
@@ -340,7 +340,7 @@ func (s *AuthStore) GetUserById(ctx context.Context, id string) (domain.User, er
 	return user, nil
 }
 
-// GetUserByExternalId 通过 external_user_id 查 user。给 ChangePassword / Logout 入口用。
+// GetUserByExternalId 通过 external_user_id 查 user。兼容保留,新授权路径不使用。
 func (s *AuthStore) GetUserByExternalId(ctx context.Context, externalUserId string) (domain.User, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.User{}, err

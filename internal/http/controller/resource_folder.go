@@ -292,6 +292,17 @@ func (ctrl *Controller) GetFolder(c *gin.Context) {
 	ctrl.write(c, item, nil)
 }
 
+// UpdateFolder 改 folder 的可读属性。
+//
+// 字段契约(2024-12 锁定):
+//   - 唯一可修改的字段:`name` 和 `comment`
+//   - 不可通过本端点修改:`id` / `code` / `environmentId` / `parentId` /
+//     `level` / `createdBy` / `createdAt` —— 这些列在 repo `updateEntity` 的
+//     SQL `SET` 列表外,即使请求里塞了也会被静默忽略
+//   - 请求里的 `parentId` 仅作为「按 (envId, code) 查 folder」的 lookup 字段,
+//     不是要写入 folder 行的字段
+//
+// 权限契约:仅校验 `folder:update` 在目标 folder 上。不再叠加其他权限。
 func (ctrl *Controller) UpdateFolder(c *gin.Context) {
 	var req updateByIdOrCodeRequest
 	if !ctrl.bind(c, &req) {

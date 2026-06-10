@@ -19,9 +19,9 @@ func (s fakePermissionStore) ResourceScopes(_ context.Context, resource Resource
 	return scopes, nil
 }
 
-func (s fakePermissionStore) UserPermissions(_ context.Context, externalUserId string, scopes []Scope) (map[string]struct{}, error) {
+func (s fakePermissionStore) UserPermissions(_ context.Context, userId string, scopes []Scope) (map[string]struct{}, error) {
 	values := make(map[string]struct{})
-	userScopes := s.permission[externalUserId]
+	userScopes := s.permission[userId]
 	for _, scope := range scopes {
 		for _, permission := range userScopes[scope.Type+":"+scope.Id] {
 			values[permission] = struct{}{}

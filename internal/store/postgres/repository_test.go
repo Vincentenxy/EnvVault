@@ -33,9 +33,24 @@ func TestParentColumnEnvironmentsPointsToProject(t *testing.T) {
 
 // TestEnvSpecStruct 验证 EnvSpec 类型在 CreateProject 入参中能被直接构造。
 func TestEnvSpecStruct(t *testing.T) {
-	spec := EnvSpec{Code: "dev", Name: "Development", Comment: "main dev env"}
-	if spec.Code != "dev" || spec.Name != "Development" || spec.Comment != "main dev env" {
+	spec := EnvSpec{Code: "dev", Name: "Development", Comment: "main dev env", SortOrder: 10}
+	if spec.Code != "dev" || spec.Name != "Development" || spec.Comment != "main dev env" || spec.SortOrder != 10 {
 		t.Fatalf("EnvSpec fields not preserved: %+v", spec)
+	}
+}
+
+func TestDefaultEnvironmentSortOrder(t *testing.T) {
+	cases := map[string]int{
+		"dev":    10,
+		"test":   20,
+		"sim":    30,
+		"prod":   40,
+		"custom": 100,
+	}
+	for code, want := range cases {
+		if got := defaultEnvironmentSortOrder(code); got != want {
+			t.Errorf("defaultEnvironmentSortOrder(%q) = %d, want %d", code, got, want)
+		}
 	}
 }
 
@@ -182,18 +197,23 @@ func TestEntityReadColumnsIncludesParentForChildren(t *testing.T) {
 		{"environment_templates", true},
 	}
 	for _, c := range cases {
-		cols, scan := entityReadColumns(parentColumn(c.table))
+		cols, scan := entityReadColumnsForTable(c.table)
 		if c.wantParent {
 			if !contains([]byte(cols), "t.org_id") &&
 				!contains([]byte(cols), "t.project_id") &&
 				!contains([]byte(cols), "t.environment_id") {
 				t.Errorf("table=%s cols=%q, want one of t.org_id/t.project_id/t.environment_id", c.table, cols)
 			}
-			// scan 函数应包含 9 个目标(id + parent + 其他 7 个)
+			// scan 函数应包含 9 个目标(id + parent + 其他 7 个);
+			// environments 额外包含 sortOrder,共 10 个。
 			dummy := Entity{}
 			targets := scan(&dummy)
-			if len(targets) != 9 {
-				t.Errorf("table=%s scan targets = %d, want 9", c.table, len(targets))
+			wantTargets := 9
+			if c.table == "environments" {
+				wantTargets = 10
+			}
+			if len(targets) != wantTargets {
+				t.Errorf("table=%s scan targets = %d, want %d", c.table, len(targets), wantTargets)
 			}
 			if &dummy.ParentId == nil {
 				t.Errorf("table=%s scan should write into &entity.ParentId", c.table)
@@ -214,8 +234,8 @@ func TestEntityReadColumnsIncludesParentForChildren(t *testing.T) {
 func TestEntityReturningMatchesReadColumns(t *testing.T) {
 	// RETURNING 子句不能带 t. 别名,列数必须与读路径一致。
 	for _, table := range []string{"organizations", "projects", "environments", "folders", "environment_templates"} {
-		readCols, _ := entityReadColumns(parentColumn(table))
-		ret, scan := entityReturning(parentColumn(table))
+		readCols, _ := entityReadColumnsForTable(table)
+		ret, scan := entityReturningForTable(table)
 		if contains([]byte(ret), "t.") {
 			t.Errorf("table=%s returning=%q should not contain 't.' prefix", table, ret)
 		}
@@ -266,6 +286,17 @@ func TestEntityJSONIncludesParentId(t *testing.T) {
 	}
 }
 
+func TestEntityJSONIncludesSortOrderWhenSet(t *testing.T) {
+	env := Entity{Id: "id1", ParentId: "project-uuid", Code: "dev", Name: "Development", SortOrder: 10}
+	payload, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !contains(payload, `"sortOrder":10`) {
+		t.Errorf("environment entity should include sortOrder: %s", string(payload))
+	}
+}
+
 // TestDefaultPermissionsIncludeOrgForceDelete 锁住级联删除 org 的权限码在系统表中。
 // 缺这个权限码的话 force=true 路径无角色可分配。
 func TestDefaultPermissionsIncludeOrgForceDelete(t *testing.T) {
@@ -307,5 +338,29 @@ func TestDefaultRolesPlatformAndOwnerGetForceDelete(t *testing.T) {
 	}
 	if has("org_admin") {
 		t.Errorf("org_admin should NOT have org:force_delete (would allow self-destruct)")
+	}
+}
+
+func TestDefaultRolesIncludeEnvironmentRoles(t *testing.T) {
+	roles := defaultRoles()
+	expected := map[string]string{
+		"environment_admin":     "environment",
+		"environment_developer": "environment",
+		"environment_viewer":    "environment",
+		"environment_auditor":   "environment",
+	}
+	for _, role := range roles {
+		if scope, ok := expected[role.Code]; ok {
+			if role.ScopeType != scope {
+				t.Errorf("%s scope = %q, want %q", role.Code, role.ScopeType, scope)
+			}
+			if len(role.Permissions) == 0 {
+				t.Errorf("%s should have permissions", role.Code)
+			}
+			delete(expected, role.Code)
+		}
+	}
+	for code := range expected {
+		t.Errorf("default role %s is missing", code)
 	}
 }

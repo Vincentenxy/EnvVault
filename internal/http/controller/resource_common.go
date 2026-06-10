@@ -26,9 +26,10 @@ type createEntityRequest struct {
 
 // EnvSpecRequest 在创建 project/env 时,描述一个 env 的最小信息。
 type EnvSpecRequest struct {
-	Code    string `json:"code"`
-	Name    string `json:"name"`
-	Comment string `json:"comment"`
+	Code      string `json:"code"`
+	Name      string `json:"name"`
+	Comment   string `json:"comment"`
+	SortOrder int    `json:"sortOrder,omitempty"`
 }
 
 type idOrCodeRequest struct {

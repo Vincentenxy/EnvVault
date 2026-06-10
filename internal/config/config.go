@@ -195,7 +195,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("http.request_id_header", "x-request-id")
 	v.SetDefault("auth.enabled", true)
 	v.SetDefault("auth.dev_token_enabled", false)
-	v.SetDefault("auth.dev_user_id", "dev-user")
+	v.SetDefault("auth.dev_user_id", "00000000-0000-4000-8000-000000000001")
 	v.SetDefault("auth.dev_user_name", "Dev User")
 	v.SetDefault("auth.register_enabled", true)
 	v.SetDefault("auth.password_min_length", 12)

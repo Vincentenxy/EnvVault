@@ -145,8 +145,8 @@ type ResourceRepository interface {
 	RecordAudit(ctx context.Context, actor, resourceType, resourceId, action string, encryptedValue []byte) error
 	ListAuditRecords(ctx context.Context, resourceType, resourceId string, pagination domain.Pagination) (domain.PaginatedResult[domain.AuditRecord], error)
 
-	// ---- User label cache (供 handler 预热) ----
-	CacheUserLabel(externalUserId, name string)
+	// ---- User label cache (供 handler 预热,以 users.id 为 key) ----
+	CacheUserLabel(userId, name string)
 }
 
 // RBACRepository 持久化 permissions / roles / users / user_role_bindings。
@@ -155,7 +155,7 @@ type RBACRepository interface {
 	auth.PermissionStore
 
 	EnsureSystemData(ctx context.Context) error
-	EnsureBootstrapAdmin(ctx context.Context, externalUserId, name string) error
+	EnsureBootstrapAdmin(ctx context.Context, userId, name string) error
 
 	// Permission catalog
 	ListPermissions(ctx context.Context) ([]domain.Permission, error)
@@ -169,14 +169,19 @@ type RBACRepository interface {
 
 	// User
 	ListUsers(ctx context.Context, scopeType, scopeId string, pagination domain.Pagination) (domain.PaginatedResult[domain.User], error)
-	SyncUser(ctx context.Context, externalUserId, name, email string) (domain.User, error)
+	SyncUser(ctx context.Context, userId, name, email string) (domain.User, error)
 
 	// Role binding
 	ListRoleBindings(ctx context.Context, scopeType, scopeId string, pagination domain.Pagination) (domain.PaginatedResult[domain.RoleBinding], error)
-	ListUserGrants(ctx context.Context, externalUserId string, pagination domain.Pagination) (domain.PaginatedResult[domain.RoleBinding], error)
-	GrantRole(ctx context.Context, externalUserId, name, email, roleCode, scopeType, scopeId string, expiresAt *time.Time, actor string) (domain.RoleBinding, error)
-	RevokeRole(ctx context.Context, externalUserId, roleCode, scopeType, scopeId, actor string) error
-	EffectivePermissions(ctx context.Context, externalUserId, scopeType, scopeId string) (domain.EffectivePermissions, error)
+	// ListRoleBindingsCascading 列 (scopeType, scopeId) 这一层以及所有下级
+	// scope(organization→project→env→folder→secret)上的 active binding。
+	// 入口已由 service 层校验 caller 在 (scopeType, scopeId) 或其父级持有
+	// rbac:binding:read,store 只负责级联拉取。
+	ListRoleBindingsCascading(ctx context.Context, scopeType, scopeId string, pagination domain.Pagination) (domain.PaginatedResult[domain.RoleBinding], error)
+	ListUserGrants(ctx context.Context, userId string, pagination domain.Pagination) (domain.PaginatedResult[domain.RoleBinding], error)
+	GrantRole(ctx context.Context, userId, name, email, roleCode, scopeType, scopeId string, expiresAt *time.Time, actor string) (domain.RoleBinding, error)
+	RevokeRole(ctx context.Context, userId, roleCode, scopeType, scopeId, actor string) error
+	EffectivePermissions(ctx context.Context, userId, scopeType, scopeId string) (domain.EffectivePermissions, error)
 }
 
 // SecretCache 是 secret 的 Redis 缓存层,加速 SearchSecrets 与 SecretWarmUp。
@@ -202,11 +207,12 @@ type BatchCreateSecretItem struct {
 // AuthRepository 持久化 v9 自注册 / 登录 / 强制登出 / 改密 相关数据。
 //
 // 与 RBACRepository 的边界:
-//   - RBACRepository 管「用户是谁、能干啥」 → external_user_id 体系 + role binding
+//   - RBACRepository 管「用户是谁、能干啥」 → users.id(UUID) + role binding
 //   - AuthRepository 管「用户怎么登录、何时失效」 → email + password_hash +
 //     tokens_valid_after + login_attempts
 //
-// 两边不重叠,但都通过 external_user_id 关联到同一张 users 行。
+// 两边不重叠,但都通过 users.id 关联到同一张 users 行。external_user_id
+// 暂时保留为兼容字段,不作为 RBAC 授权主身份。
 type AuthRepository interface {
 	// ---- User with credentials ----
 	// GetUserByEmail 拿 (id, external_user_id, name, password_hash, password_algo,
@@ -216,11 +222,11 @@ type AuthRepository interface {
 	GetUserByEmail(ctx context.Context, email string) (domain.User, error)
 	// GetUserById 按内部 id (uuid) 查 user。
 	GetUserById(ctx context.Context, id string) (domain.User, error)
-	// GetUserByExternalId 按 external_user_id 查 user(JWT subject 直接对应)。
+	// GetUserByExternalId 按 external_user_id 查 user。兼容保留,新授权路径不使用。
 	GetUserByExternalId(ctx context.Context, externalUserId string) (domain.User, error)
-	// BumpTokensValidAfterByExternalId 强制登出。返新时间戳。
+	// BumpTokensValidAfterByExternalId 兼容保留。新强制登出路径使用 BumpTokensValidAfter(userId)。
 	BumpTokensValidAfterByExternalId(ctx context.Context, externalUserId string) (time.Time, error)
-	// UpdatePasswordHashByExternalId 改密。原子 bump tokens_valid_after。
+	// UpdatePasswordHashByExternalId 兼容保留。新改密路径使用 UpdatePasswordHash(userId, ...)。
 	UpdatePasswordHashByExternalId(ctx context.Context, externalUserId, passwordHash, passwordAlgo string) (domain.User, error)
 	// CreatePasswordUser 在事务里 atomic 完成:
 	//   1) INSERT users (..., source='password', password_hash, password_algo)

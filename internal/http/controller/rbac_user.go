@@ -52,8 +52,8 @@ func (ctrl *Controller) ListUserGrants(c *gin.Context) {
 	}
 	user := auth.UserFromContext(c)
 	pagination := paginationFromRequest(req.PageRequest)
-	externalUserId := pickAlias(req.UserId, req.ExternalUserId)
-	result, err := ctrl.rbac.ListUserGrants(c.Request.Context(), user, externalUserId, pagination)
+	userId := pickAlias(req.UserId, req.ExternalUserId)
+	result, err := ctrl.rbac.ListUserGrants(c.Request.Context(), user, userId, pagination)
 	if err != nil {
 		ctrl.write(c, nil, err)
 		return
@@ -70,7 +70,7 @@ func (ctrl *Controller) GetUserEffectivePermissions(c *gin.Context) {
 		return
 	}
 	user := auth.UserFromContext(c)
-	externalUserId := pickAlias(req.UserId, req.ExternalUserId)
-	item, err := ctrl.rbac.EffectivePermissions(c.Request.Context(), user, externalUserId, req.ScopeType, req.ScopeId)
+	userId := pickAlias(req.UserId, req.ExternalUserId)
+	item, err := ctrl.rbac.EffectivePermissions(c.Request.Context(), user, userId, req.ScopeType, req.ScopeId)
 	ctrl.write(c, item, err)
 }

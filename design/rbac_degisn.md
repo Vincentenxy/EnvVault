@@ -178,6 +178,15 @@ user-1 -> org_viewer -> organization:O2
 | `project_viewer` | `project` | 项目只读成员，可查看项目下资源元数据和 Secret key |
 | `project_auditor` | `project` | 项目审计员，可查看项目内审计记录 |
 
+### 环境角色
+
+| 角色 code | 作用域 | 说明 |
+| --- | --- | --- |
+| `environment_admin` | `environment` | 环境管理员，可管理该环境下 Folder、Secret 和环境成员 |
+| `environment_developer` | `environment` | 环境开发者，可查看明文并创建、更新该环境下 Secret |
+| `environment_viewer` | `environment` | 环境只读成员，可查看该环境下资源元数据和 Secret key |
+| `environment_auditor` | `environment` | 环境审计员，可查看该环境内审计记录和资源元数据 |
+
 ### Folder 角色
 
 | 角色 code | 作用域 | 说明 |
@@ -250,13 +259,19 @@ user-1 -> org_viewer -> organization:O2
 | `project_developer` | 项目内 `secret:list`、`secret:search`、`secret:read`、`secret:reveal`、`secret:create`、`secret:update` |
 | `project_viewer` | 项目内资源只读、Secret 元数据只读 |
 | `project_auditor` | 项目内资源只读、`audit:read` |
+| `environment_admin` | 环境内 Folder、Secret 管理，环境内成员绑定管理 |
+| `environment_developer` | 环境内 `secret:list`、`secret:search`、`secret:read`、`secret:reveal`、`secret:create`、`secret:update` |
+| `environment_viewer` | 环境内资源只读、Secret 元数据只读 |
+| `environment_auditor` | 环境内资源只读、`audit:read` |
 | `folder_admin` | Folder 内 Secret 全部管理 |
 | `folder_editor` | Folder 内 Secret 查看、创建、更新 |
 | `folder_viewer` | Folder 内 Secret 元数据只读 |
 
 > **设计要点**：`org:force_delete` **只授予** `platform_admin` / `org_owner`，**不给** `org_admin`。原因：org 管理员自删所在 org 是高破坏性操作，应该由全局/所有权级角色兜底。
 
-第一阶段建议 `secret:reveal` 只分配给 `org_owner`、`org_admin`、`project_admin`、`project_developer`、`folder_admin`、`folder_editor`。审计员和 viewer 不允许查看明文。
+第一阶段建议 `secret:reveal` 只分配给 `org_owner`、`org_admin`、`project_admin`、`project_developer`、`environment_admin`、`environment_developer`、`folder_admin`、`folder_editor`。审计员和 viewer 不允许查看明文。
+
+角色绑定应和角色作用域一致：`project_*` 角色只绑定到 `project`，`environment_*` 角色只绑定到 `environment`，`folder_*` 角色只绑定到 `folder`。上级角色对下级资源生效通过继承链计算完成，而不是把上级角色直接绑定到下级作用域。用户可以在下级作用域额外绑定更高权限角色，最终权限按 allow 叠加。
 
 ## 授权判断流程
 

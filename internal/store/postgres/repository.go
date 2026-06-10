@@ -832,6 +832,7 @@ func (r *Repository) ListFolders(ctx context.Context, callerUserId, envId, paren
 	// folder 表不持 project_id / org_id,需要 join env + project 暴露层级。
 	narrow := scopeNarrowingWhere([]narrowingEntry{
 		{scopeType: "folder", column: "t.id"},
+		{scopeType: "folder", column: "t.parent_id"},
 		{scopeType: "environment", column: "t.environment_id"},
 		{scopeType: "project", column: "e.project_id"},
 		{scopeType: "organization", column: "p.org_id"},
@@ -952,6 +953,7 @@ func (r *Repository) ListFolderChildren(ctx context.Context, callerUserId string
 	cols, scanInto := entityReadColumns("parent_id")
 	narrow := scopeNarrowingWhere([]narrowingEntry{
 		{scopeType: "folder", column: "t.id"},
+		{scopeType: "folder", column: "t.parent_id"},
 		{scopeType: "environment", column: "t.environment_id"},
 		{scopeType: "project", column: "p.id"},
 		{scopeType: "organization", column: "p.org_id"},
@@ -1370,6 +1372,7 @@ func (r *Repository) ListSecrets(ctx context.Context, callerUserId, action strin
 	narrow := scopeNarrowingWhere([]narrowingEntry{
 		{scopeType: "secret", column: "s.id"},
 		{scopeType: "folder", column: "s.folder_id"},
+		{scopeType: "folder", column: "f.parent_id"},
 		{scopeType: "environment", column: "e.id"},
 		{scopeType: "project", column: "p.id"},
 		{scopeType: "organization", column: "o.id"},
@@ -1459,6 +1462,7 @@ func (r *Repository) ListSecretsWithCiphertext(
 	narrow := scopeNarrowingWhere([]narrowingEntry{
 		{scopeType: "secret", column: "s.id"},
 		{scopeType: "folder", column: "s.folder_id"},
+		{scopeType: "folder", column: "f.parent_id"},
 		{scopeType: "environment", column: "e.id"},
 		{scopeType: "project", column: "p.id"},
 		{scopeType: "organization", column: "o.id"},
@@ -1544,6 +1548,7 @@ func (r *Repository) BatchRevealSecretsByPath(
 	narrow := scopeNarrowingWhere([]narrowingEntry{
 		{scopeType: "secret", column: "s.id"},
 		{scopeType: "folder", column: "s.folder_id"},
+		{scopeType: "folder", column: "f.parent_id"},
 		{scopeType: "environment", column: "e.id"},
 		{scopeType: "project", column: "p.id"},
 		{scopeType: "organization", column: "o.id"},
@@ -1557,25 +1562,189 @@ select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.ke
 from secrets s
 join folders f
   on f.id = s.folder_id
- and f.code = $5
+ and f.code = $6
  and f.is_deleted = false
 join environments e
   on e.id = f.environment_id
- and e.code = $4
+ and e.code = $5
  and e.is_deleted = false
 join projects p
   on p.id = e.project_id
- and p.code = $3
+ and p.code = $4
  and p.is_deleted = false
 join organizations o
   on o.id = p.org_id
- and o.code = $2
+ and o.code = $3
  and o.is_deleted = false
 where s.is_deleted = false
-  and (cardinality($6::text[]) = 0 or s.key = any($6::text[]))%s
+  and (cardinality($7::text[]) = 0 or s.key = any($7::text[]))%s
 order by s.key asc
 `, narrow)
 	rows, err := r.db.QueryContext(ctx, query, callerUserId, action, orgCode, projectCode, envCode, folderCode, keys)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var (
+		items      []Secret
+		ciphertext [][]byte
+	)
+	for rows.Next() {
+		var (
+			secret  Secret
+			payload []byte
+		)
+		if err := rows.Scan(
+			&secret.Id, &secret.OrgId, &secret.OrgCode, &secret.ProjectId, &secret.ProjectCode, &secret.EnvironmentId, &secret.EnvironmentCode, &secret.FolderId, &secret.FolderCode, &secret.Key, &payload, &secret.Comment, &secret.Version,
+			&secret.CreatedBy, &secret.UpdatedBy,
+			&secret.CreatedAt, &secret.UpdatedAt,
+		); err != nil {
+			return nil, nil, err
+		}
+		r.fillSecretLabels(&secret)
+		secret.Path = buildSecretPath(secret)
+		items = append(items, secret)
+		ciphertext = append(ciphertext, payload)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return items, ciphertext, nil
+}
+
+// ListSecretsByProjectFolderKey 按 (project, folderCode, key) 维度 + env 过滤列表
+// 拉取 secret metadata + ciphertext,跨 env 一次性 reveal 用。
+//
+// 与 BatchRevealSecretsByPath 的差异:
+//   - 入参是 (projectId, folderCode, key) 维度,不依赖 4 级 code 全路径;
+//   - 跨 env 拉取(envCodes 控制白名单,空数组走"项目下所有 env"兜底);
+//   - 排序按 e.code ASC,方便 service 端按 envCode 索引。
+//
+// 复用 v7 的 userReadScopeCTE + narrowingPredicate + scopeNarrowingWhere 做 secret:reveal 权限的
+// cascade narrowing。envCodes 空时 cardinality($6::text[]) = 0 为真,SQL 走「不限 env」分支;
+// 本接口 service 层已保证 cleaned 非空,但 SQL 仍写兜底以防直调 repo 的场景。
+func (r *Repository) ListSecretsByProjectFolderKey(
+	ctx context.Context,
+	callerUserId, action, projectId, folderCode, key string,
+	envCodes []string,
+) ([]Secret, [][]byte, error) {
+	cte := userReadScopeCTE()
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "secret", column: "s.id"},
+		{scopeType: "folder", column: "s.folder_id"},
+		{scopeType: "folder", column: "f.parent_id"},
+		{scopeType: "environment", column: "e.id"},
+		{scopeType: "project", column: "p.id"},
+		{scopeType: "organization", column: "o.id"},
+	})
+	query := cte + fmt.Sprintf(`
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.value_ciphertext, s.comment, s.version,
+       s.created_by, s.updated_by,
+       s.created_at, s.updated_at
+from secrets s
+join folders f
+  on f.id = s.folder_id
+ and f.code = $4
+ and f.is_deleted = false
+join environments e
+  on e.id = f.environment_id
+ and e.is_deleted = false
+ and (cardinality($6::text[]) = 0 or e.code = any($6::text[]))
+join projects p
+  on p.id = e.project_id
+ and p.id = $3::uuid
+ and p.is_deleted = false
+join organizations o
+  on o.id = p.org_id
+ and o.is_deleted = false
+where s.is_deleted = false
+  and s.key = $5%s
+order by e.code asc
+`, narrow)
+	rows, err := r.db.QueryContext(ctx, query, callerUserId, action, projectId, folderCode, key, envCodes)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var (
+		items      []Secret
+		ciphertext [][]byte
+	)
+	for rows.Next() {
+		var (
+			secret  Secret
+			payload []byte
+		)
+		if err := rows.Scan(
+			&secret.Id, &secret.OrgId, &secret.OrgCode, &secret.ProjectId, &secret.ProjectCode, &secret.EnvironmentId, &secret.EnvironmentCode, &secret.FolderId, &secret.FolderCode, &secret.Key, &payload, &secret.Comment, &secret.Version,
+			&secret.CreatedBy, &secret.UpdatedBy,
+			&secret.CreatedAt, &secret.UpdatedAt,
+		); err != nil {
+			return nil, nil, err
+		}
+		r.fillSecretLabels(&secret)
+		secret.Path = buildSecretPath(secret)
+		items = append(items, secret)
+		ciphertext = append(ciphertext, payload)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return items, ciphertext, nil
+}
+
+// ListSecretsInProjectByEnvs 按 project + (可选 folderCode) + env 列表拉取 secret
+// 的 metadata + ciphertext,用于 ListAcrossEnvs 的"key 为空"分支。
+//
+// 与 ListSecretsByProjectFolderKey 的差异:
+//   - 不带 key 过滤,直接返回 (env × folder × secret) 序列;
+//   - folderCode 为空时走"项目下所有 folder"兜底,非空时 SQL 限定到该 folder;
+//   - service 层按 (folderCode, key) 滚动聚合为多个 SecretAcrossEnvs;
+//   - 排序按 (e.code ASC, f.code ASC, s.key ASC) 保证 service 端分组时输入稳定。
+//
+// 复用 v7 的 userReadScopeCTE + narrowingPredicate + scopeNarrowingWhere 做 secret:reveal
+// 权限的 cascade narrowing。envCodes 空时走 cardinality($4::text[]) = 0 兜底;
+// folderCode 空时走 $5::text = ” 兜底。
+func (r *Repository) ListSecretsInProjectByEnvs(
+	ctx context.Context,
+	callerUserId, action, projectId, folderCode string,
+	envCodes []string,
+) ([]Secret, [][]byte, error) {
+	cte := userReadScopeCTE()
+	narrow := scopeNarrowingWhere([]narrowingEntry{
+		{scopeType: "secret", column: "s.id"},
+		{scopeType: "folder", column: "s.folder_id"},
+		{scopeType: "folder", column: "f.parent_id"},
+		{scopeType: "environment", column: "e.id"},
+		{scopeType: "project", column: "p.id"},
+		{scopeType: "organization", column: "o.id"},
+	})
+	query := cte + fmt.Sprintf(`
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.value_ciphertext, s.comment, s.version,
+       s.created_by, s.updated_by,
+       s.created_at, s.updated_at
+from secrets s
+join folders f
+  on f.id = s.folder_id
+ and f.is_deleted = false
+ and ($5::text = '' or f.code = $5)
+join environments e
+  on e.id = f.environment_id
+ and e.is_deleted = false
+ and (cardinality($4::text[]) = 0 or e.code = any($4::text[]))
+join projects p
+  on p.id = e.project_id
+ and p.id = $3::uuid
+ and p.is_deleted = false
+join organizations o
+  on o.id = p.org_id
+ and o.is_deleted = false
+where s.is_deleted = false%s
+order by e.code asc, f.code asc, s.key asc
+`, narrow)
+	rows, err := r.db.QueryContext(ctx, query, callerUserId, action, projectId, envCodes, folderCode)
 	if err != nil {
 		return nil, nil, err
 	}

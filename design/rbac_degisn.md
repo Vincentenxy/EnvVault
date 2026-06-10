@@ -105,7 +105,8 @@ secret:<secret_id>
 
 - 用户在 `organization:A` 上拥有 `org_admin`，则可以管理组织 A 下的项目、环境、Folder 和 Secret。
 - 用户在 `project:B` 上拥有 `project_developer`，则只能操作项目 B 下的环境、Folder 和 Secret。
-- 用户在 `folder:C` 上拥有 `folder_viewer`，则只能查看 Folder C 下的 Secret 列表和详情。
+- 用户在一级 `folder:C` 上拥有 Folder 角色时，该角色覆盖 C、C 的二级子 Folder
+  以及其中的 Secret；绑定在二级 Folder 上时，不反向覆盖一级 Folder 或同级 Folder。
 
 ## 权限叠加与有效权限
 

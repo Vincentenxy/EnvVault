@@ -46,6 +46,12 @@ type SecretService interface {
 	// 不分页,整批 1 条 audit(action=reveal_batch, resource_type=folder)。
 	BatchRevealByPath(ctx context.Context, user auth.UserInfo, path string, keys []string, actor string) ([]domain.Secret, []string, error)
 
+	// 批量 code 维度 reveal:接收 4 级 code 字段,reveal folder 下所有 secret 明文。
+	// 与 BatchRevealByPath 行为等价,仅入参形式不同(结构化 code vs 字符串 path)。
+	// 整批 1 条 audit(action=reveal_batch, resource_type=folder),无命中时不写 audit。
+	// 返回 (secrets, err):无 notFound 字段(无 keys 对照)。
+	BatchRevealByCode(ctx context.Context, user auth.UserInfo, orgCode, projectCode, envCode, folderCode, actor string) ([]domain.Secret, error)
+
 	// 批量创建:接收 secretList,每条 item 含 (key, comment?, dev/test/sim/prod 字段),
 	// 每个 env 字段显式指定目标 folderId + value。服务端展开为 (item, env) 二元组
 	// 序列,逐条做 secret:create 权限 check + 加密,单事务 N 条 INSERT + 1 条
@@ -68,6 +74,19 @@ type SecretService interface {
 	// 用 PaginatedResult[any] 承载两种不同 item 形态,handler 端用 type assertion 区分;
 	// JSON 序列化由每种类型各自的 MarshalJSON/Marshal 决定,handler 不需要关心。
 	Search(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[any], error)
+
+	// ListAcrossEnvs 按 (projectId, [folderCode], [key]) 跨 envList 一次性 reveal。
+	//   - envList 必填(必传,1..32 项,trim+去重+空过滤后)
+	//   - key 非空:精确查 (folderCode, key) 跨 envList,folderCode 必传
+	//   - key 为空:列出项目下所有 (folderCode, key) 跨 envList,folderCode 被忽略
+	// 权限:v12 起 SQL 收窄用 secret:read(原 secret:reveal)。持有 read 即看到
+	// 明文;无 read 的 secret 在 SQL 层就被收窄掉,不出现在 result 里。批量浏览
+	// 场景用 read 即可,单点 /secret/reveal 仍要求 reveal 保持细粒度控制。
+	// 整批 1 条 audit(action=reveal_batch, resource_type=project, resource_id=projectId);
+	// 无命中(空 records)时不写 audit,与 BatchRevealByPath 一致。
+	// 全空场景 service 返 HTTP 200,data 是空数组(全 key 都查不到)或元素 env 全 null。
+	// 响应是 *[]*SecretAcrossEnvs,handler 直接序列化为数组;key 有值时 1 元素、key 为空时 N 元素。
+	ListAcrossEnvs(ctx context.Context, user auth.UserInfo, projectId, folderCode, key string, envList []string, actor string) ([]*domain.SecretAcrossEnvs, error)
 }
 
 // BatchCreateRequest 是 SecretService.BatchCreate 的入参。
@@ -342,6 +361,267 @@ func (s *secretService) BatchRevealByPath(ctx context.Context, user auth.UserInf
 	return results, notFound, nil
 }
 
+// BatchRevealByCode 编排流程(与 BatchRevealByPath 等价):
+//  1. 空 user.UserId → auth.ErrPermissionDenied
+//  2. 4 个 code 任一为空 → 客户端应在 controller 层挡掉,service 层仍做 trim 防御
+//  3. 走 v7 cascade narrowing(secret:reveal):repo SQL 一次性按 (secret, folder, env, project, org) 链收窄
+//  4. 解密后填 Secret.Value
+//  5. 整批 1 条 audit(action=reveal_batch);无命中时不写
+//
+// 与 BatchRevealByPath 的唯一区别:keys=nil 永远传 nil(无 keys 过滤),不计算 notFound。
+func (s *secretService) BatchRevealByCode(ctx context.Context, user auth.UserInfo, orgCode, projectCode, envCode, folderCode, actor string) ([]domain.Secret, error) {
+	if strings.TrimSpace(user.UserId) == "" {
+		return nil, auth.ErrPermissionDenied
+	}
+	if strings.TrimSpace(orgCode) == "" || strings.TrimSpace(projectCode) == "" ||
+		strings.TrimSpace(envCode) == "" || strings.TrimSpace(folderCode) == "" {
+		return nil, fmt.Errorf("orgCode, projectCode, environmentCode, folderCode are all required")
+	}
+	// 复用 BatchRevealSecretsByPath,keys=nil → 走「不限」分支,返回 folder 下所有 secret
+	secrets, ciphertexts, err := s.repo.BatchRevealSecretsByPath(ctx, user.UserId, "secret:reveal", orgCode, projectCode, envCode, folderCode, nil)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]domain.Secret, 0, len(secrets))
+	for i, secret := range secrets {
+		var ciphertext domain.SecretCiphertext
+		if err := json.Unmarshal(ciphertexts[i], &ciphertext); err != nil {
+			return nil, fmt.Errorf("decode secret ciphertext: %w", err)
+		}
+		plaintext, err := s.decrypt(ctx, ciphertext)
+		if err != nil {
+			return nil, err
+		}
+		secret.Value = plaintext
+		results = append(results, secret)
+	}
+	if len(results) > 0 {
+		keys := make([]string, 0, len(results))
+		for _, sec := range results {
+			keys = append(keys, sec.Key)
+		}
+		payload, err := json.Marshal(keys)
+		if err != nil {
+			return nil, fmt.Errorf("marshal audit keys: %w", err)
+		}
+		if err := s.repo.RecordAudit(ctx, actor, "folder", results[0].FolderId, "reveal_batch", payload); err != nil {
+			return nil, fmt.Errorf("record reveal_batch audit: %w", err)
+		}
+	}
+	return results, nil
+}
+
+// ListAcrossEnvs 编排流程:
+//  1. 空 user.UserId → auth.ErrPermissionDenied(同 BatchRevealByPath)
+//  2. 入参防御性二次校验:
+//     - projectId 必填;
+//     - key 非空时 folderCode 必填,且 key 需匹配 secretServiceKeyPattern;
+//     - envList trim+去重+空过滤,长度 1..32
+//  3. 走 v7 cascade narrowing(action=secret:read,v12 起):repo SQL 一次性按
+//     (secret, folder, env, project, org) 链收窄;持有 read 即可看到明文
+//     (无 read 在 SQL 层被收窄掉,不进 result)
+//     - key 非空:走 ListSecretsByProjectFolderKey(精确 (folderCode, key))
+//     - key 为空:走 ListSecretsInProjectByEnvs(项目下全量,service 端按 (folderCode, key) 聚合)
+//  4. 解密后按 envCode 索引填到每组 SecretAcrossEnvs.Envs;未命中的 env 填 nil
+//     (自定义 MarshalJSON 序列化为 null),保证响应里上送 envList 的所有 code 都有字段位
+//  5. 整批 1 条 audit(action=reveal_batch, resource_type=project, resource_id=projectId);
+//     无命中(空 records)时不写 audit,与 BatchRevealByPath 一致
+//  6. 顶层 comment 取自该 (folder, key) 组第一个命中 env 的 comment(无命中时为空)
+func (s *secretService) ListAcrossEnvs(
+	ctx context.Context, user auth.UserInfo, projectId, folderCode, key string, envList []string, actor string,
+) ([]*domain.SecretAcrossEnvs, error) {
+	if strings.TrimSpace(user.UserId) == "" {
+		return nil, auth.ErrPermissionDenied
+	}
+	projectId = strings.TrimSpace(projectId)
+	folderCode = strings.TrimSpace(folderCode)
+	key = strings.TrimSpace(key)
+	if projectId == "" {
+		return nil, errors.New("projectId is required")
+	}
+	// key 非空 → 校验格式 + folderCode 必填(单点查询需要唯一标识)
+	if key != "" {
+		if !secretServiceKeyPattern.MatchString(key) {
+			return nil, fmt.Errorf("key must match ^[A-Z][A-Z0-9_]*$")
+		}
+		if folderCode == "" {
+			return nil, errors.New("folderCode is required when key is provided")
+		}
+	}
+	// envList 防御性 trim + 去重 + 过滤空串
+	seen := make(map[string]struct{}, len(envList))
+	cleaned := make([]string, 0, len(envList))
+	for _, e := range envList {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if _, ok := seen[e]; ok {
+			continue
+		}
+		seen[e] = struct{}{}
+		cleaned = append(cleaned, e)
+	}
+	if len(cleaned) == 0 {
+		return nil, errors.New("envList must contain at least one non-empty env code")
+	}
+	if len(cleaned) > 32 {
+		return nil, errors.New("envList exceeds max length 32")
+	}
+
+	// 拉取 secret rows;key 为空走「全量」分支,key 非空走「精确」分支。
+	// folderCode 是独立的过滤维度:空时不限 folder,非空时 SQL 限定到该 folder。
+	//
+	// 权限:v12 起 action 改为 secret:read(原 secret:reveal)。
+	// 语义:有 read 权限即有资格看到 secret 的明文;无 read 权限的 secret 在
+	// SQL 层就被收窄掉(不出现在 result 里),service 不需要再单独 check reveal。
+	// 这把"是否能看到明文"从细粒度的 reveal 降级为粗粒度的 read——前端
+	// /secrets/list 是浏览场景,持有 read 即可直接看到 plaintext,不需要先
+	// grant 一次 reveal;单点 /secret/reveal 接口仍走 reveal 权限,保持细粒度
+	// 控制。
+	var (
+		secrets     []domain.Secret
+		ciphertexts [][]byte
+		err         error
+	)
+	if key == "" {
+		secrets, ciphertexts, err = s.repo.ListSecretsInProjectByEnvs(
+			ctx, user.UserId, "secret:read", projectId, folderCode, cleaned,
+		)
+	} else {
+		secrets, ciphertexts, err = s.repo.ListSecretsByProjectFolderKey(
+			ctx, user.UserId, "secret:read", projectId, folderCode, key, cleaned,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// 按 (folderCode, key) 聚合为多组 SecretAcrossEnvs。
+	// 每组内部按 envCode 索引填 Value;envelope 用上送 cleaned 初始化所有 env code,
+	// 缺失为 nil → JSON null,前端可按固定下标访问。
+	type groupKey struct {
+		folderCode string
+		key        string
+	}
+	type groupState struct {
+		projectCode string
+		comment     string
+		envs        map[string]*domain.EnvSecretValue
+		hasHit      bool
+	}
+	groups := make(map[groupKey]*groupState)
+	order := make([]groupKey, 0)
+	projectCode := ""
+	for i, secret := range secrets {
+		if projectCode == "" {
+			projectCode = secret.ProjectCode
+		}
+		gk := groupKey{folderCode: secret.FolderCode, key: secret.Key}
+		g, ok := groups[gk]
+		if !ok {
+			g = &groupState{
+				projectCode: secret.ProjectCode,
+				envs:        make(map[string]*domain.EnvSecretValue, len(cleaned)),
+				hasHit:      false,
+			}
+			// 预填上送 envList 的所有 code → nil(未命中位置)
+			for _, code := range cleaned {
+				g.envs[code] = nil
+			}
+			groups[gk] = g
+			order = append(order, gk)
+		}
+		if !g.hasHit {
+			g.comment = secret.Comment
+			g.hasHit = true
+		}
+		var ct domain.SecretCiphertext
+		if err := json.Unmarshal(ciphertexts[i], &ct); err != nil {
+			return nil, fmt.Errorf("decode secret ciphertext: %w", err)
+		}
+		plaintext, err := s.decrypt(ctx, ct)
+		if err != nil {
+			return nil, err
+		}
+		g.envs[secret.EnvironmentCode] = &domain.EnvSecretValue{
+			FolderId:  secret.FolderId,
+			Value:     plaintext,
+			Version:   secret.Version,
+			Comment:   secret.Comment,
+			UpdatedAt: secret.UpdatedAt,
+		}
+	}
+
+	// 整批 1 条 audit;无命中(空 groups)时不写。
+	if len(order) > 0 {
+		// totalHits 统计所有 (folder, key) 组里的 env 命中数之和(用于反查这次 reveal 的「实际值数」)
+		totalHits := 0
+		for _, gk := range order {
+			for _, v := range groups[gk].envs {
+				if v != nil {
+					totalHits++
+				}
+			}
+		}
+		var payload map[string]any
+		if key == "" {
+			// key 为空:列出命中的 (folderCode, key) 列表,便于审计反查
+			items := make([]map[string]any, 0, len(order))
+			for _, gk := range order {
+				items = append(items, map[string]any{
+					"folderCode": gk.folderCode,
+					"key":        gk.key,
+				})
+			}
+			payload = map[string]any{
+				"key":       "",
+				"envList":   cleaned,
+				"keyCount":  len(order),
+				"totalHits": totalHits,
+				"items":     items,
+			}
+		} else {
+			payload = map[string]any{
+				"folderCode": folderCode,
+				"key":        key,
+				"envList":    cleaned,
+				"hits":       totalHits,
+			}
+		}
+		raw, _ := json.Marshal(payload)
+		if err := s.repo.RecordAudit(ctx, actor, "project", projectId, "reveal_batch", raw); err != nil {
+			return nil, fmt.Errorf("record reveal_batch audit: %w", err)
+		}
+	}
+
+	// 序列化结果
+	out := make([]*domain.SecretAcrossEnvs, 0, len(order))
+	for _, gk := range order {
+		g := groups[gk]
+		out = append(out, &domain.SecretAcrossEnvs{
+			ProjectCode: g.projectCode,
+			Key:         gk.key,
+			Comment:     g.comment,
+			Envs:        g.envs,
+		})
+	}
+	// key 非空但无命中时,也要返 1 元素(顶层 key/comment/全部 env=null),便于前端占位
+	if len(out) == 0 && key != "" {
+		envs := make(map[string]*domain.EnvSecretValue, len(cleaned))
+		for _, code := range cleaned {
+			envs[code] = nil
+		}
+		out = append(out, &domain.SecretAcrossEnvs{
+			ProjectCode: projectCode,
+			Key:         key,
+			Comment:     "",
+			Envs:        envs,
+		})
+	}
+	return out, nil
+}
+
 // BatchCreate 编排流程:
 //
 //  1. 空 user.UserId → auth.ErrPermissionDenied(controller 翻译为权限不足)
@@ -473,7 +753,7 @@ func (s *secretService) List(ctx context.Context, user auth.UserInfo, filter dom
 // 同样不走 cache(cache 不感知 user);keyword 模糊搜索本就走 DB 索引,影响可控。
 //
 // 优先级收敛(folder > env > project):caller 一次性传多个 scope id 时,只取最细
-// 的一个,其他忽略。空 keyword 表示"该 scope 内全量"——repo 的 `($5 = '' or ...)`
+// 的一个,其他忽略。空 keyword 表示"该 scope 内全量"——repo 的 `($5 = ” or ...)`
 // 已经天然支持,这里不用特判。
 //
 // v12:scope=project 时,响应按 (folderCode, key) 聚合为 *domain.SecretGroup(顶层

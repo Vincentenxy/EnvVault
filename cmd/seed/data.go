@@ -64,7 +64,7 @@ var projectSpecs = []projectSpec{
 	{"proj-10", "LiveStreaming", "live streaming"},
 }
 
-// envSpec 描述 4 个标准环境。code 硬编码与 secretBatchEnvValue 字段名(dev/test/sim/prod)一致。
+// envSpec 描述 4 个标准环境。code 与 /secrets/batchCreate 的 envList entry.envCode 字段对齐。
 var envSpecs = []struct {
 	Code    string
 	Name    string

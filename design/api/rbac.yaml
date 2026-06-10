@@ -9,6 +9,177 @@ info:
 
     ---
 
+    ## 0. RBAC 模块定位与统一接入规范
+
+    ### 0.1 当前是否为独立模块
+
+    是。当前权限判定核心已经抽象为独立的 `auth.Authorizer`：
+
+    ```go
+    type Authorizer interface {
+        Allow(
+            ctx context.Context,
+            user UserInfo,
+            action string,
+            resource Resource,
+        ) error
+    }
+    ```
+
+    默认实现为 `auth.RBACAuthorizer`，应用启动时由
+    `auth.NewRBACAuthorizer(rbacStore)` 创建，再注入需要鉴权的 service
+    或 controller。业务代码不应直接查询 `roles`、`role_permissions`、
+    `user_role_bindings` 表来判断单个操作是否有权限。
+
+    `Allow` 的返回值就是权限判定结果：
+
+    - 返回 `nil`：有权限，可以继续执行业务。
+    - 返回 `auth.ErrPermissionDenied`：没有权限，HTTP 边界转换成
+      `403 / code=1403`。
+    - 返回 `domain.ErrNotFound`：目标资源不存在，HTTP 边界转换成
+      `404 / code=1404`。
+    - 返回其他 error：数据库、上下文取消等系统错误，不应伪装成无权限。
+
+    当前接口使用 `error` 而不是单纯 `bool`，是为了区分“无权限”、
+    “资源不存在”和“权限存储异常”。如果调用方只关心允许/拒绝，可以使用
+    `err == nil`；禁止吞掉其他系统错误后统一返回 `false`。
+
+    ### 0.2 模块职责划分
+
+    | 模块 | 代码位置 | 职责 |
+    | --- | --- | --- |
+    | JWT 认证 | `internal/auth`、HTTP middleware | 校验 JWT，构造 `auth.UserInfo`，只回答“用户是谁” |
+    | 权限模块接口 | `internal/auth/rbac.go` | 暴露 `Authorizer.Allow`，定义 `UserInfo`、`Resource`、`Scope` |
+    | RBAC 数据实现 | `internal/store/postgres/rbac.go` | 解析资源父级链，查询用户在各 scope 上的生效权限 |
+    | RBAC 管理业务 | `internal/service/rbac_service.go` | 角色、授权、撤权及授权覆盖规则，不承载普通资源业务 |
+    | HTTP 错误转换 | controller / response | 把权限模块 error 转换为统一 HTTP 和业务错误码 |
+
+    认证与授权必须分开：JWT 校验通过只代表用户身份可信，不代表用户拥有任何
+    organization、project、environment、folder 或 secret 权限。
+
+    ### 0.3 单个资源的标准调用方式
+
+    所有创建、详情、修改、删除、reveal 等可定位到明确目标 scope 的操作，
+    必须调用 `Authorizer.Allow`。推荐在 service 业务入口调用，使权限检查贴近
+    真实操作，避免绕过 HTTP controller 后直接调用 service 时失去保护。
+
+    ```go
+    func (s *SecretService) Reveal(
+        ctx context.Context,
+        user auth.UserInfo,
+        secretId string,
+    ) (domain.Secret, error) {
+        err := s.authorizer.Allow(
+            ctx,
+            user,
+            "secret:reveal",
+            auth.Resource{Type: "secret", Id: secretId},
+        )
+        if err != nil {
+            return domain.Secret{}, err
+        }
+
+        return s.revealSecret(ctx, secretId)
+    }
+    ```
+
+    参数含义：
+
+    | 参数 | 含义 | 示例 |
+    | --- | --- | --- |
+    | `user` | JWT 中解析出的当前用户，授权身份使用内部 UUID `user.UserId` | `60496c09-...` |
+    | `action` | 完整权限码或简写 action | `secret:reveal` 或 `reveal` |
+    | `resource.Type` | 实际被操作资源类型，而不是角色类型 | `secret` |
+    | `resource.Id` | 实际资源 UUID；global scope 为空字符串 | Secret UUID |
+
+    创建下级资源时，应校验其父 scope。例如：
+
+    | 业务操作 | 权限码 | 校验资源 |
+    | --- | --- | --- |
+    | 创建 Organization | `org:create` | `global` |
+    | 创建 Project | `project:create` | 父 Organization |
+    | 创建 Environment | `env:create` | 父 Project |
+    | 创建 Folder | `folder:create` | 父 Environment 或父 Folder |
+    | 创建 Secret | `secret:create` | 父 Folder |
+    | 查看 Secret 明文 | `secret:reveal` | Secret |
+
+    更新、删除、详情等操作应校验资源自身。不要仅因为请求里携带了某个
+    `projectId`，就用 Project scope 代替真实 Secret 或 Folder scope。
+
+    ### 0.4 controller helper 的现状
+
+    当前部分透传型 CRUD controller 仍通过
+    `Controller.allowScope(...) bool` 调用同一个 `auth.Authorizer`。
+    这个 helper 会立即写入 HTTP 403/404 响应，适合现有 controller，
+    但它属于 HTTP 适配层，不是新的权限实现。
+
+    新业务优先在 service 中直接依赖 `auth.Authorizer`，controller 只负责：
+
+    1. 从 Gin context 取得 `auth.UserInfo`。
+    2. 调用 service。
+    3. 把 service 返回的权限错误转换成 HTTP 响应。
+
+    不应在 controller 和 service 对同一个操作重复鉴权；也不应只在
+    controller 鉴权、让可被其他入口调用的 service 裸奔。现有直接
+    `handler → repo` 的 CRUD 后续迁移到 service 时，应一并把
+    `allowScope` 下沉。
+
+    ### 0.5 列表与搜索不能只返回 bool
+
+    列表、树、搜索等集合查询不能简单调用一次 `Allow(...) == nil` 后返回
+    全量数据。用户可能只拥有某个 Project、Environment 或 Folder 的权限，
+    此时结果必须按可见 scope 逐行收窄。
+
+    当前实现使用 PostgreSQL 中的 `userReadScopeCTE` 和
+    `scopeNarrowingWhere`，在同一条 SQL 中根据 caller、permission code
+    和 scope chain 过滤结果。这仍然使用相同的 RBAC 数据模型，但目前属于
+    repository 内部实现，尚未抽象为 `auth.Authorizer` 的公开批量接口。
+
+    当前约定：
+
+    - 单资源操作：必须调用 `auth.Authorizer.Allow`。
+    - 列表/搜索：必须使用 RBAC scope narrowing，返回“用户可见的子集”。
+    - 无任何可见资源时：返回空列表，而不是 403。
+    - reveal 类批量查询：narrowing 必须使用 `secret:reveal`，不能使用
+      `secret:read` 或 `secret:list` 代替。
+    - 禁止先查全量数据，再在 Go 内存中逐条过滤敏感数据。
+
+    为满足“所有业务只依赖权限模块”的最终目标，后续应在 `internal/auth`
+    增加集合授权接口，由权限模块返回可见 scope 约束，再由 PostgreSQL /
+    Redis adapter 转换为查询条件。例如：
+
+    ```go
+    type ScopeConstraint struct {
+        Global   bool
+        ScopeIds map[string][]string
+    }
+
+    type CollectionAuthorizer interface {
+        Constraint(
+            ctx context.Context,
+            user UserInfo,
+            permission string,
+        ) (ScopeConstraint, error)
+    }
+    ```
+
+    业务 repository 只消费 `ScopeConstraint`，不再自行理解角色表和绑定表。
+    该接口是目标架构，当前 `userReadScopeCTE` 尚未迁移，不应误认为已经完成。
+
+    ### 0.6 新功能接入检查表
+
+    新增需要权限的功能时必须完成以下事项：
+
+    1. 在权限目录中定义明确的 permission code。
+    2. 确定校验的是资源自身还是父资源。
+    3. service 注入 `auth.Authorizer`，在读取或修改数据前调用 `Allow`。
+    4. 列表/搜索使用 scope narrowing，不使用一次 bool 判定放行全量。
+    5. `secret:read` 与 `secret:reveal` 分开校验。
+    6. 为允许、拒绝、父级继承和无 binding 场景补测试。
+    7. 同步更新本文件中的接口说明和角色权限矩阵。
+
+    ---
+
     ## 1. 权限码 (`permission code`) 结构
 
     权限码一律为 `<resource>:<action>` 形式,系统初始化时由
@@ -34,13 +205,13 @@ info:
     所有授权都沿资源父子关系向上查,层级为:
 
     ```
-    folder → environment → project → organization → global
+    folder(level 2) → folder(level 1) → environment → project → organization → global
     ```
 
     即:`ResourceScopes(resource)` 返回从最具体到最一般的 scope 列表。
-    一个 user 在 (folder, X) 的 binding 同样影响 (environment, X.env)、
-    (project, X.env.project)、(organization, X.env.project.org)、
-    (global) 上的可见性;反之不成立。
+    当目标资源位于二级 Folder 时，一级父 Folder 会加入目标资源的 scope
+    chain。因此 user 在一级 Folder 上的 binding 会覆盖其二级 Folder 及其中
+    的 Secret；二级 Folder binding 不反向覆盖一级 Folder或同级 Folder。
 
     `auth.ResourceScopes` 是 store 层接口,见 `internal/store/store.go`。
     RBAC service 的父级覆盖判定直接复用此接口。
@@ -49,8 +220,8 @@ info:
 
     ## 3. 单点操作鉴权(`authorizer.Allow` 走法)
 
-    所有 6 个资源(Org/Project/Env/EnvTpl/Folder/Secret) 与 RBAC 自身
-    的写操作 / 单点 read 入口,走统一的 `auth.Authorizer.Allow` 接口
+    所有需要权限的单资源写操作 / 单点 read 入口，都应走统一的
+    `auth.Authorizer.Allow` 接口
     (`internal/auth/rbac.go:45`):
 
     ```
@@ -988,11 +1159,11 @@ components:
         org: [create, read, update, delete, force_delete]
         project: [create, read, update, delete]
         env: [create, read, update, delete]
-        env_template: [template:read]
+        env_template: ["template:read"]
         folder: [create, read, update, delete]
         secret: [list, search, read, reveal, create, update, delete]
         audit: [read]
-        rbac: [role:read, role:manage, binding:read, binding:manage]
+        rbac: ["role:read", "role:manage", "binding:read", "binding:manage"]
       x-coverage-rules:
         - description: 同 action 覆盖
           parent: "<X>"

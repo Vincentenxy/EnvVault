@@ -777,54 +777,60 @@ where e.id = $1 and e.is_deleted = false and p.is_deleted = false and o.is_delet
 }
 
 func (s *RBACStore) folderScopes(ctx context.Context, id string) ([]auth.Scope, error) {
-	var orgId, projectId, environmentId, folderId string
+	var orgId, projectId, environmentId, parentFolderId, folderId string
 	err := s.db.QueryRowContext(ctx, `
-select o.id, p.id, e.id, f.id
+select o.id, p.id, e.id, coalesce(f.parent_id::text, ''), f.id
 from folders f
 join environments e on e.id = f.environment_id
 join projects p on p.id = e.project_id
 join organizations o on o.id = p.org_id
 where f.id = $1 and f.is_deleted = false and e.is_deleted = false and p.is_deleted = false and o.is_deleted = false
-`, id).Scan(&orgId, &projectId, &environmentId, &folderId)
+`, id).Scan(&orgId, &projectId, &environmentId, &parentFolderId, &folderId)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return []auth.Scope{
+	scopes := []auth.Scope{
 		{Type: "global"},
 		{Type: "organization", Id: orgId},
 		{Type: "project", Id: projectId},
 		{Type: "environment", Id: environmentId},
-		{Type: "folder", Id: folderId},
-	}, nil
+	}
+	if parentFolderId != "" {
+		scopes = append(scopes, auth.Scope{Type: "folder", Id: parentFolderId})
+	}
+	return append(scopes, auth.Scope{Type: "folder", Id: folderId}), nil
 }
 
 func (s *RBACStore) secretScopes(ctx context.Context, id string) ([]auth.Scope, error) {
-	var orgId, projectId, environmentId, folderId string
+	var orgId, projectId, environmentId, parentFolderId, folderId string
 	err := s.db.QueryRowContext(ctx, `
-select o.id, p.id, e.id, f.id
+select o.id, p.id, e.id, coalesce(f.parent_id::text, ''), f.id
 from secrets s
 join folders f on f.id = s.folder_id
 join environments e on e.id = f.environment_id
 join projects p on p.id = e.project_id
 join organizations o on o.id = p.org_id
 where s.id = $1 and s.is_deleted = false and f.is_deleted = false and e.is_deleted = false and p.is_deleted = false and o.is_deleted = false
-`, id).Scan(&orgId, &projectId, &environmentId, &folderId)
+`, id).Scan(&orgId, &projectId, &environmentId, &parentFolderId, &folderId)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return []auth.Scope{
+	scopes := []auth.Scope{
 		{Type: "global"},
 		{Type: "organization", Id: orgId},
 		{Type: "project", Id: projectId},
 		{Type: "environment", Id: environmentId},
-		{Type: "folder", Id: folderId},
-	}, nil
+	}
+	if parentFolderId != "" {
+		scopes = append(scopes, auth.Scope{Type: "folder", Id: parentFolderId})
+	}
+	return append(scopes, auth.Scope{Type: "folder", Id: folderId}), nil
 }
 
 func (s *RBACStore) envTemplateScopes(ctx context.Context, id string) ([]auth.Scope, error) {

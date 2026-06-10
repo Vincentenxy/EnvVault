@@ -358,7 +358,7 @@ func processFolderJob(
 			return nil
 		}
 		// secretList 里的每个 item 是 secretBatchCreateItemRequest:
-		//   {key, comment, dev/test/sim/prod: {folderId, value}}
+		//   {key, comment, envList: [{envCode, folderId, value}, ...]}
 		if err := client.call(ctx, "/api/v1/secrets/batchCreate", map[string]any{
 			"secretList": secretList,
 		}, nil, true /* tolerateConflict: (folder,key) 冲突静默跳过 */); err != nil {
@@ -374,18 +374,20 @@ func processFolderJob(
 		if i >= *secretsPerFt {
 			break
 		}
-		item := map[string]any{
-			"key":     ks.Key,
-			"comment": ks.Comment,
-		}
+		envList := make([]map[string]any, 0, 4)
 		for _, envCode := range []string{"dev", "test", "sim", "prod"} {
 			val := generateSecretValue(ks.Kind, ctxTag+"-"+envCode)
-			item[envCode] = map[string]any{
+			envList = append(envList, map[string]any{
+				"envCode":  envCode,
 				"folderId": folderIDByEnvCode[envCode],
 				"value":    val,
-			}
+			})
 		}
-		secretList = append(secretList, item)
+		secretList = append(secretList, map[string]any{
+			"key":     ks.Key,
+			"comment": ks.Comment,
+			"envList": envList,
+		})
 		if len(secretList) >= *batchSize {
 			if err := flush(); err != nil {
 				return err

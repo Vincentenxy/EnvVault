@@ -101,6 +101,7 @@ func (r *Repository) ListAllFoldersForTree(ctx context.Context, callerUserId str
 	cte := userReadScopeCTE()
 	narrow := scopeNarrowingWhere([]narrowingEntry{
 		{scopeType: "folder", column: "t.id"},
+		{scopeType: "folder", column: "t.parent_id"},
 		{scopeType: "environment", column: "t.environment_id"},
 		{scopeType: "project", column: "e.project_id"},
 		{scopeType: "organization", column: "p.org_id"},
@@ -176,6 +177,7 @@ func (r *Repository) ListFoldersInProject(
 	cte := userReadScopeCTE()
 	narrow := scopeNarrowingWhere([]narrowingEntry{
 		{scopeType: "folder", column: "t.id"},
+		{scopeType: "folder", column: "t.parent_id"},
 		{scopeType: "environment", column: "t.environment_id"},
 		{scopeType: "project", column: "e.project_id"},
 		{scopeType: "organization", column: "p.org_id"},

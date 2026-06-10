@@ -137,6 +137,21 @@ type ResourceRepository interface {
 	// keys 为空时返回 folder 下所有 secret(无分页、无上限)。
 	// 返回 (Secret, ciphertext json) 对,长度一致;ciphertext 由 service 端解密填 Secret.Value。
 	BatchRevealSecretsByPath(ctx context.Context, callerUserId, action, orgCode, projectCode, envCode, folderCode string, keys []string) ([]domain.Secret, [][]byte, error)
+	// ListSecretsByProjectFolderKey 按 (project, folderCode, key) 维度 + env 过滤列表
+	// 拉取 secret metadata + ciphertext,跨 env 一次性 reveal 用。
+	// envCodes 为空时走"该项目下所有 env"兜底(本接口 controller 层会校验非空,
+	// 此处兜底仅防直调 service 的场景)。
+	// cascade narrowing 用 caller 传入的 action(secret:reveal)。
+	// 返回顺序按 e.code ASC,方便 service 端按 envCode 索引。
+	ListSecretsByProjectFolderKey(ctx context.Context, callerUserId, action, projectId, folderCode, key string, envCodes []string) ([]domain.Secret, [][]byte, error)
+	// ListSecretsInProjectByEnvs 按 project + (可选 folderCode) + env 列表拉取 secret
+	// 的 metadata + ciphertext,用于"key 为空 → 返回项目下 (folder, key)"场景。
+	//   - folderCode 为空 → 走"项目下所有 folder"兜底
+	//   - folderCode 非空 → SQL 直接限定到该 folder
+	// 不做 (folder, key) 聚合,SQL 按 (env, folder, key) 排序返给 service 层
+	// 自行 group by;envCodes 为空时走"项目下所有 env"兜底。
+	// cascade narrowing 用 caller 传入的 action(secret:reveal)。
+	ListSecretsInProjectByEnvs(ctx context.Context, callerUserId, action, projectId, folderCode string, envCodes []string) ([]domain.Secret, [][]byte, error)
 	UpdateSecret(ctx context.Context, id, key, comment, actor string, ciphertext domain.SecretCiphertext) (domain.Secret, error)
 	DeleteSecret(ctx context.Context, id, actor string) error
 	ListSecretCacheRecords(ctx context.Context) ([]domain.SecretCacheRecord, error)

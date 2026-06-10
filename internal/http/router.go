@@ -152,6 +152,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 					secret.POST("/path/info", ctrl.GetSecretByPath)
 					secret.POST("/path/reveal", ctrl.RevealSecretByPath)
 					secret.POST("/path/batchReveal", ctrl.BatchRevealSecretByPath)
+					secret.POST("/code/batchReveal", ctrl.BatchRevealSecretByCode)
 				}
 
 				// v11 batchCreate:复数 /secrets,显式 dev/test/sim/prod 字段。
@@ -159,6 +160,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 				secrets := protected.Group("/secrets")
 				{
 					secrets.POST("/batchCreate", ctrl.BatchCreateSecret)
+					secrets.POST("/list", ctrl.ListSecretsAcrossEnvs)
 				}
 
 				audit := protected.Group("/audit")

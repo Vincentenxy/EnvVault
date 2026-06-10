@@ -1312,18 +1312,72 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/secret/code/batchReveal:
+    post:
+      tags: [Secrets]
+      summary: Batch reveal all secrets under a folder resolved by 4-level code
+      description: |
+        Resolves a folder from **structured** 4-level codes (`orgCode`,
+        `projectCode`, `environmentCode`, `folderCode`) — not a path string —
+        and reveals the plaintext of every secret under it in one round-trip.
+
+        Functionally equivalent to `/secret/path/batchReveal` with `keys`
+        omitted: same `user_read_scopes` CTE, same v7 cascade narrowing chain
+        (`secret → folder(level 2) → folder(level 1) → environment → project
+        → organization`) for `secret:reveal`, same response shape
+        (`secretList`), same audit
+        (`action="reveal_batch"`, one record per call, `encrypted_value=jsonb(keys)`).
+
+        - **Why use this over `/path/batchReveal`**: the input is structured
+          (each code is its own JSON field), so server-side path splitting is
+          avoided and each code segment can be validated / logged individually.
+        - **Why use the path version instead**: when the caller already has a
+          single `path` string (e.g. templates, copy-paste from UI), the path
+          variant is one less parse step on the client.
+        - The two endpoints are independent; both stay.
+        - No pagination, no upper bound (same as path version).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretCodeBatchRevealRequest"
+      responses:
+        "200":
+          description: Batch reveal response.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          secretList:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/Secret"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /api/v1/secrets/batchCreate:
     post:
       tags: [Secrets]
       summary: Batch create secrets across multiple envs with same key / different values
       description: |
-        Creates N secrets in a single transaction. The client **explicitly
-        specifies the target folderId + value for each env** (dev / test / sim /
-        prod are hardcoded fields). The whole batch is one transaction
+        Creates N secrets in a single transaction. The client specifies an
+        **`envList` array** of `{envCode, folderId, value}` triples; one
+        secret is inserted per triple. The whole batch is one transaction
         (all-or-nothing) with **one** batch audit record.
 
-        Use case: setting `DATABASE_URL` to a different value in dev / test / sim /
-        prod, in one request, instead of N serial `/secret/create` calls.
+        Use case: setting `DATABASE_URL` to a different value in a configurable
+        set of envs (commonly dev / test / sim / prod, but `envCode` accepts
+        any project-defined env code), in one request, instead of N serial
+        `/secret/create` calls.
 
         **Note**: the path is `/api/v1/secrets/batchCreate` (plural `secrets`),
         kept on a separate route group from the single-secret `/secret/*` endpoints.
@@ -1339,7 +1393,9 @@ paths:
           `secret/path/info` to fetch metadata if needed).
         - `-1` — **all** business failures, including:
           - `msg: "入参校验，<描述>"` — input validation failed (empty
-            `secretList` / invalid `key` format / missing `folderId` / etc).
+            `secretList` / invalid `key` format / missing `envCode` / missing
+            `folderId` / duplicate `envCode` / duplicate `folderId` within
+            same item / etc).
           - `msg: "创建失败，权限不足"` — caller lacks `secret:create` on at
             least one target folder (v7 cascade narrowing); the entire batch
             is rejected.
@@ -1353,11 +1409,19 @@ paths:
         Behavior:
 
         - `secretList` must be non-empty; each `key` must match `^[A-Z][A-Z0-9_]*$`.
-        - At least one of `dev` / `test` / `sim` / `prod` must be present per item;
-          all four being `null` (or absent) rejects the item.
-        - Each env field's `folderId` must be a non-empty UUID; the system does
+        - Each item's `envList` must have at least 1 entry; each entry's
+          `envCode` and `folderId` are required.
+        - `envCode` is the target env code (project-defined; not limited to
+          the canonical dev/test/sim/prod set).
+        - Within a single item, `envCode` must be unique (no two entries in
+          the same env) and `folderId` must be unique (no two envs pointing
+          to the same folder — would conflict with `(folder_id, key)`
+          unique constraint).
+        - Each entry's `folderId` must be a non-empty UUID; the system does
           **not** do any "find folder by code" lookup — the client is responsible
           for picking the correct target folder per env.
+        - The number of secrets created = total `envList` length across all
+          items (each entry creates one secret).
         - One `secret:create` permission check per target `(env, folder)` pair;
           any denial aborts the whole batch.
         - The DB layer writes N INSERTs and **one** `audit_records` row in a
@@ -1386,6 +1450,80 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Response"
+
+  /api/v1/secrets/list:
+    post:
+      tags: [Secrets]
+      summary: List secret values across multiple envs (跨 env 一次性 reveal)
+      description: |
+        Reveal a `(project, folderCode, [key])` tuple's value across an
+        explicit `envList` in a single request. The server flattens each
+        env's hit to a top-level `<envCode>` key, with `null` for envs the
+        caller has no `secret:read` permission on (filtered out by the
+        server) or where no secret is defined.
+
+        Use case: a "config compare" page that needs to show one key's value
+        across dev / test / sim / prod in a single round-trip, instead of
+        calling `/secret/path/batchReveal` once per env or falling back to
+        the project-wide `/secret/search` (which over-fetches).
+
+        **`key` is optional**:
+
+        - `key` non-empty → exact lookup of `(folderCode, key)` across `envList`
+          (requires `folderCode`).
+        - `key` empty → returns all `(folderCode, key)` tuples in the project
+          that have a hit in any of the `envList` envs (`folderCode` is then
+          an independent filter: empty = all folders, non-empty = limit to
+          that folder).
+
+        **Permission** (v12): action is `secret:read` (relaxed from
+        `secret:reveal`). Holders of `secret:read` may see plaintext; the
+        server-side cascade narrowing excludes secrets the caller cannot
+        read. The single-point `/secret/reveal` endpoint still uses
+        `secret:reveal` for fine-grained control.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretListAcrossEnvsRequest"
+            examples:
+              singleKey:
+                summary: Exact lookup of one key across all 4 envs
+                value:
+                  projectId: 00000000-0000-0000-0000-000000000001
+                  folderCode: ana-svc
+                  key: DATABASE_URL
+                  envList: [dev, test, sim, prod]
+              allKeys:
+                summary: All keys in the project, folderCode as a filter
+                value:
+                  projectId: 00000000-0000-0000-0000-000000000001
+                  folderCode: ""
+                  key: ""
+                  envList: [dev, prod]
+      responses:
+        "200":
+          description: |
+            `data` is an array of `SecretAcrossEnvs` (1 element when
+            `key` is provided, N elements when `key` is empty). Each
+            element flattens env hits to the top level; missed envs
+            serialize to `null`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/SecretAcrossEnvs"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /api/v1/search/global:
     post:
@@ -2391,6 +2529,40 @@ components:
             pattern: "^[A-Z][A-Z0-9_]*$"
           example: ["DATABASE_URL", "API_KEY"]
 
+    SecretCodeBatchRevealRequest:
+      type: object
+      description: |
+        Reveals every secret under a folder resolved by **structured** 4-level codes
+        (org → project → environment → folder). Each code segment is a separate
+        field; no path string is split on the server side.
+
+        Equivalent to `/secret/path/batchReveal` with `keys` omitted — returns all
+        secrets in the folder in one round-trip. The single difference is the
+        input shape: structured fields (preferred for SDK / K8s integrations that
+        already have the codes individually) vs a `.`-separated path string.
+      required: [orgCode, projectCode, environmentCode, folderCode]
+      properties:
+        orgCode:
+          type: string
+          description: "Organization code. Pattern: `^[a-z0-9]+(-[a-z0-9]+)*$`."
+          example: acme
+        projectCode:
+          type: string
+          description: "Project code (unique within the org). Same pattern as `orgCode`."
+          example: webapp
+        environmentCode:
+          type: string
+          description: "Environment code (unique within the project). Same pattern as `orgCode`."
+          example: prod
+        folderCode:
+          type: string
+          description: |
+            Folder code. It is unique only under the same parent Folder (or among
+            root Folders in the environment), not across the whole environment.
+            The current 4-code endpoint is therefore intended for Folder codes
+            that resolve uniquely in the target environment.
+          example: globals
+
     SecretPathBatchRevealResponse:
       type: object
       required: [path, list]
@@ -2425,17 +2597,15 @@ components:
           type: array
           minItems: 1
           description: |
-            List of secrets to create. For each item, the system expands
-            `dev` / `test` / `sim` / `prod` fields into a sequence of
-            `(envCode, folderId, value)` triples and creates one secret per
-            triple. At least one env field must be present per item; all
-            four being `null` (or absent) rejects the item.
+            List of secrets to create. For each item, the system iterates the
+            `envList` and creates one secret per entry. The number of entries
+            per item determines how many secrets get created for that key.
           items:
             $ref: "#/components/schemas/SecretBatchCreateItemRequest"
 
     SecretBatchCreateItemRequest:
       type: object
-      required: [key]
+      required: [key, envList]
       properties:
         key:
           type: string
@@ -2445,23 +2615,33 @@ components:
         comment:
           type: string
           description: Optional per-item comment, persisted on each created secret.
-        dev:
-          $ref: "#/components/schemas/SecretBatchEnvTarget"
-        test:
-          $ref: "#/components/schemas/SecretBatchEnvTarget"
-        sim:
-          $ref: "#/components/schemas/SecretBatchEnvTarget"
-        prod:
-          $ref: "#/components/schemas/SecretBatchEnvTarget"
+        envList:
+          type: array
+          minItems: 1
+          description: |
+            List of (env, folder, value) triples. The system creates one
+            secret per entry. `envCode` is project-defined (not limited to
+            dev/test/sim/prod). Within a single item, `envCode` and
+            `folderId` must each be unique across the array.
+          items:
+            $ref: "#/components/schemas/SecretBatchEnvTarget"
 
     SecretBatchEnvTarget:
       type: object
       description: |
         Per-env target for a single secret. The client must explicitly supply
-        the `folderId` for each env; the system does **not** look up folders
-        by code (no "template folder" mechanism in v11).
-      required: [folderId, value]
+        the `envCode` and `folderId`; the system does **not** look up envs
+        or folders by code (no "template folder" mechanism in v11).
+      required: [envCode, folderId, value]
       properties:
+        envCode:
+          type: string
+          description: |
+            Target env code. Project-defined; the system will resolve it to
+            an env id and verify the user has `secret:create` permission
+            on the specified folder. Common values are `dev`, `test`,
+            `sim`, `prod`, but any project-defined env code is accepted.
+          example: dev
         folderId:
           type: string
           format: uuid
@@ -2471,6 +2651,95 @@ components:
           type: string
           description: The plaintext value of the secret.
           example: postgres://dev.local/db
+
+    SecretListAcrossEnvsRequest:
+      type: object
+      description: |
+        Cross-env secret reveal request. `envList` is required (1..32 entries,
+        trimmed + de-duplicated server-side). `key` is optional: omit it to
+        list every `(folderCode, key)` tuple in the project. `folderCode` is
+        mandatory when `key` is provided; when `key` is empty, `folderCode`
+        becomes an optional filter.
+      required: [projectId, envList]
+      properties:
+        projectId:
+          type: string
+          format: uuid
+          description: Project id; the project must be active and visible to the caller.
+        folderCode:
+          type: string
+          description: |
+            Folder code. **Required when `key` is provided**; otherwise an
+            optional filter (empty = all folders in the project).
+          example: ana-svc
+        key:
+          type: string
+          description: |
+            Secret key. Optional. When provided, must match `^[A-Z][A-Z0-9_]*$`
+            and `folderCode` is required.
+          example: DATABASE_URL
+        envList:
+          type: array
+          minItems: 1
+          maxItems: 32
+          description: |
+            Target env codes (project-defined). Entries are trimmed and
+            de-duplicated; empty strings are dropped. Order in the response
+            is JSON map order (caller should look up by key, not by index).
+          items:
+            type: string
+          example: [dev, test, sim, prod]
+
+    SecretAcrossEnvs:
+      type: object
+      description: |
+        One `(folderCode, key)` group's reveal across the requested `envList`.
+        The `MarshalJSON` flattens each env hit to a top-level `<envCode>`
+        key with shape `{value, version, folderId, comment?, updatedAt}`;
+        envs without a hit (or filtered out by RBAC) serialize to `null`.
+        **Request-side `projectId` / `folderCode` are not echoed**;
+        `projectCode` is the project's code (derived from the matched
+        secret) and is kept for display.
+      required: [projectCode, key]
+      properties:
+        projectCode:
+          type: string
+          description: The matched secret's project code.
+        key:
+          type: string
+          description: The secret key.
+        comment:
+          type: string
+          description: |
+            Comment from the first env that hit (each env has its own
+            comment; we surface the first one for display).
+        "<envCode>":
+          description: |
+            Per-env value. The top-level key is the env code. Missed envs
+            (or envs filtered by RBAC narrowing) serialize to `null`.
+          oneOf:
+            - $ref: "#/components/schemas/EnvSecretValue"
+            - type: "null"
+
+    EnvSecretValue:
+      type: object
+      description: Per-env secret value within a `SecretAcrossEnvs` group.
+      required: [folderId, value, version, updatedAt]
+      properties:
+        folderId:
+          type: string
+          format: uuid
+          description: The folder id this env-specific secret lives in.
+        value:
+          type: string
+          description: Plaintext value (server-decrypted).
+        version:
+          type: integer
+        comment:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
 
     SecretUpsertRequest:
       type: object

@@ -1042,8 +1042,8 @@ where t.is_deleted = false
 | `ListProjects` | navigation | `project/env/folder/secret` 任一下级资源权限均可反推出所属 project 可见；organization scope 持有下级资源权限时可见其下 project |
 | `ListEnvironments` | navigation | `env/folder/secret` 任一下级资源权限均可反推出所属 environment 可见；project / organization scope 持有下级资源权限时可见其下 environment |
 | `ListEnvironmentTemplates` | `env:template:read` | `t.id in (… 'env_template')` ∪ `t.org_id in (… 'organization')` |
-| `ListFolders` | `folder:read` | `t.id in (… 'folder')` ∪ `t.environment_id in (… 'environment')` ∪ `e.project_id in (… 'project')` ∪ `p.org_id in (… 'organization')`(需 join env+project) |
-| `ListSecrets` / `SearchSecrets` | `secret:list` / `secret:search` | `s.id in (… 'secret')` ∪ `s.folder_id in (… 'folder')` ∪ `e.id in (… 'environment')` ∪ `p.id in (… 'project')` ∪ `o.id in (… 'organization')`(需 join 4 张表) |
+| `ListFolders` | `folder:read` | `t.id in (… 'folder')` ∪ `t.parent_id in (… 'folder')` ∪ `t.environment_id in (… 'environment')` ∪ `e.project_id in (… 'project')` ∪ `p.org_id in (… 'organization')`(需 join env+project) |
+| `ListSecrets` / `SearchSecrets` / `BatchRevealSecretsByPath` | `secret:list` / `secret:search` / `secret:reveal` | `s.id in (… 'secret')` ∪ `s.folder_id in (… 'folder')` ∪ `f.parent_id in (… 'folder')` ∪ `e.id in (… 'environment')` ∪ `p.id in (… 'project')` ∪ `o.id in (… 'organization')`(需 join 4 张表) |
 
 `secret` / `env_template` 两种 scope_type 当前没有任何 role 会绑在这两个层级，分支恒为 false；
 保留谓词以支持未来「给单个 secret / env_template 授权」的扩展。
@@ -1057,7 +1057,7 @@ where t.is_deleted = false
 | `platform_admin`（绑在 global） | EXISTS 命中 → 全量 |
 | `org_admin @ (organization, X)` | org 链命中 → 看到 X 及 X 下所有 project / env / folder / secret（cascading） |
 | `project_viewer @ (project, Y)` | project 链命中 → 导航列表能看到 Y 所属 organization、Y project 以及 Y 下 env / folder / secret；但不自动获得 organization 的详情/更新/删除权限 |
-| `folder_viewer @ (folder, Z)` | folder 链命中 → 看到 Z folder 下的 secret；看不到同 env 下别的 folder 的 secret |
+| `folder_viewer @ (folder, Z)` | folder 链命中 → 看到 Z、Z 的直接子 Folder及其中 Secret 的 key/元数据；不包含 `secret:reveal`，也看不到同 env 下其他 Folder 树 |
 | 无任何 binding | CTE 空 → 空 list |
 
 ### 隐式空 list vs 显式 403
@@ -1275,15 +1275,15 @@ v8 决策:整批 1 条 audit,`resource_type="folder"`,`resource_id=<folder.id>`,
 子 folder 走与父 folder 同样的 `folder:read` narrowing,复用 v7 已有的
 `userReadScopeCTE` / `narrowingPredicate` / `scopeNarrowingWhere`;
 narrowing chain 与 `ListFolders` 一致:`(folder, environment, project, organization)`。
-一个 env 下的所有父+子 folder 必须各自通过 narrowing,自然收敛到 caller 可见子集;
-父通过但子不通过 → 子不出现在 `subfolders`(可能是空数组)。
+一级 Folder binding 通过 `t.parent_id` 覆盖其二级 Folder；二级 Folder 也可以通过
+自身 `t.id` 独立授权。父与子均未命中时，子不出现在 `subfolders`。
 
 #### 实现要点
 
 - 新增 `ResourceRepository.ListFolderChildren(ctx, callerUserId, parentIds) (map[string][]Entity, error)`:
   - 复用 `entityReadColumns("parent_id")` 让 level=2 folder 的 `Entity.ParentId` 字段
     自动取 `parent_id` 列(父 folder id);
-  - narrowing entries `[(folder, t.id), (environment, t.environment_id), (project, p.id), (organization, p.org_id)]`;
+  - narrowing entries `[(folder, t.id), (folder, t.parent_id), (environment, t.environment_id), (project, p.id), (organization, p.org_id)]`;
   - 单 SQL `WHERE t.parent_id = ANY($3::uuid[])`;
   - `ORDER BY t.parent_id ASC, t.name ASC` 便于 Go 端按 `t.parent_id` 分组装 `map`;
   - 空 `parentIds` 直接返回空 map(不发 SQL);返回 map 始终非 nil。
@@ -1306,22 +1306,33 @@ narrowing chain 与 `ListFolders` 一致:`(folder, environment, project, organiz
 ### Secret 批量创建（v11）
 
 `POST /api/v1/secret/create` 是单条创建。当用户要在一个 project 下多个 env
-（dev / test / sim / prod）里给同一个 key（如 `DATABASE_URL`）设置不同 value 时，
-需要 N 次 round-trip、N 次权限校验 + N 条 audit。v11 新增
-`POST /api/v1/secrets/batchCreate`（注意：复数 `secrets`，与单条 `/secret/*`
-区分，**单独路由组**）：**一次请求**由客户端**显式指定每个 env 的目标 folderId**
-+ value，**单事务**完成 N 条 INSERT + 1 条 batch audit，全成功或全 rollback。
+里给同一个 key（如 `DATABASE_URL`）设置不同 value 时，需要 N 次 round-trip、
+N 次权限校验 + N 条 audit。v11 新增 `POST /api/v1/secrets/batchCreate`（注意：
+复数 `secrets`，与单条 `/secret/*` 区分，**单独路由组**）：**一次请求**由
+客户端**显式指定每条 (env, folder, value) 三元组**，**单事务**完成 N 条 INSERT
++ 1 条 batch audit，全成功或全 rollback。
+
+> v12 调整：原 4 个硬编码 env 字段 (`dev` / `test` / `sim` / `prod`) 替换为
+> **`envList: [{envCode, folderId, value}, ...]`** 数组形式。env 不再限定
+> 4 个标准名，项目下任意 env code 都可作为入参；envList 长度 = 该 key 要创建的
+> secret 数。详见下节。
 
 #### 业务语义
 
 - **无 template folder 机制**：v11 不再有"通过 folderId.code 跨 env 找同名 folder"
-  的服务端推断；客户端在每个 env 字段里**显式**指定 `folderId` + `value`。
-  理由：env 字段硬编码为项目下标准 4 个（dev/test/sim/prod），每个 env 的目标
-  folder 是客户端已知的业务事实；让客户端显式表达减少服务端的隐式查找和失败面。
-- **env 字段硬编码**：`dev` / `test` / `sim` / `prod` 是项目下标准 4 env；每个
-  字段为可选 `*secretBatchEnvValue{FolderId, value}`（nil 表示该 env 不创建）。
-  顺序固定为 `dev → test → sim → prod`，用于 audit 列举和 cache 键构造。
-- **每条 item 至少要指定一个 env**：4 个 env 字段全为 nil 视为该 item 无效，整条拒绝。
+  的服务端推断；客户端在每个 entry 里**显式**指定 `envCode` + `folderId` + `value`。
+  理由：每个 env 的目标 folder 是客户端已知的业务事实；让客户端显式表达减少
+  服务端的隐式查找和失败面。
+- **envList 数组形式**：每个 item 用 `envList: [{envCode, folderId, value}, ...]`
+  列出要创建的 secret。`envCode` 是项目自定义的 env code（dev / test / sim / prod
+  是常见值，但**不限**于这 4 个）。envList 长度 = 该 key 要创建的 secret 数。
+- **顺序由 client 控制**：service 不再硬编码 env 顺序；envList 顺序由请求体
+  决定，service 端做 trim + 去重 + 校验后顺序透传，audit 与 cache 都按此顺序处理。
+- **同 item 内唯一性**：
+  - `envCode` 在同一 item 内必须唯一（同 env 下建两条同 key 的 secret 视为语义错）；
+  - `folderId` 在同一 item 内必须唯一（避免 DB `(folder_id, key)` 唯一约束冲突，
+    错误信息比「secret 已存在」更精准，client 可立刻定位）。
+- **每条 item 至少要指定一个 env**：envList 为空视为该 item 无效，整条拒绝。
 - **整批原子**：任一阶段失败（入参校验 / 权限 / 冲突 / 内部错误）即整批拒绝，
   不会部分写入。
 
@@ -1333,16 +1344,19 @@ narrowing chain 与 `ListFolders` 一致:`(folder, environment, project, organiz
     {
       "key": "DATABASE_URL",
       "comment": "数据库url",
-      "dev":  { "folderId": "f-dev-uuid",  "value": "postgres://dev.local/db"  },
-      "test": { "folderId": "f-test-uuid", "value": "postgres://test.local/db" },
-      "sim":  { "folderId": "f-sim-uuid",  "value": "postgres://sim.local/db"  },
-      "prod": { "folderId": "f-prod-uuid", "value": "postgres://prod.local/db" }
+      "envList": [
+        { "envCode": "dev",  "folderId": "f-dev-uuid",  "value": "postgres://dev.local/db"  },
+        { "envCode": "test", "folderId": "f-test-uuid", "value": "postgres://test.local/db" },
+        { "envCode": "sim",  "folderId": "f-sim-uuid",  "value": "postgres://sim.local/db"  },
+        { "envCode": "prod", "folderId": "f-prod-uuid", "value": "postgres://prod.local/db" }
+      ]
     }
   ]
 }
 ```
 
-只指定部分 env（例：只 `dev` + `prod`）也合法；4 个 env 全留空则该 item 被拒绝。
+只指定部分 env（例：只 `dev` + `prod`）也合法；envList 留空则该 item 被拒绝。
+`envList` 内的顺序由 client 决定，service 透传处理。
 
 #### 响应（成功，HTTP 200）
 
@@ -1369,7 +1383,7 @@ narrowing chain 与 `ListFolders` 一致:`(folder, environment, project, organiz
 
 | 失败场景 | `msg` 格式 | `code` |
 | --- | --- | --- |
-| 入参校验失败（空 secretList / 缺 key / 缺 folderId / key 格式错） | `入参校验，<错误描述>` | `-1` |
+| 入参校验失败（空 secretList / 缺 key / 缺 envCode / 缺 folderId / key 格式错 / 重复 envCode / 重复 folderId） | `入参校验，<错误描述>` | `-1` |
 | 权限不足（任一 target folder 缺 `secret:create`） | `创建失败，权限不足` | `-1` |
 | 目标 folder 不存在 | `创建失败，目标 folder 不存在` | `-1` |
 | (folder, key) 冲突（unique violation） | `创建失败，secret 已存在` | `-1` |
@@ -1414,13 +1428,13 @@ narrowing chain 与 `ListFolders` 一致:`(folder, environment, project, organiz
 | 维度 | 决策 | 备注 |
 | --- | --- | --- |
 | 端点路径 | `/api/v1/secrets/batchCreate`（**复数** secrets，独立路由组） | 与单条 `/secret/*` 区分 |
-| env 字段 | 硬编码 4 个：`dev` / `test` / `sim` / `prod` | 项目下标准 4 env |
-| env 字段类型 | `*secretBatchEnvValue`（指针，可 nil） | nil 表示该 env 不创建 |
-| 目标 folder 指定 | 客户端显式（每个 env 字段自带 folderId） | 无服务端跨 env 推断 |
-| 入参校验 | secretList 非空 / key 合法 / 每条至少 1 个 env / 每个 env.folderId 非空 | controller 端 + service 端双重防御 |
+| env 字段 | **`envList: [{envCode, folderId, value}, ...]`** 数组 | v12 替换原 4 硬编码字段；env 不再限于标准 4 个 |
+| env 顺序 | 由 client 入参控制 | service 透传，不重排 |
+| 目标 folder 指定 | 客户端显式（每个 entry 自带 folderId） | 无服务端跨 env 推断 |
+| 入参校验 | secretList 非空 / key 合法 / envList 非空 / 每 entry.envCode+folderId 非空 / envCode 唯一 / folderId 唯一 | controller 端 + service 端双重防御 |
 | 失败统一出口 | HTTP 200 + body code=-1 + msg 中文 | 不再分 1403/1409/1404/1500 |
 | 原子性 | **单事务**：N 条 INSERT + 1 条 batch audit | v8 batchReveal 范式 |
-| 业务码常量 | 新增 `CodeBatchCreateError = -1` | — |
+| 业务码常量 | `CodeBatchCreateError = -1` | — |
 | 权限 | 每个 target folder 单独 `secret:create` check | v7 cascade narrowing |
 | Audit | 1 条 `action="create_batch"`，`resource_type="folder"`，`resource_id=第一条 item folder_id` | 整批 1 条 |
 | Cache | 同步 upsert 每条到 Redis SecretCache | 同 CreateSecret |
@@ -1428,10 +1442,10 @@ narrowing chain 与 `ListFolders` 一致:`(folder, environment, project, organiz
 #### 不支持的场景
 
 - `folderParentId` 嵌套 / `includeSubfolders` 嵌套（与单条 Create 保持一致）。
-- env 字段 `folderId` 为空字符串（整条 item 拒绝）。
+- env entry `envCode` / `folderId` 为空字符串（整条 item 拒绝）。
+- 同 item 内重复 `envCode` 或重复 `folderId`（视为入参错，整条拒绝）。
 - 跨 project 批量创建（每条 item 各自的 folderId 必须在 caller 有 `secret:create`
   权限；无 project 级批量语义，caller 需在每个目标 folder 上分别有权限）。
-- 非 4 标准 env 的项目（后续可按需扩展为 `envCodes []string` 数组 / map 形式）。
 
 #### 风险与权衡
 
@@ -1451,12 +1465,187 @@ narrowing chain 与 `ListFolders` 一致:`(folder, environment, project, organiz
   响应体大小 + 避免 N 个 secret 的 ciphertext 误传出（虽然 service 不填
   `Secret.Value`，但 metadata 本身也含 `comment` / `createdBy` / `updatedBy`
   等冗余信息）。
-- **env 字段硬编码**：项目下非 4 标准 env 的场景不支持。后续 v12 优化：把
-  `dev` / `test` / `sim` / `prod` 字段替换为 `envs: [{envCode, folderId, value}, ...]`
-  数组形式。当前硬编码对齐"项目下标准 4 env"的产品事实。
+- **envList 数组 vs 4 硬编码字段**：v12 改用数组后，env 不再限于 4 标准名，
+  任何项目自定义 env code 都可作为入参；前端 schema 统一用 `envList`，后端
+  service 层对 env 存在性 / 权限的判定更灵活。代价是 client 端要做 envList
+  构造（之前 4 字段自动展开），但换来配置自由度的提升。
 - **回退**：若端点行为不被接受，handler / writer 集中在
   `internal/http/controller/resource_secret_batch.go`，删一个文件 + 路由 + service
   一个方法即可回退到 v10 状态。
+
+### Secret 跨 env 列表（v12）
+
+`POST /api/v1/secret/list` / `/secret/search` / `/secret/path/batchReveal` 等
+已有端点存在以下使用痛点：
+
+- `/secret/list` 与 `/secret/search` 一次只能查一个 env（或 folder 维度）；
+- `/secret/path/batchReveal` 一次只能 reveal 一个 folder 下所有 key；
+- `/secret/search` 在 project 维度会聚合整个项目的所有 (folder, key) 组合返
+  group 列表，**无法精确指定某一个 key 在某几个 env 下的值**。
+
+实际场景：前端做"配置对比"页时，需要针对某一个 key，展示「dev / test / sim /
+prod 下对应的值分别是多少」。这种"按 (project, folderCode, key) 维度精确查若干 env"
+的场景，现有接口要么 over-fetch（search 返整个项目全量），要么 under-fetch
+（batchReveal 只能看一个 env）。
+
+v12 新增 `POST /api/v1/secrets/list`（与 batchCreate 共用 `secrets` 路由组，
+复数）：**精确查 (project, folderCode, key) 在上送 envList 命中 env 下的值**，
+跨 env 一次性 reveal。
+
+> 关键扩展：**`key` 为可选**。key 非空时精确查 (folderCode, key) 在 envList
+> 命中 env 下的值；key 为空时返回项目下所有 (folderCode, key) 跨 envList
+> 命中 env 下的值（覆盖「配置对比」整页浏览场景）。
+
+#### 业务语义
+
+- **`key` 必填 / 可选二态**：
+  - `key` 非空 → 精确查 (folderCode, key) 跨 envList；folderCode 必填；
+  - `key` 为空 → 列出 (folderCode, key) 跨 envList；folderCode 是**独立的
+    过滤维度**：空时返项目下所有 folder，非空时 SQL 直接限定到该 folder。
+- **envList 必填**：1..32 项，service 端做 trim + 去重 + 空过滤。
+- **未命中 env → JSON null**：上送 envList 中的 env 在该项目下没有 secret
+  时，响应里该 env 字段为 `null`（用 `*EnvSecretValue` 指针 + 自定义
+  `MarshalJSON` 兜底），前端按固定下标位访问，不会出现字段缺失。
+- **无命中时返空数组（key 为空）或 1 元素占位（key 非空）**：保证响应 shape
+  一致，前端无需做特判。
+- **不走 secret:list 收窄的 SQL 模式**：用两个新 repo 方法
+  `ListSecretsByProjectFolderKey`（单 key 精确）/ `ListSecretsInProjectByEnvs`
+  （key 为空，folderCode 独立过滤），内部走 v7 cascade narrowing 链
+  `(secret → folder → env → project → org)` 收窄；本端点的 action 用
+  `secret:read`（v12 起由 `secret:reveal` 放宽为 `secret:read`）。
+  权限语义：持有 `secret:read` 即有资格看到 secret 的明文——SQL
+  层把无 read 的 secret 直接收窄掉（不出现在 result 里），service
+  不再单独校验 `secret:reveal`。这把"是否能看到明文"从细粒度
+  reveal 降级为粗粒度 read，符合批量浏览场景（持有 read 即可直
+  接看到 plaintext）；单点 `/secret/reveal` 接口仍走 `secret:reveal`
+  保持细粒度控制。
+- **整批 1 条 audit**（action=`reveal_batch`、resource_type=`project`、
+  resource_id=projectId）：有命中才写，与 `BatchRevealByPath` 一致；payload
+  区分单 key（`{folderCode, key, envList, hits}`）与全量
+  （`{key:"", envList, keyCount, totalHits, items:[{folderCode, key}, ...]}`）
+  两种形态。
+
+#### 请求
+
+**单 key 精确查**：
+```json
+{
+  "projectId":  "uuid-of-project",
+  "folderCode": "ana-svc",
+  "key":        "DATABASE_URL",
+  "envList":    ["dev", "test", "sim", "prod"]
+}
+```
+
+**全量查（key 为空）**：
+```json
+{
+  "projectId":  "uuid-of-project",
+  "envList":    ["dev", "test", "sim", "prod"]
+}
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `projectId` | 是 | project uuid |
+| `folderCode` | key 非空时必填；key 为空时**也是有效过滤条件**(空字符串 = 跨所有 folder) | folder code（跨 env 稳定标识） |
+| `key` | 否 | secret key；空时返所有 key（`^[A-Z][A-Z0-9_]*$` 仅在非空时校验） |
+| `envList` | 是 | 目标 env code 数组，1 ≤ len ≤ 32，service 端 trim+去重+空过滤 |
+
+#### 响应
+
+**单 key 精确查**（`data` 是 1 元素数组）：
+```json
+{
+  "code": 0,
+  "msg": "ok",
+  "data": [
+    {
+      "projectCode": "p1",
+      "key":         "DATABASE_URL",
+      "comment":     "数据库url(取自第一个命中env)",
+      "dev":  { "value": "postgres://...", "version": 1, "comment": "...", "updatedAt": "2024-01-01T00:00:00Z" },
+      "test": { "value": "postgres://...", "version": 1, "comment": "...", "updatedAt": "2024-01-02T00:00:00Z" },
+      "sim":  null,
+      "prod": null
+    }
+  ]
+}
+```
+
+**全量查**（`data` 是 N 元素数组，每条对应一个 (folder, key)）：
+```json
+{
+  "code": 0,
+  "msg": "ok",
+  "data": [
+    {
+      "projectCode": "p1",
+      "key":         "DATABASE_URL",
+      "dev": { "value": "...", "version": 1, "updatedAt": "..." },
+      "test": { "value": "...", "version": 1, "updatedAt": "..." },
+      "sim": null,
+      "prod": null
+    },
+    {
+      "projectCode": "p1",
+      "key":         "API_KEY",
+      "dev": { "value": "...", "version": 3, "updatedAt": "..." },
+      "test": null,
+      "sim": null,
+      "prod": { "value": "...", "version": 1, "updatedAt": "..." }
+    }
+  ]
+}
+```
+
+**无命中**：
+- `key` 非空：返 1 元素占位（顶层 `key` 字段有值，env 字段全 `null`）；
+- `key` 为空：返空数组 `[]`。
+
+> 响应里**不**回显请求参数：`projectId` / `folderCode` 是请求入参，不再放进
+> 响应（避免冗余）；`projectCode` 是从 secret 派生出来的标识，保留供前端展示。
+> env 字段（dev / test / sim / prod 等）走自定义 `MarshalJSON` 展平到顶层，
+> 未命中的 env 序列化为 `null`。
+
+#### 关键设计决策
+
+| 维度 | 决策 | 备注 |
+| --- | --- | --- |
+| 端点路径 | `/api/v1/secrets/list`（**复数** secrets，与 batchCreate 同路由组） | 与单条 `/secret/*` 区分 |
+| key 是否必填 | **可选** | key 空时返项目下所有 (folder, key) |
+| folderCode 语义 | key 非空时必填；**key 空时也是有效过滤条件**(非空限定到该 folder) | 二态共享同一 SQL 兜底分支 |
+| envList 必填 | 是 | 1..32 项；不传 400 |
+| 未命中 env | 序列化为 `null` | `*EnvSecretValue` 指针 + 自定义 `MarshalJSON` |
+| 响应形态 | 永远是数组 | 单 key → 1 元素；全量 → N 元素；统一 shape |
+| 权限 | `secret:read`（v12 起） | v7 cascade narrowing 自动收窄；持有 read 即可看明文（无 read 在 SQL 层被收窄掉，不出现 env 字段）；单点 `/secret/reveal` 仍走 `secret:reveal` 保持细粒度 |
+| Audit | 整批 1 条 | `reveal_batch` / `resource_type=project` / `resource_id=projectId`；无命中不写 |
+| 分页 | 无 | 最多命中 envList 长度条，单 key 模式最多 32 条 |
+| Repo SQL | 新加 `ListSecretsByProjectFolderKey` + `ListSecretsInProjectByEnvs(folderCode?)` | 共用 v7 cascade narrowing；folderCode 用 `$5::text = '' or f.code = $5` 兜底 |
+
+#### 不支持的场景
+
+- 跨 project 查询（每条 `projectId` 限定单 project）。
+- 分页（单 key 最多 32 条，全量模式理论无上限；当前未发现需要分页的使用场景，
+  若项目下 (folder, key) 组合过多可后续按 folderCode 二次收敛）。
+- 同 (folder, key) 出现多次的「全量」场景去重（service 端按 (folder, key) 分组，
+  每组一个 SecretAcrossEnvs）。
+
+#### 风险与权衡
+
+- **新加两条 SQL**：与 `ListSecretsByProjectFolderKey` 单 key 精确分支 +
+  `ListSecretsInProjectByEnvs` 全量分支。两条 SQL 都复用 v7 cascade narrowing，
+  与 `BatchRevealSecretsByPath` 同链路，权限收窄统一。
+- **env code 顺序由 Go map 决定**：`SecretAcrossEnvs.Envs` 是 `map[string]*EnvSecretValue`，
+  JSON 序列化时字段顺序随机；前端按 key 访问不受影响，但若依赖字段顺序需
+  后续改为有序 slice。
+- **顶层 comment 取自第一个命中 env**：`topComment = secrets[0].Comment` 语义
+  不够严谨（不同 env 的 comment 可能不同），但符合"一份 key 一份 comment"的
+  实际场景；若需要"全 env 共享 comment"可后续扩展为 per-env comment 字段。
+- **回退**：handler / writer / repo 方法集中在
+  `internal/http/controller/resource_secret.go` +
+  `internal/service/secret_service.go` +
+  `internal/store/postgres/repository.go`，删对应方法 + 路由 + DTO 即可回退。
 
 ## 日志与链路追踪
 
@@ -1804,6 +1993,12 @@ Folder 列表：
 | POST | `/api/v1/secret/reveal` | 查看 Secret 明文 value，并记录 reveal 审计 |
 | POST | `/api/v1/secret/update` | 更新 Secret |
 | POST | `/api/v1/secret/delete` | 删除 Secret |
+| POST | `/api/v1/secret/path/info` | 按 4 级 code path 查 secret 详情 |
+| POST | `/api/v1/secret/path/reveal` | 按 4 级 code path 看明文 |
+| POST | `/api/v1/secret/path/batchReveal` | 按 4 级 code path 批量 reveal（folder 下所有/指定 keys） |
+| POST | `/api/v1/secret/code/batchReveal` | 按结构化 code 批量 reveal folder 下所有 secret |
+| POST | `/api/v1/secrets/batchCreate` | **复数** secrets 路由组；envList 数组形式批量创建（v11+） |
+| POST | `/api/v1/secrets/list` | **复数** secrets 路由组；按 (project, [folderCode], [key]) 跨 envList 一次性 reveal（v12） |
 
 Secret 列表：
 

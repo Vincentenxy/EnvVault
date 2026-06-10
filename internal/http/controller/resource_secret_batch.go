@@ -14,11 +14,14 @@ import (
 	"envVault/internal/service"
 )
 
-// secretBatchEnvValue 是单个 env 下的「目标 folder + 待写入 value」。
+// secretBatchEnvValue 是单个 env 下的「目标 folder + 待写入 value」三元组。
 //
 // 客户端按 env code 显式指定目标 folderId(无需 template folder / 跨 env
-// 同名 folder 推断),服务端在每个 env 的指定 folder 下 INSERT 一条 secret。
+// 同名 folder 推断),服务端在每个 entry 指定 env code 对应的 folder 下
+// INSERT 一条 secret。envCode 不限于 dev/test/sim/prod,项目下任意 env code 都
+// 可作为入参(由 service 层做"env 是否存在 / 是否有 secret:create 权限"判定)。
 type secretBatchEnvValue struct {
+	EnvCode  string `json:"envCode"`
 	FolderId string `json:"folderId"`
 	Value    string `json:"value"`
 }
@@ -28,22 +31,20 @@ type secretBatchEnvValue struct {
 //	{
 //	  "key":     "DATABASE_URL",
 //	  "comment": "数据库url",
-//	  "dev":     { "folderId": "<uuid>", "value": "..." },
-//	  "test":    { "folderId": "<uuid>", "value": "..." },
-//	  "sim":     { "folderId": "<uuid>", "value": "..." },
-//	  "prod":    { "folderId": "<uuid>", "value": "..." }
+//	  "envList": [
+//	    { "envCode": "dev",  "folderId": "<uuid>", "value": "..." },
+//	    { "envCode": "test", "folderId": "<uuid>", "value": "..." },
+//	    { "envCode": "sim",  "folderId": "<uuid>", "value": "..." },
+//	    { "envCode": "prod", "folderId": "<uuid>", "value": "..." }
+//	  ]
 //	}
 //
-// 每个 env 字段都是可选(指针);为 nil 表示「不在该 env 创建」。至少需要
-// 指定一个 env,否则整条 item 无效。env 字段是硬编码的标准 4 个;非项目下
-// 4 个标准 env 的项目暂不支持(后续可按需扩展)。
+// envList 至少 1 项,每个 entry 都会在 service 层做独立的 secret:create 权限 check +
+// 加密,单事务 N 条 INSERT + 1 条 batch audit。entry 数量 = 该 key 要创建的 secret 数。
 type secretBatchCreateItemRequest struct {
-	Key     string               `json:"key"`
-	Comment string               `json:"comment,omitempty"`
-	Dev     *secretBatchEnvValue `json:"dev,omitempty"`
-	Test    *secretBatchEnvValue `json:"test,omitempty"`
-	Sim     *secretBatchEnvValue `json:"sim,omitempty"`
-	Prod    *secretBatchEnvValue `json:"prod,omitempty"`
+	Key     string                `json:"key"`
+	Comment string                `json:"comment,omitempty"`
+	EnvList []secretBatchEnvValue `json:"envList"`
 }
 
 // secretBatchCreateRequest 接收 v11 batchCreate 端点入参。
@@ -51,18 +52,6 @@ type secretBatchCreateItemRequest struct {
 // 路径:/api/v1/secrets/batchCreate(注意:复数 secrets,与单条 /secret/* 区分)。
 type secretBatchCreateRequest struct {
 	SecretList []secretBatchCreateItemRequest `json:"secretList"`
-}
-
-// envFieldBindings 把硬编码的 env 字段映射到 (envCode, value pointer) 对。
-// 顺序与 SQL 单事务 INSERT 顺序一致,便于 audit 列举。
-var envFieldBindings = []struct {
-	envCode  string
-	pickFunc func(*secretBatchCreateItemRequest) *secretBatchEnvValue
-}{
-	{"dev", func(it *secretBatchCreateItemRequest) *secretBatchEnvValue { return it.Dev }},
-	{"test", func(it *secretBatchCreateItemRequest) *secretBatchEnvValue { return it.Test }},
-	{"sim", func(it *secretBatchCreateItemRequest) *secretBatchEnvValue { return it.Sim }},
-	{"prod", func(it *secretBatchCreateItemRequest) *secretBatchEnvValue { return it.Prod }},
 }
 
 // BatchCreateSecret 入口。所有响应 HTTP 200,业务码走 body.code:
@@ -76,7 +65,7 @@ func (ctrl *Controller) BatchCreateSecret(c *gin.Context) {
 
 	domainReq, err := secretBatchCreateRequestToDomain(req)
 	if err != nil {
-		// 入参校验失败(空 secretList、缺 key/folderId/value、key 格式错 等)
+		// 入参校验失败(空 secretList、缺 key/envCode/folderId/value、key 格式错 等)
 		// 走 HTTP 200 + body code=-1 + msg 描述,与业务错同一出口。
 		writeBatchCreateError(c, "入参校验", err)
 		return
@@ -131,41 +120,64 @@ func secretBatchCreateRequestToDomain(req secretBatchCreateRequest) (service.Bat
 	return service.BatchCreateRequest{SecretList: out}, nil
 }
 
-// extractEnvs 把单个 item 的 4 个 env 字段展开成有序的 []BatchCreateEnvTarget。
-// 至少要有一个 env 非空,否则该 item 无效。
-//
-// 额外校验:同 item 内 4 个 env 字段的 folderId 必须互不相同。
-// 若 dev/test/sim/prod 共用同一个 folderId(或部分共用),整批会因
-// (folder_id, key) 唯一约束整批回滚,错误信息"secret 已存在"具有误导性。
-// 在 controller 层提前 4xx 拒绝,定位更准。
+// extractEnvs 把单个 item 的 envList 字段展开成有序的 []BatchCreateEnvTarget。
+// 校验项:
+//   - envList 非空
+//   - 每条 envCode / folderId 非空(允许 value 为空字符串,空 secret 业务上可能合法)
+//   - 同 item 内 envCode 不可重复(防止「同 env 下建两条同 key 的 secret」语义错)
+//   - 同 item 内 folderId 不可重复(防止 DB (folder_id, key) 唯一约束冲突,
+//     错误信息比「secret 已存在」更精准,client 可立刻定位)
 func extractEnvs(itemIdx int, item secretBatchCreateItemRequest) ([]service.BatchCreateEnvTarget, error) {
-	var envs []service.BatchCreateEnvTarget
-	for _, b := range envFieldBindings {
-		v := b.pickFunc(&item)
-		if v == nil {
-			continue
+	if len(item.EnvList) == 0 {
+		return nil, fmt.Errorf("secretList[%d].envList 至少需要指定一个 env", itemIdx)
+	}
+	envs := make([]service.BatchCreateEnvTarget, 0, len(item.EnvList))
+	for ei, e := range item.EnvList {
+		envCode := strings.TrimSpace(e.EnvCode)
+		if envCode == "" {
+			return nil, fmt.Errorf("secretList[%d].envList[%d].envCode 不能为空", itemIdx, ei)
 		}
-		if strings.TrimSpace(v.FolderId) == "" {
-			return nil, fmt.Errorf("secretList[%d].%s.folderId 不能为空", itemIdx, b.envCode)
+		if strings.TrimSpace(e.FolderId) == "" {
+			return nil, fmt.Errorf("secretList[%d].envList[%d](envCode=%q).folderId 不能为空", itemIdx, ei, envCode)
 		}
 		envs = append(envs, service.BatchCreateEnvTarget{
-			EnvCode:  b.envCode,
-			FolderId: v.FolderId,
-			Value:    v.Value,
+			EnvCode:  envCode,
+			FolderId: e.FolderId,
+			Value:    e.Value,
 		})
 	}
-	if len(envs) == 0 {
-		return nil, fmt.Errorf("secretList[%d] 至少需要指定一个 env(dev/test/sim/prod)", itemIdx)
+	if err := checkEnvCodeUniqueness(itemIdx, envs); err != nil {
+		return nil, err
 	}
-	if err := checkEnvsFolderUniqueness(itemIdx, envs); err != nil {
+	if err := checkFolderIdUniqueness(itemIdx, envs); err != nil {
 		return nil, err
 	}
 	return envs, nil
 }
 
-// checkEnvsFolderUniqueness 校验单 item 内各 env 字段的 folderId 互不相同。
-// 重复时返回带 item index + 重复 env 列表 + 重复 folderId 的精确错误信息。
-func checkEnvsFolderUniqueness(itemIdx int, envs []service.BatchCreateEnvTarget) error {
+// checkEnvCodeUniqueness 校验单 item 内 envCode 不重复。
+// 重复时返回带 item index + 重复 envCode + 该 envCode 出现位置的精确错误信息。
+func checkEnvCodeUniqueness(itemIdx int, envs []service.BatchCreateEnvTarget) error {
+	seen := make(map[string][]int, len(envs))
+	for i, e := range envs {
+		seen[e.EnvCode] = append(seen[e.EnvCode], i)
+	}
+	for envCode, positions := range seen {
+		if len(positions) > 1 {
+			return fmt.Errorf(
+				"secretList[%d] 的 envCode %q 重复出现于 envList[%v],每个 envCode 只能出现一次",
+				itemIdx, envCode, positions,
+			)
+		}
+	}
+	return nil
+}
+
+// checkFolderIdUniqueness 校验单 item 内 folderId 不重复。
+// 重复时返回带 item index + 复用 envCode 列表 + 复用 folderId 的精确错误信息。
+// 若多个 envCode 指向同一 folderId,DB 端 (folder_id, key) 唯一约束会整批回滚,
+// 错误信息 "secret 已存在" 具有误导性;controller 层提前拒绝,定位更准。
+func checkFolderIdUniqueness(itemIdx int, envs []service.BatchCreateEnvTarget) error {
 	folderIdToEnvs := make(map[string][]string, len(envs))
 	for _, e := range envs {
 		folderIdToEnvs[e.FolderId] = append(folderIdToEnvs[e.FolderId], e.EnvCode)
@@ -173,7 +185,7 @@ func checkEnvsFolderUniqueness(itemIdx int, envs []service.BatchCreateEnvTarget)
 	for folderId, envCodes := range folderIdToEnvs {
 		if len(envCodes) > 1 {
 			return fmt.Errorf(
-				"secretList[%d] 的 env %v 共用了同一个 folderId(%s),应分别指向 4 个 env 下各自的 folder",
+				"secretList[%d] 的 env %v 共用了同一个 folderId(%s),应分别指向各自 env 下的 folder",
 				itemIdx, envCodes, folderId,
 			)
 		}

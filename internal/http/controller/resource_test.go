@@ -348,7 +348,8 @@ func TestGlobalSearchRequestFields(t *testing.T) {
 
 // TestSecretBatchCreateRequest_DTO 锁住 v11 batchCreate 请求体 shape:
 //   - 顶部只有 secretList(comment 字段已弃用,不在 API 暴露)
-//   - 子项含 Key / Comment / Dev / Test / Sim / Prod 4 个 env 字段(指针类型,可空)
+//   - 子项含 Key / Comment / EnvList([]secretBatchEnvValue)
+//   - 旧 API 的 Dev/Test/Sim/Prod 4 个硬编码字段已删除
 func TestSecretBatchCreateRequest_DTO(t *testing.T) {
 	rt := reflect.TypeOf(secretBatchCreateRequest{})
 	// 反向断言:FolderId / 顶层 Comment 字段必须不存在
@@ -362,7 +363,7 @@ func TestSecretBatchCreateRequest_DTO(t *testing.T) {
 		t.Errorf("secretBatchCreateRequest missing SecretList field")
 	}
 
-	// 子项 secretBatchCreateItemRequest:4 个 env 字段(Dev/Test/Sim/Prod),都是 *secretBatchEnvValue
+	// 子项 secretBatchCreateItemRequest:Key / Comment / EnvList([]secretBatchEnvValue)
 	rt2 := reflect.TypeOf(secretBatchCreateItemRequest{})
 	for _, want := range []struct {
 		name    string
@@ -370,10 +371,7 @@ func TestSecretBatchCreateRequest_DTO(t *testing.T) {
 	}{
 		{"Key", "key"},
 		{"Comment", "comment,omitempty"},
-		{"Dev", "dev,omitempty"},
-		{"Test", "test,omitempty"},
-		{"Sim", "sim,omitempty"},
-		{"Prod", "prod,omitempty"},
+		{"EnvList", "envList"},
 	} {
 		f, ok := rt2.FieldByName(want.name)
 		if !ok {
@@ -384,19 +382,23 @@ func TestSecretBatchCreateRequest_DTO(t *testing.T) {
 			t.Errorf("%s json tag = %q, want %q", want.name, got, want.jsonTag)
 		}
 	}
-	// 反向断言:Values 字段必须不存在(旧 API 标记)
-	if _, ok := rt2.FieldByName("Values"); ok {
-		t.Errorf("secretBatchCreateItemRequest should NOT have Values field (replaced by dev/test/sim/prod)")
+	// 反向断言:旧 4 字段 / Values 都不应存在
+	for _, banned := range []string{"Dev", "Test", "Sim", "Prod", "Values"} {
+		if _, ok := rt2.FieldByName(banned); ok {
+			t.Errorf("secretBatchCreateItemRequest should NOT have %s field", banned)
+		}
 	}
 }
 
-// TestSecretBatchEnvValue_DTO 锁住单 env 字段的 json shape。
+// TestSecretBatchEnvValue_DTO 锁住单 env entry 的 json shape。
+// v11 改造后新增 envCode 字段(envCode 决定这条 secret 落在哪个 env)。
 func TestSecretBatchEnvValue_DTO(t *testing.T) {
 	rt := reflect.TypeOf(secretBatchEnvValue{})
 	for _, want := range []struct {
 		name    string
 		jsonTag string
 	}{
+		{"EnvCode", "envCode"},
 		{"FolderId", "folderId"},
 		{"Value", "value"},
 	} {
@@ -428,7 +430,12 @@ func TestSecretBatchCreateRequestToDomain_EmptySecretList(t *testing.T) {
 func TestSecretBatchCreateRequestToDomain_InvalidKey(t *testing.T) {
 	req := secretBatchCreateRequest{
 		SecretList: []secretBatchCreateItemRequest{
-			{Key: "lower_case", Dev: &secretBatchEnvValue{FolderId: "f-dev", Value: "d"}},
+			{
+				Key: "lower_case",
+				EnvList: []secretBatchEnvValue{
+					{EnvCode: "dev", FolderId: "f-dev", Value: "d"},
+				},
+			},
 		},
 	}
 	_, err := secretBatchCreateRequestToDomain(req)
@@ -440,12 +447,17 @@ func TestSecretBatchCreateRequestToDomain_InvalidKey(t *testing.T) {
 	}
 }
 
-// TestSecretBatchCreateRequestToDomain_EmptyFolderIdInEnv 锁住 env 字段
-// folderId 为空 → 错误信息带 index 和 env code。
+// TestSecretBatchCreateRequestToDomain_EmptyFolderIdInEnv 锁住 env entry 的
+// folderId 为空 → 错误信息带 item index、envList 子 index、envCode。
 func TestSecretBatchCreateRequestToDomain_EmptyFolderIdInEnv(t *testing.T) {
 	req := secretBatchCreateRequest{
 		SecretList: []secretBatchCreateItemRequest{
-			{Key: "DATABASE_URL", Dev: &secretBatchEnvValue{FolderId: "", Value: "d"}},
+			{
+				Key: "DATABASE_URL",
+				EnvList: []secretBatchEnvValue{
+					{EnvCode: "dev", FolderId: "", Value: "d"},
+				},
+			},
 		},
 	}
 	_, err := secretBatchCreateRequestToDomain(req)
@@ -460,7 +472,29 @@ func TestSecretBatchCreateRequestToDomain_EmptyFolderIdInEnv(t *testing.T) {
 	}
 }
 
-// TestSecretBatchCreateRequestToDomain_AllEnvsEmpty 锁住 4 个 env 字段全 nil → reject。
+// TestSecretBatchCreateRequestToDomain_EmptyEnvCode 锁住 env entry 的
+// envCode 为空 → 错误信息带 item index、envList 子 index。
+func TestSecretBatchCreateRequestToDomain_EmptyEnvCode(t *testing.T) {
+	req := secretBatchCreateRequest{
+		SecretList: []secretBatchCreateItemRequest{
+			{
+				Key: "DATABASE_URL",
+				EnvList: []secretBatchEnvValue{
+					{EnvCode: "  ", FolderId: "f-dev", Value: "d"},
+				},
+			},
+		},
+	}
+	_, err := secretBatchCreateRequestToDomain(req)
+	if err == nil {
+		t.Fatalf("empty envCode should be rejected")
+	}
+	if !strings.Contains(err.Error(), "envCode") {
+		t.Errorf("err = %v, want to contain 'envCode'", err)
+	}
+}
+
+// TestSecretBatchCreateRequestToDomain_AllEnvsEmpty 锁住 envList 为空 → reject。
 func TestSecretBatchCreateRequestToDomain_AllEnvsEmpty(t *testing.T) {
 	req := secretBatchCreateRequest{
 		SecretList: []secretBatchCreateItemRequest{
@@ -469,25 +503,27 @@ func TestSecretBatchCreateRequestToDomain_AllEnvsEmpty(t *testing.T) {
 	}
 	_, err := secretBatchCreateRequestToDomain(req)
 	if err == nil {
-		t.Fatalf("all envs empty should be rejected")
+		t.Fatalf("empty envList should be rejected")
 	}
-	if !strings.Contains(err.Error(), "env") {
-		t.Errorf("err = %v, want to contain 'env'", err)
+	if !strings.Contains(err.Error(), "envList") {
+		t.Errorf("err = %v, want to contain 'envList'", err)
 	}
 }
 
 // TestSecretBatchCreateRequestToDomain_Success 锁住 happy path:1 key × 4 envs
-// → BatchCreateSecretSpec 完整还原;Envs 按 dev/test/sim/prod 顺序。
+// → BatchCreateSecretSpec 完整还原;Envs 按入参顺序(由 client 控制,不再硬编码 dev/test/sim/prod 顺序)。
 func TestSecretBatchCreateRequestToDomain_Success(t *testing.T) {
 	req := secretBatchCreateRequest{
 		SecretList: []secretBatchCreateItemRequest{
 			{
 				Key:     "DATABASE_URL",
 				Comment: "db url",
-				Dev:     &secretBatchEnvValue{FolderId: "f-dev", Value: "d"},
-				Test:    &secretBatchEnvValue{FolderId: "f-test", Value: "t"},
-				Sim:     &secretBatchEnvValue{FolderId: "f-sim", Value: "s"},
-				Prod:    &secretBatchEnvValue{FolderId: "f-prod", Value: "p"},
+				EnvList: []secretBatchEnvValue{
+					{EnvCode: "dev", FolderId: "f-dev", Value: "d"},
+					{EnvCode: "test", FolderId: "f-test", Value: "t"},
+					{EnvCode: "sim", FolderId: "f-sim", Value: "s"},
+					{EnvCode: "prod", FolderId: "f-prod", Value: "p"},
+				},
 			},
 		},
 	}
@@ -518,15 +554,16 @@ func TestSecretBatchCreateRequestToDomain_Success(t *testing.T) {
 	}
 }
 
-// TestSecretBatchCreateRequestToDomain_PartialEnvs 锁住只填部分 env → Envs 跳过 nil 项。
+// TestSecretBatchCreateRequestToDomain_PartialEnvs 锁住只填部分 env → Envs 保留入参顺序。
 func TestSecretBatchCreateRequestToDomain_PartialEnvs(t *testing.T) {
 	req := secretBatchCreateRequest{
 		SecretList: []secretBatchCreateItemRequest{
 			{
-				Key:  "FOO",
-				Dev:  &secretBatchEnvValue{FolderId: "f-dev", Value: "d"},
-				Prod: &secretBatchEnvValue{FolderId: "f-prod", Value: "p"},
-				// Test / Sim 留空
+				Key: "FOO",
+				EnvList: []secretBatchEnvValue{
+					{EnvCode: "prod", FolderId: "f-prod", Value: "p"},
+					{EnvCode: "dev", FolderId: "f-dev", Value: "d"},
+				},
 			},
 		},
 	}
@@ -535,32 +572,89 @@ func TestSecretBatchCreateRequestToDomain_PartialEnvs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(domainReq.SecretList[0].Envs) != 2 {
-		t.Fatalf("Envs len = %d, want 2 (dev + prod)", len(domainReq.SecretList[0].Envs))
+		t.Fatalf("Envs len = %d, want 2 (prod + dev)", len(domainReq.SecretList[0].Envs))
 	}
-	// dev 必须在 prod 之前(envFieldBindings 顺序)
-	if domainReq.SecretList[0].Envs[0].EnvCode != "dev" {
-		t.Errorf("first env = %q, want dev", domainReq.SecretList[0].Envs[0].EnvCode)
+	// 顺序按入参:prod 在 dev 之前
+	if domainReq.SecretList[0].Envs[0].EnvCode != "prod" {
+		t.Errorf("first env = %q, want prod", domainReq.SecretList[0].Envs[0].EnvCode)
 	}
-	if domainReq.SecretList[0].Envs[1].EnvCode != "prod" {
-		t.Errorf("second env = %q, want prod", domainReq.SecretList[0].Envs[1].EnvCode)
+	if domainReq.SecretList[0].Envs[1].EnvCode != "dev" {
+		t.Errorf("second env = %q, want dev", domainReq.SecretList[0].Envs[1].EnvCode)
+	}
+}
+
+// TestSecretBatchCreateRequestToDomain_ArbitraryEnvCodes 锁住 v11 改造后
+// envList 支持任意 env code(不限于 dev/test/sim/prod);项目下任意 env 都可作为入参。
+func TestSecretBatchCreateRequestToDomain_ArbitraryEnvCodes(t *testing.T) {
+	req := secretBatchCreateRequest{
+		SecretList: []secretBatchCreateItemRequest{
+			{
+				Key: "API_KEY",
+				EnvList: []secretBatchEnvValue{
+					{EnvCode: "staging", FolderId: "f-staging", Value: "s"},
+					{EnvCode: "qa", FolderId: "f-qa", Value: "q"},
+				},
+			},
+		},
+	}
+	domainReq, err := secretBatchCreateRequestToDomain(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(domainReq.SecretList[0].Envs) != 2 {
+		t.Fatalf("Envs len = %d, want 2", len(domainReq.SecretList[0].Envs))
+	}
+	if domainReq.SecretList[0].Envs[0].EnvCode != "staging" {
+		t.Errorf("Envs[0] = %q, want staging", domainReq.SecretList[0].Envs[0].EnvCode)
+	}
+	if domainReq.SecretList[0].Envs[1].EnvCode != "qa" {
+		t.Errorf("Envs[1] = %q, want qa", domainReq.SecretList[0].Envs[1].EnvCode)
+	}
+}
+
+// TestSecretBatchCreateRequestToDomain_DuplicateEnvCode 锁住新加的预检:
+// 单 item 内 envList 有重复 envCode → 拒绝(防止「同 env 下建两条同 key 的 secret」语义错)。
+func TestSecretBatchCreateRequestToDomain_DuplicateEnvCode(t *testing.T) {
+	req := secretBatchCreateRequest{
+		SecretList: []secretBatchCreateItemRequest{
+			{
+				Key: "DUP_ENV",
+				EnvList: []secretBatchEnvValue{
+					{EnvCode: "dev", FolderId: "f-dev-1", Value: "x"},
+					{EnvCode: "dev", FolderId: "f-dev-2", Value: "y"},
+				},
+			},
+		},
+	}
+	_, err := secretBatchCreateRequestToDomain(req)
+	if err == nil {
+		t.Fatalf("duplicate envCode in envList should be rejected")
+	}
+	msg := err.Error()
+	for _, want := range []string{"secretList[0]", `"dev"`, "envList"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message missing %q: %s", want, msg)
+		}
 	}
 }
 
 // TestSecretBatchCreateRequestToDomain_DuplicateFolderId 锁住 v12 预检:
-// 单 item 内 4 个 env 字段共用同一个 folderId → 拒绝。
+// 单 item 内多个 envCode 共享同一个 folderId → 拒绝。
 //
 // 历史背景:v11 的 extractEnvs 不查这个,导致 service 层整批事务回滚后
 // 返回 "secret 已存在",client 误以为 DB 已有数据。v12 改在 controller 层
-// 4xx 拒绝,错误信息直接指出哪几个 env 共用了哪个 folderId。
+// 拒绝,错误信息直接指出哪几个 env 共用了哪个 folderId。
 func TestSecretBatchCreateRequestToDomain_DuplicateFolderId(t *testing.T) {
 	req := secretBatchCreateRequest{
 		SecretList: []secretBatchCreateItemRequest{
 			{
-				Key:  "DB_USER_11111",
-				Dev:  &secretBatchEnvValue{FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
-				Test: &secretBatchEnvValue{FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
-				Sim:  &secretBatchEnvValue{FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
-				Prod: &secretBatchEnvValue{FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
+				Key: "DB_USER_11111",
+				EnvList: []secretBatchEnvValue{
+					{EnvCode: "dev", FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
+					{EnvCode: "test", FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
+					{EnvCode: "sim", FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
+					{EnvCode: "prod", FolderId: "b53bd384-5c4a-4894-87e2-ff921df48635", Value: "x"},
+				},
 			},
 		},
 	}
@@ -583,11 +677,13 @@ func TestSecretBatchCreateRequestToDomain_PartialDuplicateFolderId(t *testing.T)
 	req := secretBatchCreateRequest{
 		SecretList: []secretBatchCreateItemRequest{
 			{
-				Key:  "DB_HOST",
-				Dev:  &secretBatchEnvValue{FolderId: "dup-id", Value: "x"},
-				Test: &secretBatchEnvValue{FolderId: "dup-id", Value: "x"},
-				Sim:  &secretBatchEnvValue{FolderId: "dup-id", Value: "x"},
-				Prod: &secretBatchEnvValue{FolderId: "prod-only", Value: "x"},
+				Key: "DB_HOST",
+				EnvList: []secretBatchEnvValue{
+					{EnvCode: "dev", FolderId: "dup-id", Value: "x"},
+					{EnvCode: "test", FolderId: "dup-id", Value: "x"},
+					{EnvCode: "sim", FolderId: "dup-id", Value: "x"},
+					{EnvCode: "prod", FolderId: "prod-only", Value: "x"},
+				},
 			},
 		},
 	}

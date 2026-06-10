@@ -21,6 +21,13 @@ type secretPathBatchRevealRequest struct {
 	Keys []string `json:"keys,omitempty"`
 }
 
+type secretCodeBatchRevealRequest struct {
+	OrgCode         string `json:"orgCode"`
+	ProjectCode     string `json:"projectCode"`
+	EnvironmentCode string `json:"environmentCode"`
+	FolderCode      string `json:"folderCode"`
+}
+
 func (ctrl *Controller) CreateSecret(c *gin.Context) {
 	var req secretRequest
 	if !ctrl.bind(c, &req) {
@@ -190,4 +197,88 @@ func (ctrl *Controller) BatchRevealSecretByPath(c *gin.Context) {
 		"list":     items,
 		"notFound": notFound,
 	}, nil)
+}
+
+// BatchRevealSecretByCode 按 4 级 code 批量 reveal folder 下所有 secret。
+// 请求体: { "orgCode":"...", "projectCode":"...", "environmentCode":"...", "folderCode":"..." }
+// 响应:   { "secretList":[Secret...] }
+// 与 /secret/path/batchReveal 等价(永远 keys=nil),只是入参用结构化 code 替代字符串 path。
+func (ctrl *Controller) BatchRevealSecretByCode(c *gin.Context) {
+	var req secretCodeBatchRevealRequest
+	if !ctrl.bind(c, &req) {
+		return
+	}
+	if strings.TrimSpace(req.OrgCode) == "" ||
+		strings.TrimSpace(req.ProjectCode) == "" ||
+		strings.TrimSpace(req.EnvironmentCode) == "" ||
+		strings.TrimSpace(req.FolderCode) == "" {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "orgCode, projectCode, environmentCode, folderCode are all required")
+		return
+	}
+	ctrl.log(c, "BatchRevealSecretByCode",
+		logging.F("org_code", req.OrgCode),
+		logging.F("project_code", req.ProjectCode),
+		logging.F("environment_code", req.EnvironmentCode),
+		logging.F("folder_code", req.FolderCode))
+	user := auth.UserFromContext(c)
+	items, err := ctrl.secret.BatchRevealByCode(c.Request.Context(), user,
+		req.OrgCode, req.ProjectCode, req.EnvironmentCode, req.FolderCode, ctrl.actor(c))
+	if err != nil {
+		ctrl.write(c, nil, err)
+		return
+	}
+	ctrl.write(c, gin.H{
+		"secretList": items,
+	}, nil)
+}
+
+type secretListAcrossEnvsRequest struct {
+	ProjectId  string   `json:"projectId"`
+	FolderCode string   `json:"folderCode,omitempty"`
+	Key        string   `json:"key,omitempty"`
+	EnvList    []string `json:"envList"`
+}
+
+// ListSecretsAcrossEnvs 按 (projectId, [folderCode], [key]) 跨 envList 一次性 reveal。
+// 请求体: { "projectId":"...", "folderCode":"...", "key":"...", "envList":["dev","test",...] }
+//   - key 非空:精确查 (folderCode, key) 跨 envList,folderCode 必填
+//   - key 为空:列项目下所有 (folder, key) 跨 envList,folderCode 忽略
+//
+// 响应: data 永远是 SecretAcrossEnvs 数组(1 元素或 N 元素,无命中可能为空数组)
+// 响应里不携带 projectId / folderCode(不回显请求参数)。
+func (ctrl *Controller) ListSecretsAcrossEnvs(c *gin.Context) {
+	var req secretListAcrossEnvsRequest
+	if !ctrl.bind(c, &req) {
+		return
+	}
+	if strings.TrimSpace(req.ProjectId) == "" {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest,
+			"projectId is required")
+		return
+	}
+	// key 非空时校验格式 + 校验 folderCode 必填(key 空时 folderCode 允许为空)
+	if strings.TrimSpace(req.Key) != "" {
+		if !validateSecretKey(c, req.Key) {
+			return
+		}
+		if strings.TrimSpace(req.FolderCode) == "" {
+			response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest,
+				"folderCode is required when key is provided")
+			return
+		}
+	}
+	if len(req.EnvList) == 0 {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest,
+			"envList is required and must contain at least one env code")
+		return
+	}
+	ctrl.log(c, "ListSecretsAcrossEnvs",
+		logging.F("project_id", req.ProjectId),
+		logging.F("folder_code", req.FolderCode),
+		logging.F("key", req.Key),
+		logging.F("env_count", len(req.EnvList)))
+	user := auth.UserFromContext(c)
+	data, err := ctrl.secret.ListAcrossEnvs(c.Request.Context(), user,
+		req.ProjectId, req.FolderCode, req.Key, req.EnvList, ctrl.actor(c))
+	ctrl.write(c, data, err)
 }

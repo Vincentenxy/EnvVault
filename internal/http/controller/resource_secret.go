@@ -235,16 +235,17 @@ func (ctrl *Controller) BatchRevealSecretByCode(c *gin.Context) {
 type secretListAcrossEnvsRequest struct {
 	ProjectId  string   `json:"projectId"`
 	FolderCode string   `json:"folderCode,omitempty"`
-	Key        string   `json:"key,omitempty"`
+	KeyList    []string `json:"keyList,omitempty"`
 	EnvList    []string `json:"envList"`
 }
 
-// ListSecretsAcrossEnvs 按 (projectId, [folderCode], [key]) 跨 envList 一次性 reveal。
-// 请求体: { "projectId":"...", "folderCode":"...", "key":"...", "envList":["dev","test",...] }
-//   - key 非空:精确查 (folderCode, key) 跨 envList,folderCode 必填
-//   - key 为空:列项目下所有 (folder, key) 跨 envList,folderCode 忽略
+// ListSecretsAcrossEnvs 按 (projectId, [folderCode], [keyList]) 跨 envList 一次性 reveal。
+// 请求体: { "projectId":"...", "folderCode":"...", "keyList":["..."], "envList":["dev","test",...] }
+//   - keyList 非空:精确查 (folderCode, k) 跨 envList 中每个 k,folderCode 必填
+//   - keyList 为空:列项目下所有 (folder, key) 跨 envList,folderCode 作为独立过滤维度
 //
-// 响应: data 永远是 SecretAcrossEnvs 数组(1 元素或 N 元素,无命中可能为空数组)
+// 响应: data 永远是 SecretAcrossEnvs 数组(keyList 非空 → len(keyList) 元素含占位,
+// keyList 为空 → 命中的 (folder, key) 组数;无命中可能为空数组)
 // 响应里不携带 projectId / folderCode(不回显请求参数)。
 func (ctrl *Controller) ListSecretsAcrossEnvs(c *gin.Context) {
 	var req secretListAcrossEnvsRequest
@@ -256,14 +257,16 @@ func (ctrl *Controller) ListSecretsAcrossEnvs(c *gin.Context) {
 			"projectId is required")
 		return
 	}
-	// key 非空时校验格式 + 校验 folderCode 必填(key 空时 folderCode 允许为空)
-	if strings.TrimSpace(req.Key) != "" {
-		if !validateSecretKey(c, req.Key) {
-			return
+	// keyList 非空时校验每个 key 的格式 + folderCode 必填(keyList 空时 folderCode 允许为空)
+	if len(req.KeyList) > 0 {
+		for _, k := range req.KeyList {
+			if !validateSecretKey(c, strings.TrimSpace(k)) {
+				return
+			}
 		}
 		if strings.TrimSpace(req.FolderCode) == "" {
 			response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest,
-				"folderCode is required when key is provided")
+				"folderCode is required when keyList is provided")
 			return
 		}
 	}
@@ -275,10 +278,10 @@ func (ctrl *Controller) ListSecretsAcrossEnvs(c *gin.Context) {
 	ctrl.log(c, "ListSecretsAcrossEnvs",
 		logging.F("project_id", req.ProjectId),
 		logging.F("folder_code", req.FolderCode),
-		logging.F("key", req.Key),
+		logging.F("key_count", len(req.KeyList)),
 		logging.F("env_count", len(req.EnvList)))
 	user := auth.UserFromContext(c)
 	data, err := ctrl.secret.ListAcrossEnvs(c.Request.Context(), user,
-		req.ProjectId, req.FolderCode, req.Key, req.EnvList, ctrl.actor(c))
+		req.ProjectId, req.FolderCode, req.KeyList, req.EnvList, ctrl.actor(c))
 	ctrl.write(c, data, err)
 }

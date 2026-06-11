@@ -33,7 +33,13 @@ create table if not exists organizations (
     constraint organizations_code_chk check (code ~ '^[a-z0-9]+(-[a-z0-9]+)*$')
 );
 
-create unique index if not exists organizations_code_active_uidx
+-- code 只在活动组织中唯一。软删除历史行允许保留相同 code，新建组织使用新 UUID。
+-- 不要在 organizations.code 上增加 UNIQUE constraint 或无 WHERE 的唯一索引，
+-- 否则 is_deleted=true 的历史组织会错误地阻塞同 code 新组织创建。
+--
+-- 本文件开头会 drop organizations，因此这里不使用 IF NOT EXISTS：
+-- 如果索引名或建库流程异常，应立即失败，不能静默跳过并留下错误约束。
+create unique index organizations_code_active_uidx
     on organizations (code)
     where is_deleted = false;
 

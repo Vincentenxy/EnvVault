@@ -842,8 +842,10 @@ paths:
       responses:
         "200":
           description: |
-            Successful batch creation. `data` is `{ "created": [Entity, ...] }`,
-            in the same order as `envList`. For each created entity, the
+            Successful batch creation. `data` is directly `[Entity, ...]`,
+            in the same order as `envList` (per the create-response convention:
+            list-producing create endpoints place the array directly in `data`,
+            without a `created`/`items` wrapper). For each created entity, the
             polymorphic `parentId` is set as follows:
 
             - `level=1`: the env id (the folder's direct parent in the hierarchy).
@@ -854,43 +856,41 @@ paths:
                 $ref: "#/components/schemas/ResponseOfCreateFoldersBatch"
               examples:
                 batchTopLevel:
-                  summary: "Top-level batch (level=1): data.created[i].parentId = env id"
+                  summary: "Top-level batch (level=1): data[i].parentId = env id"
                   value:
                     code: 0
                     msg: success
                     data:
-                      created:
-                        - id: "66666666-6666-6666-6666-666666666661"
-                          code: globals
-                          name: Globals
-                          parentId: "11111111-1111-1111-1111-111111111111"
-                        - id: "66666666-6666-6666-6666-666666666662"
-                          code: globals
-                          name: Globals
-                          parentId: "22222222-2222-2222-2222-222222222222"
-                        - id: "66666666-6666-6666-6666-666666666663"
-                          code: globals
-                          name: Globals
-                          parentId: "33333333-3333-3333-3333-333333333333"
+                      - id: "66666666-6666-6666-6666-666666666661"
+                        code: globals
+                        name: Globals
+                        parentId: "11111111-1111-1111-1111-111111111111"
+                      - id: "66666666-6666-6666-6666-666666666662"
+                        code: globals
+                        name: Globals
+                        parentId: "22222222-2222-2222-2222-222222222222"
+                      - id: "66666666-6666-6666-6666-666666666663"
+                        code: globals
+                        name: Globals
+                        parentId: "33333333-3333-3333-3333-333333333333"
                 batchSubFolder:
-                  summary: "Sub-folder batch (level=2): data.created[i].parentId = sibling parent id"
+                  summary: "Sub-folder batch (level=2): data[i].parentId = sibling parent id"
                   value:
                     code: 0
                     msg: success
                     data:
-                      created:
-                        - id: "33333333-3333-3333-3333-333333333333"
-                          code: child-folder-aaaa
-                          name: child-folder aaaa
-                          parentId: "<dev env's sibling parent id (parentCode=payment)>"
-                        - id: "44444444-4444-4444-4444-444444444444"
-                          code: child-folder-aaaa
-                          name: child-folder aaaa
-                          parentId: "<test env's sibling parent id (parentCode=payment)>"
-                        - id: "55555555-5555-5555-5555-555555555555"
-                          code: child-folder-aaaa
-                          name: child-folder aaaa
-                          parentId: "<sim env's sibling parent id (parentCode=payment)>"
+                      - id: "33333333-3333-3333-3333-333333333333"
+                        code: child-folder-aaaa
+                        name: child-folder aaaa
+                        parentId: "<dev env's sibling parent id (parentCode=payment)>"
+                      - id: "44444444-4444-4444-4444-444444444444"
+                        code: child-folder-aaaa
+                        name: child-folder aaaa
+                        parentId: "<test env's sibling parent id (parentCode=payment)>"
+                      - id: "55555555-5555-5555-5555-555555555555"
+                        code: child-folder-aaaa
+                        name: child-folder aaaa
+                        parentId: "<sim env's sibling parent id (parentCode=payment)>"
         "200-with-error":
           description: |
             **Business error returned with HTTP 200 and `data.code = -1`**
@@ -1456,25 +1456,28 @@ paths:
       tags: [Secrets]
       summary: List secret values across multiple envs (跨 env 一次性 reveal)
       description: |
-        Reveal a `(project, folderCode, [key])` tuple's value across an
+        Reveal a `(project, folderCode, [keyList])` tuple's values across an
         explicit `envList` in a single request. The server flattens each
         env's hit to a top-level `<envCode>` key, with `null` for envs the
         caller has no `secret:read` permission on (filtered out by the
         server) or where no secret is defined.
 
-        Use case: a "config compare" page that needs to show one key's value
-        across dev / test / sim / prod in a single round-trip, instead of
-        calling `/secret/path/batchReveal` once per env or falling back to
-        the project-wide `/secret/search` (which over-fetches).
+        Use case: a "config compare" page that needs to show one or more
+        keys' values across dev / test / sim / prod in a single round-trip,
+        instead of calling `/secret/path/batchReveal` once per env or
+        falling back to the project-wide `/secret/search` (which
+        over-fetches).
 
-        **`key` is optional**:
+        **`keyList` is optional**:
 
-        - `key` non-empty → exact lookup of `(folderCode, key)` across `envList`
-          (requires `folderCode`).
-        - `key` empty → returns all `(folderCode, key)` tuples in the project
-          that have a hit in any of the `envList` envs (`folderCode` is then
-          an independent filter: empty = all folders, non-empty = limit to
-          that folder).
+        - `keyList` non-empty → exact lookup of `(folderCode, k)` for each
+          `k` across `envList` (requires `folderCode`). Unmatched keys
+          appear in the response as placeholder elements (top-level `key`
+          set, all env fields `null`).
+        - `keyList` empty / omitted → returns all `(folderCode, key)`
+          tuples in the project that have a hit in any of the `envList`
+          envs (`folderCode` is then an independent filter: empty = all
+          folders, non-empty = limit to that folder).
 
         **Permission** (v12): action is `secret:read` (relaxed from
         `secret:reveal`). Holders of `secret:read` may see plaintext; the
@@ -1493,22 +1496,29 @@ paths:
                 value:
                   projectId: 00000000-0000-0000-0000-000000000001
                   folderCode: ana-svc
-                  key: DATABASE_URL
+                  keyList: [DATABASE_URL]
+                  envList: [dev, test, sim, prod]
+              multipleKeys:
+                summary: Exact lookup of multiple keys across 4 envs
+                value:
+                  projectId: 00000000-0000-0000-0000-000000000001
+                  folderCode: ana-svc
+                  keyList: [DATABASE_URL, API_KEY, REDIS_URL]
                   envList: [dev, test, sim, prod]
               allKeys:
                 summary: All keys in the project, folderCode as a filter
                 value:
                   projectId: 00000000-0000-0000-0000-000000000001
                   folderCode: ""
-                  key: ""
                   envList: [dev, prod]
       responses:
         "200":
           description: |
-            `data` is an array of `SecretAcrossEnvs` (1 element when
-            `key` is provided, N elements when `key` is empty). Each
-            element flattens env hits to the top level; missed envs
-            serialize to `null`.
+            `data` is an array of `SecretAcrossEnvs` (one element per key
+            in `keyList` when provided — unmatched keys still appear as
+            placeholder elements; N elements when `keyList` is empty,
+            grouped by hit `(folderCode, key)`). Each element flattens env
+            hits to the top level; missed envs serialize to `null`.
           content:
             application/json:
               schema:
@@ -2268,19 +2278,17 @@ components:
             - "33333333-3333-3333-3333-333333333333"
 
     CreateFoldersBatchResponse:
-      type: object
+      type: array
       description: |
         Returned by `/api/v1/folder/create` — the API is batch-only, so this
-        is the only successful response shape. The list is in the same order
-        as the request's `envList`, and `data.created[i].parentId` carries
-        the id of either the env (for `level=1`) or the matching sibling
-        `level=1` parent (for `level=2`).
-      required: [created]
-      properties:
-        created:
-          type: array
-          items:
-            $ref: "#/components/schemas/Entity"
+        is the only successful response shape. The array is in the same order
+        as the request's `envList`, and `data[i].parentId` carries the id of
+        either the env (for `level=1`) or the matching sibling `level=1`
+        parent (for `level=2`). Per the create-response convention,
+        list-producing create endpoints expose the array directly under
+        `data` rather than wrapping it in a `created`/`items` field.
+      items:
+        $ref: "#/components/schemas/Entity"
 
     ResponseOfCreateFoldersBatch:
       description: Standard success envelope wrapping the batch creation result.
@@ -2656,10 +2664,10 @@ components:
       type: object
       description: |
         Cross-env secret reveal request. `envList` is required (1..32 entries,
-        trimmed + de-duplicated server-side). `key` is optional: omit it to
-        list every `(folderCode, key)` tuple in the project. `folderCode` is
-        mandatory when `key` is provided; when `key` is empty, `folderCode`
-        becomes an optional filter.
+        trimmed + de-duplicated server-side). `keyList` is optional: omit it
+        (or pass an empty array) to list every `(folderCode, key)` tuple in
+        the project. `folderCode` is mandatory when `keyList` is non-empty;
+        when `keyList` is empty, `folderCode` becomes an optional filter.
       required: [projectId, envList]
       properties:
         projectId:
@@ -2669,15 +2677,24 @@ components:
         folderCode:
           type: string
           description: |
-            Folder code. **Required when `key` is provided**; otherwise an
-            optional filter (empty = all folders in the project).
+            Folder code. **Required when `keyList` is non-empty**; otherwise
+            an optional filter (empty = all folders in the project).
           example: ana-svc
-        key:
-          type: string
+        keyList:
+          type: array
+          maxItems: 32
           description: |
-            Secret key. Optional. When provided, must match `^[A-Z][A-Z0-9_]*$`
-            and `folderCode` is required.
-          example: DATABASE_URL
+            Optional list of secret keys. When omitted or empty the endpoint
+            returns every `(folderCode, key)` tuple in the project. When
+            non-empty, each entry must match `^[A-Z][A-Z0-9_]*$` and
+            `folderCode` becomes required; the server trims entries,
+            de-duplicates and drops empty strings. Keys with no hit appear
+            in the response as placeholder elements (top-level `key` set,
+            all env fields `null`).
+          items:
+            type: string
+            pattern: "^[A-Z][A-Z0-9_]*$"
+          example: [DATABASE_URL, API_KEY]
         envList:
           type: array
           minItems: 1

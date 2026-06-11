@@ -55,11 +55,6 @@ type pageResp struct {
 	PageSize int            `json:"pageSize"`
 }
 
-// folderCreateResp /api/v1/folder/create 返回 {created: [Entity, ...]}。
-type folderCreateResp struct {
-	Created []domainEntity `json:"created"`
-}
-
 func main() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
@@ -245,7 +240,7 @@ func main() {
 
 // processFolderJob 处理单个 (project, folder):
 //  1. /folder/create 带 4 envList 一次创建
-//  2. 响应里的 created[] 顺序对应 envList,我们直接按 env code 排序确认
+//  2. 响应 data 直接是 [Entity, ...],顺序对应 envList,按 env code 排序确认
 //  3. 翻成 (envCode -> folderId) 映射
 //  4. 分批调用 /secrets/batchCreate
 func processFolderJob(
@@ -322,7 +317,7 @@ func processFolderJob(
 			log.Printf("WARN: folder %s exists in some envs but not all: %v", job.fspec.Code, folderIDByEnvCode)
 		}
 	} else {
-		var fcResp folderCreateResp
+		var fcResp []domainEntity
 		if err := client.call(ctx, "/api/v1/folder/create", map[string]any{
 			"level":   1,
 			"code":    job.fspec.Code,
@@ -332,15 +327,15 @@ func processFolderJob(
 		}, &fcResp, true /* tolerateConflict */); err != nil {
 			return fmt.Errorf("folder create: %w", err)
 		}
-		if len(fcResp.Created) != 4 {
-			return fmt.Errorf("folder create returned %d, want 4", len(fcResp.Created))
+		if len(fcResp) != 4 {
+			return fmt.Errorf("folder create returned %d, want 4", len(fcResp))
 		}
 		stats.folders.Add(1)
 		folderIDByEnvCode = map[string]string{
-			"dev":  fcResp.Created[0].Id,
-			"test": fcResp.Created[1].Id,
-			"sim":  fcResp.Created[2].Id,
-			"prod": fcResp.Created[3].Id,
+			"dev":  fcResp[0].Id,
+			"test": fcResp[1].Id,
+			"sim":  fcResp[2].Id,
+			"prod": fcResp[3].Id,
 		}
 	}
 

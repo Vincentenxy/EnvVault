@@ -76,7 +76,34 @@ func (r *Repository) CacheUserLabel(userId, name string) {
 }
 
 func (r *Repository) CreateOrganization(ctx context.Context, code, name, comment, actor string) (Entity, error) {
-	return r.createEntity(ctx, "organizations", "", "", code, name, comment, actor, "organization")
+	entity, err := r.createEntity(ctx, "organizations", "", "", code, name, comment, actor, "organization")
+	if !errors.Is(err, ErrConflict) {
+		return entity, err
+	}
+
+	// organizations.code 只要求 active 行唯一。正常情况下，只有同 code 的
+	// is_deleted=false 行才会触发冲突；历史软删除行不应阻塞新组织创建。
+	var activeExists bool
+	if checkErr := r.db.QueryRowContext(ctx, `
+select exists (
+    select 1
+    from organizations
+    where code = $1 and is_deleted = false
+)
+`, code).Scan(&activeExists); checkErr != nil {
+		return Entity{}, fmt.Errorf("check active organization after code conflict: %w", checkErr)
+	}
+	if activeExists {
+		return Entity{}, fmt.Errorf("active organization with code %q already exists: %w", code, ErrConflict)
+	}
+
+	// 到这里说明数据库拒绝了 INSERT，但并不存在 active 同 code 行。最常见原因
+	// 是旧库仍残留 UNIQUE(code) 全局约束/索引，而不是当前 schema 的部分唯一索引。
+	return Entity{}, fmt.Errorf(
+		"organization code %q conflicts with a deleted record; database schema must use the active-only unique index organizations_code_active_uidx: %w",
+		code,
+		ErrConflict,
+	)
 }
 
 func (r *Repository) ListOrganizations(ctx context.Context, callerUserId string, pagination Pagination) (domain.PaginatedResult[Entity], error) {
@@ -1613,20 +1640,23 @@ order by s.key asc
 	return items, ciphertext, nil
 }
 
-// ListSecretsByProjectFolderKey 按 (project, folderCode, key) 维度 + env 过滤列表
+// ListSecretsByProjectFolderKey 按 (project, folderCode, keys) 维度 + env 过滤列表
 // 拉取 secret metadata + ciphertext,跨 env 一次性 reveal 用。
 //
 // 与 BatchRevealSecretsByPath 的差异:
-//   - 入参是 (projectId, folderCode, key) 维度,不依赖 4 级 code 全路径;
+//   - 入参是 (projectId, folderCode, keys) 维度,不依赖 4 级 code 全路径;
 //   - 跨 env 拉取(envCodes 控制白名单,空数组走"项目下所有 env"兜底);
 //   - 排序按 e.code ASC,方便 service 端按 envCode 索引。
 //
 // 复用 v7 的 userReadScopeCTE + narrowingPredicate + scopeNarrowingWhere 做 secret:reveal 权限的
 // cascade narrowing。envCodes 空时 cardinality($6::text[]) = 0 为真,SQL 走「不限 env」分支;
 // 本接口 service 层已保证 cleaned 非空,但 SQL 仍写兜底以防直调 repo 的场景。
+// keys 必须非空(service 已保证),为安全防直调,SQL 加 `cardinality($5::text[]) > 0`
+// 兜底:keys 空数组时返空 result(不会泄漏所有 key)。
 func (r *Repository) ListSecretsByProjectFolderKey(
 	ctx context.Context,
-	callerUserId, action, projectId, folderCode, key string,
+	callerUserId, action, projectId, folderCode string,
+	keys []string,
 	envCodes []string,
 ) ([]Secret, [][]byte, error) {
 	cte := userReadScopeCTE()
@@ -1659,10 +1689,11 @@ join organizations o
   on o.id = p.org_id
  and o.is_deleted = false
 where s.is_deleted = false
-  and s.key = $5%s
-order by e.code asc
+  and cardinality($5::text[]) > 0
+  and s.key = any($5::text[])%s
+order by e.code asc, s.key asc
 `, narrow)
-	rows, err := r.db.QueryContext(ctx, query, callerUserId, action, projectId, folderCode, key, envCodes)
+	rows, err := r.db.QueryContext(ctx, query, callerUserId, action, projectId, folderCode, keys, envCodes)
 	if err != nil {
 		return nil, nil, err
 	}

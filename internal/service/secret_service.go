@@ -75,18 +75,19 @@ type SecretService interface {
 	// JSON 序列化由每种类型各自的 MarshalJSON/Marshal 决定,handler 不需要关心。
 	Search(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[any], error)
 
-	// ListAcrossEnvs 按 (projectId, [folderCode], [key]) 跨 envList 一次性 reveal。
+	// ListAcrossEnvs 按 (projectId, [folderCode], [keys]) 跨 envList 一次性 reveal。
 	//   - envList 必填(必传,1..32 项,trim+去重+空过滤后)
-	//   - key 非空:精确查 (folderCode, key) 跨 envList,folderCode 必传
-	//   - key 为空:列出项目下所有 (folderCode, key) 跨 envList,folderCode 被忽略
+	//   - keys 非空:精确查 (folderCode, k) 跨 envList × keys,folderCode 必传
+	//   - keys 为空:列出项目下所有 (folderCode, key) 跨 envList,folderCode 作为独立过滤维度
 	// 权限:v12 起 SQL 收窄用 secret:read(原 secret:reveal)。持有 read 即看到
 	// 明文;无 read 的 secret 在 SQL 层就被收窄掉,不出现在 result 里。批量浏览
 	// 场景用 read 即可,单点 /secret/reveal 仍要求 reveal 保持细粒度控制。
 	// 整批 1 条 audit(action=reveal_batch, resource_type=project, resource_id=projectId);
 	// 无命中(空 records)时不写 audit,与 BatchRevealByPath 一致。
 	// 全空场景 service 返 HTTP 200,data 是空数组(全 key 都查不到)或元素 env 全 null。
-	// 响应是 *[]*SecretAcrossEnvs,handler 直接序列化为数组;key 有值时 1 元素、key 为空时 N 元素。
-	ListAcrossEnvs(ctx context.Context, user auth.UserInfo, projectId, folderCode, key string, envList []string, actor string) ([]*domain.SecretAcrossEnvs, error)
+	// 响应是 *[]*SecretAcrossEnvs,handler 直接序列化为数组;keys 非空时按命中 + 未命中
+	// 占位返 len(keys) 元素、keys 为空时按命中的 (folder, key) 组返 N 元素。
+	ListAcrossEnvs(ctx context.Context, user auth.UserInfo, projectId, folderCode string, keys []string, envList []string, actor string) ([]*domain.SecretAcrossEnvs, error)
 }
 
 // BatchCreateRequest 是 SecretService.BatchCreate 的入参。
@@ -415,38 +416,53 @@ func (s *secretService) BatchRevealByCode(ctx context.Context, user auth.UserInf
 //  1. 空 user.UserId → auth.ErrPermissionDenied(同 BatchRevealByPath)
 //  2. 入参防御性二次校验:
 //     - projectId 必填;
-//     - key 非空时 folderCode 必填,且 key 需匹配 secretServiceKeyPattern;
+//     - keys 非空时 folderCode 必填,且每个 key 需匹配 secretServiceKeyPattern;
 //     - envList trim+去重+空过滤,长度 1..32
 //  3. 走 v7 cascade narrowing(action=secret:read,v12 起):repo SQL 一次性按
 //     (secret, folder, env, project, org) 链收窄;持有 read 即可看到明文
 //     (无 read 在 SQL 层被收窄掉,不进 result)
-//     - key 非空:走 ListSecretsByProjectFolderKey(精确 (folderCode, key))
-//     - key 为空:走 ListSecretsInProjectByEnvs(项目下全量,service 端按 (folderCode, key) 聚合)
+//     - keys 非空:走 ListSecretsByProjectFolderKey(精确 (folderCode, k) 跨 envList × keys)
+//     - keys 为空:走 ListSecretsInProjectByEnvs(项目下全量,service 端按 (folderCode, key) 聚合)
 //  4. 解密后按 envCode 索引填到每组 SecretAcrossEnvs.Envs;未命中的 env 填 nil
 //     (自定义 MarshalJSON 序列化为 null),保证响应里上送 envList 的所有 code 都有字段位
 //  5. 整批 1 条 audit(action=reveal_batch, resource_type=project, resource_id=projectId);
 //     无命中(空 records)时不写 audit,与 BatchRevealByPath 一致
 //  6. 顶层 comment 取自该 (folder, key) 组第一个命中 env 的 comment(无命中时为空)
 func (s *secretService) ListAcrossEnvs(
-	ctx context.Context, user auth.UserInfo, projectId, folderCode, key string, envList []string, actor string,
+	ctx context.Context, user auth.UserInfo, projectId, folderCode string, keys []string, envList []string, actor string,
 ) ([]*domain.SecretAcrossEnvs, error) {
 	if strings.TrimSpace(user.UserId) == "" {
 		return nil, auth.ErrPermissionDenied
 	}
 	projectId = strings.TrimSpace(projectId)
 	folderCode = strings.TrimSpace(folderCode)
-	key = strings.TrimSpace(key)
 	if projectId == "" {
 		return nil, errors.New("projectId is required")
 	}
-	// key 非空 → 校验格式 + folderCode 必填(单点查询需要唯一标识)
-	if key != "" {
-		if !secretServiceKeyPattern.MatchString(key) {
+	// keys 防御性 trim + 正则校验 + 去重 + 长度上限。
+	// 与 envList 一致,空数组走"全量"分支(SQL 不走 key 过滤),非空走"精确"分支。
+	cleanedKeys := make([]string, 0, len(keys))
+	keySeen := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		if !secretServiceKeyPattern.MatchString(k) {
 			return nil, fmt.Errorf("key must match ^[A-Z][A-Z0-9_]*$")
 		}
-		if folderCode == "" {
-			return nil, errors.New("folderCode is required when key is provided")
+		if _, ok := keySeen[k]; ok {
+			continue
 		}
+		keySeen[k] = struct{}{}
+		cleanedKeys = append(cleanedKeys, k)
+	}
+	if len(cleanedKeys) > 32 {
+		return nil, errors.New("keyList exceeds max length 32")
+	}
+	// keys 非空 → folderCode 必填(精确查询需要唯一标识)
+	if len(cleanedKeys) > 0 && folderCode == "" {
+		return nil, errors.New("folderCode is required when keyList is provided")
 	}
 	// envList 防御性 trim + 去重 + 过滤空串
 	seen := make(map[string]struct{}, len(envList))
@@ -469,7 +485,7 @@ func (s *secretService) ListAcrossEnvs(
 		return nil, errors.New("envList exceeds max length 32")
 	}
 
-	// 拉取 secret rows;key 为空走「全量」分支,key 非空走「精确」分支。
+	// 拉取 secret rows;keys 为空走「全量」分支,非空走「精确」分支。
 	// folderCode 是独立的过滤维度:空时不限 folder,非空时 SQL 限定到该 folder。
 	//
 	// 权限:v12 起 action 改为 secret:read(原 secret:reveal)。
@@ -484,13 +500,13 @@ func (s *secretService) ListAcrossEnvs(
 		ciphertexts [][]byte
 		err         error
 	)
-	if key == "" {
+	if len(cleanedKeys) == 0 {
 		secrets, ciphertexts, err = s.repo.ListSecretsInProjectByEnvs(
 			ctx, user.UserId, "secret:read", projectId, folderCode, cleaned,
 		)
 	} else {
 		secrets, ciphertexts, err = s.repo.ListSecretsByProjectFolderKey(
-			ctx, user.UserId, "secret:read", projectId, folderCode, key, cleaned,
+			ctx, user.UserId, "secret:read", projectId, folderCode, cleanedKeys, cleaned,
 		)
 	}
 	if err != nil {
@@ -565,8 +581,8 @@ func (s *secretService) ListAcrossEnvs(
 			}
 		}
 		var payload map[string]any
-		if key == "" {
-			// key 为空:列出命中的 (folderCode, key) 列表,便于审计反查
+		if len(cleanedKeys) == 0 {
+			// keys 为空:列出命中的 (folderCode, key) 列表,便于审计反查
 			items := make([]map[string]any, 0, len(order))
 			for _, gk := range order {
 				items = append(items, map[string]any{
@@ -575,7 +591,7 @@ func (s *secretService) ListAcrossEnvs(
 				})
 			}
 			payload = map[string]any{
-				"key":       "",
+				"keys":      []string{},
 				"envList":   cleaned,
 				"keyCount":  len(order),
 				"totalHits": totalHits,
@@ -584,7 +600,7 @@ func (s *secretService) ListAcrossEnvs(
 		} else {
 			payload = map[string]any{
 				"folderCode": folderCode,
-				"key":        key,
+				"keys":       cleanedKeys,
 				"envList":    cleaned,
 				"hits":       totalHits,
 			}
@@ -606,18 +622,28 @@ func (s *secretService) ListAcrossEnvs(
 			Envs:        g.envs,
 		})
 	}
-	// key 非空但无命中时,也要返 1 元素(顶层 key/comment/全部 env=null),便于前端占位
-	if len(out) == 0 && key != "" {
-		envs := make(map[string]*domain.EnvSecretValue, len(cleaned))
-		for _, code := range cleaned {
-			envs[code] = nil
+	// keys 非空但部分 / 全部未命中时,为每个未命中的 key 补 1 元素占位(顶层 key
+	// 有值,env 字段全 null),便于前端按 keyList 长度对照渲染。
+	if len(cleanedKeys) > 0 {
+		hitKeys := make(map[string]struct{}, len(order))
+		for _, gk := range order {
+			hitKeys[gk.key] = struct{}{}
 		}
-		out = append(out, &domain.SecretAcrossEnvs{
-			ProjectCode: projectCode,
-			Key:         key,
-			Comment:     "",
-			Envs:        envs,
-		})
+		for _, k := range cleanedKeys {
+			if _, ok := hitKeys[k]; ok {
+				continue
+			}
+			envs := make(map[string]*domain.EnvSecretValue, len(cleaned))
+			for _, code := range cleaned {
+				envs[code] = nil
+			}
+			out = append(out, &domain.SecretAcrossEnvs{
+				ProjectCode: projectCode,
+				Key:         k,
+				Comment:     "",
+				Envs:        envs,
+			})
+		}
 	}
 	return out, nil
 }

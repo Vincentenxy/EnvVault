@@ -672,7 +672,7 @@ type recordingRepo struct {
 		action       string
 		projectId    string
 		folderCode   string
-		key          string
+		keys         []string
 		envCodes     []string
 	}
 	// listAcrossEnvsSecrets / listAcrossEnvsCiphertexts 是 ListSecretsByProjectFolderKey
@@ -737,18 +737,20 @@ func (r *recordingRepo) BatchRevealSecretsByPath(_ context.Context, callerUserId
 	return nil, nil, nil
 }
 
-func (r *recordingRepo) ListSecretsByProjectFolderKey(_ context.Context, callerUserId, action, projectId, folderCode, key string, envCodes []string) ([]domain.Secret, [][]byte, error) {
-	// 拷贝 envCodes 避免测试间共享底层 slice。
+func (r *recordingRepo) ListSecretsByProjectFolderKey(_ context.Context, callerUserId, action, projectId, folderCode string, keys []string, envCodes []string) ([]domain.Secret, [][]byte, error) {
+	// 拷贝 envCodes / keys 避免测试间共享底层 slice。
 	envCopy := make([]string, len(envCodes))
 	copy(envCopy, envCodes)
+	keysCopy := make([]string, len(keys))
+	copy(keysCopy, keys)
 	r.listAcrossEnvsCalls = append(r.listAcrossEnvsCalls, struct {
 		callerUserId string
 		action       string
 		projectId    string
 		folderCode   string
-		key          string
+		keys         []string
 		envCodes     []string
-	}{callerUserId: callerUserId, action: action, projectId: projectId, folderCode: folderCode, key: key, envCodes: envCopy})
+	}{callerUserId: callerUserId, action: action, projectId: projectId, folderCode: folderCode, keys: keysCopy, envCodes: envCopy})
 	return r.listAcrossEnvsSecrets, r.listAcrossEnvsCiphertexts, nil
 }
 
@@ -796,14 +798,14 @@ func fakeSecretService(t *testing.T) (*secretService, *recordingRepo, auth.UserI
 // fakeEncryptor 在文件下方定义,本测试直接复用。
 
 // TestListAcrossEnvs_KeyEmpty_FolderCodeProvided 锁住 v12 bug fix:
-// key 为空时,folderCode 仍要作为过滤条件传给 repo(SQL 层会做
+// keyList 为空时,folderCode 仍要作为过滤条件传给 repo(SQL 层会做
 // `($5::text = ” or f.code = $5)` 兜底)。修复前 service 把 folderCode 丢了,
 // 修复后必须把 folderCode 透传到 ListSecretsInProjectByEnvs。
 // 同时锁住 v12 permission model:repo action 必须是 "secret:read"(原 reveal)。
 func TestListAcrossEnvs_KeyEmpty_FolderCodeProvided(t *testing.T) {
 	svc, repo, user := fakeSecretService(t)
 	_, err := svc.ListAcrossEnvs(context.Background(), user,
-		"p-uuid", "ana-svc", "", []string{"dev", "test", "sim", "prod"}, "actor-x")
+		"p-uuid", "ana-svc", nil, []string{"dev", "test", "sim", "prod"}, "actor-x")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -815,7 +817,7 @@ func TestListAcrossEnvs_KeyEmpty_FolderCodeProvided(t *testing.T) {
 		t.Errorf("action = %q, want %q (v12 起改用 secret:read 收窄)", call.action, "secret:read")
 	}
 	if call.folderCode != "ana-svc" {
-		t.Errorf("folderCode = %q, want %q (must be propagated when key is empty)", call.folderCode, "ana-svc")
+		t.Errorf("folderCode = %q, want %q (must be propagated when keyList is empty)", call.folderCode, "ana-svc")
 	}
 	if call.projectId != "p-uuid" {
 		t.Errorf("projectId = %q, want p-uuid", call.projectId)
@@ -825,12 +827,12 @@ func TestListAcrossEnvs_KeyEmpty_FolderCodeProvided(t *testing.T) {
 	}
 }
 
-// TestListAcrossEnvs_KeyEmpty_FolderCodeEmpty 锁住 key+folderCode 都空时
+// TestListAcrossEnvs_KeyEmpty_FolderCodeEmpty 锁住 keyList+folderCode 都空时
 // service 走「项目下所有 (folder, key)」分支,folderCode 透传空串(由 SQL 兜底)。
 func TestListAcrossEnvs_KeyEmpty_FolderCodeEmpty(t *testing.T) {
 	svc, repo, user := fakeSecretService(t)
 	_, err := svc.ListAcrossEnvs(context.Background(), user,
-		"p-uuid", "", "", []string{"dev"}, "actor-x")
+		"p-uuid", "", nil, []string{"dev"}, "actor-x")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -846,12 +848,12 @@ func TestListAcrossEnvs_KeyEmpty_FolderCodeEmpty(t *testing.T) {
 	}
 }
 
-// TestListAcrossEnvs_KeyProvided 锁住 key 非空时走「精确」分支(folderCode 必传,
+// TestListAcrossEnvs_KeyProvided 锁住 keyList 非空时走「精确」分支(folderCode 必传,
 // 走 ListSecretsByProjectFolderKey 而非 ListSecretsInProjectByEnvs)。
 func TestListAcrossEnvs_KeyProvided(t *testing.T) {
 	svc, repo, user := fakeSecretService(t)
 	_, err := svc.ListAcrossEnvs(context.Background(), user,
-		"p-uuid", "ana-svc", "DATABASE_URL", []string{"dev"}, "actor-x")
+		"p-uuid", "ana-svc", []string{"DATABASE_URL"}, []string{"dev"}, "actor-x")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -862,8 +864,65 @@ func TestListAcrossEnvs_KeyProvided(t *testing.T) {
 	if call.action != "secret:read" {
 		t.Errorf("action = %q, want %q (v12 起改用 secret:read 收窄)", call.action, "secret:read")
 	}
+	if got := call.keys; len(got) != 1 || got[0] != "DATABASE_URL" {
+		t.Errorf("keys = %v, want [DATABASE_URL]", got)
+	}
 	if len(repo.listInProjectCalls) != 0 {
-		t.Errorf("key 非空不应走 ListSecretsInProjectByEnvs,got %d calls", len(repo.listInProjectCalls))
+		t.Errorf("keyList 非空不应走 ListSecretsInProjectByEnvs,got %d calls", len(repo.listInProjectCalls))
+	}
+}
+
+// TestListAcrossEnvs_KeyListMultiple 锁住 keyList 含多 keys 时,trim+去重后
+// 透传到 ListSecretsByProjectFolderKey;未命中的 key 在响应里以占位元素出现。
+func TestListAcrossEnvs_KeyListMultiple(t *testing.T) {
+	svc, repo, user := fakeSecretService(t)
+	out, err := svc.ListAcrossEnvs(context.Background(), user,
+		"p-uuid", "ana-svc",
+		[]string{" DATABASE_URL ", "API_KEY", "DATABASE_URL", ""}, // 含空串、重复、空白前后缀
+		[]string{"dev"}, "actor-x")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repo.listAcrossEnvsCalls) != 1 {
+		t.Fatalf("expected 1 ListSecretsByProjectFolderKey call, got %d", len(repo.listAcrossEnvsCalls))
+	}
+	call := repo.listAcrossEnvsCalls[0]
+	if got, want := call.keys, []string{"DATABASE_URL", "API_KEY"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("keys = %v, want %v (trim + dedup + drop empty)", got, want)
+	}
+	// 没设 listAcrossEnvsSecrets,repo 返空 → service 应为 2 个 key 各补 1 元素占位
+	if len(out) != 2 {
+		t.Fatalf("got %d groups, want 2 placeholders (one per key in cleanedKeys)", len(out))
+	}
+	seenKeys := map[string]bool{}
+	for _, g := range out {
+		seenKeys[g.Key] = true
+		if len(g.Envs) != 1 || g.Envs["dev"] != nil {
+			t.Errorf("placeholder group %q: want Envs={dev:nil}, got %v", g.Key, g.Envs)
+		}
+	}
+	if !seenKeys["DATABASE_URL"] || !seenKeys["API_KEY"] {
+		t.Errorf("placeholder keys = %v, want both DATABASE_URL and API_KEY present", seenKeys)
+	}
+}
+
+// TestListAcrossEnvs_KeyListInvalid 锁住 keyList 中任一 key 不匹配正则就拒绝整批。
+func TestListAcrossEnvs_KeyListInvalid(t *testing.T) {
+	svc, _, user := fakeSecretService(t)
+	_, err := svc.ListAcrossEnvs(context.Background(), user,
+		"p-uuid", "ana-svc", []string{"DATABASE_URL", "lowercase_bad"}, []string{"dev"}, "actor-x")
+	if err == nil {
+		t.Fatal("expected error for invalid key, got nil")
+	}
+}
+
+// TestListAcrossEnvs_KeyListWithoutFolderCode 锁住 keyList 非空但 folderCode 为空时拒绝。
+func TestListAcrossEnvs_KeyListWithoutFolderCode(t *testing.T) {
+	svc, _, user := fakeSecretService(t)
+	_, err := svc.ListAcrossEnvs(context.Background(), user,
+		"p-uuid", "", []string{"DATABASE_URL"}, []string{"dev"}, "actor-x")
+	if err == nil {
+		t.Fatal("expected error for keyList provided without folderCode, got nil")
 	}
 }
 
@@ -908,7 +967,7 @@ func TestListAcrossEnvs_EnvSecretValueFolderId(t *testing.T) {
 	repo.listAcrossEnvsCiphertexts = ciphertexts
 
 	result, err := svc.ListAcrossEnvs(context.Background(), user,
-		"p-uuid", "ana-svc", "DATABASE_URL", []string{"dev", "test", "sim", "prod"}, "actor-x")
+		"p-uuid", "ana-svc", []string{"DATABASE_URL"}, []string{"dev", "test", "sim", "prod"}, "actor-x")
 	if err != nil {
 		t.Fatalf("ListAcrossEnvs: %v", err)
 	}

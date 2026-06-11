@@ -442,6 +442,15 @@ create unique index if not exists organizations_code_active_uidx
     where is_deleted = false;
 ```
 
+`organizations.code` 采用“活动记录唯一”语义：
+
+- 相同 `code` 且 `is_deleted = false` 时，创建返回 `409 Conflict`。
+- 只有相同 `code` 的软删除历史记录时，允许创建新组织并生成新的 UUID。
+- 创建操作不会自动恢复、覆盖或删除历史组织。
+- 恢复历史组织时，如果已有相同 `code` 的活动组织，同样返回 `409 Conflict`。
+- 旧数据库如果残留全局 `UNIQUE(code)`，执行
+  `configs/migration_organizations_active_code_unique.sql` 修复索引。
+
 ### projects
 
 ```sql
@@ -1492,15 +1501,17 @@ v12 新增 `POST /api/v1/secrets/list`（与 batchCreate 共用 `secrets` 路由
 复数）：**精确查 (project, folderCode, key) 在上送 envList 命中 env 下的值**，
 跨 env 一次性 reveal。
 
-> 关键扩展：**`key` 为可选**。key 非空时精确查 (folderCode, key) 在 envList
-> 命中 env 下的值；key 为空时返回项目下所有 (folderCode, key) 跨 envList
-> 命中 env 下的值（覆盖「配置对比」整页浏览场景）。
+> 关键扩展：**`keyList` 为可选**。keyList 非空时精确查 (folderCode, keyList 中
+> 每个 key) 在 envList 命中 env 下的值；keyList 为空时返回项目下所有
+> (folderCode, key) 跨 envList 命中 env 下的值（覆盖「配置对比」整页浏览场景）。
 
 #### 业务语义
 
-- **`key` 必填 / 可选二态**：
-  - `key` 非空 → 精确查 (folderCode, key) 跨 envList；folderCode 必填；
-  - `key` 为空 → 列出 (folderCode, key) 跨 envList；folderCode 是**独立的
+- **`keyList` 必填 / 可选二态**：
+  - `keyList` 非空 → 精确查 (folderCode, keyList 中每个 key) 跨 envList；
+    folderCode 必填；service 端做 trim + 去重 + 空过滤 + `^[A-Z][A-Z0-9_]*$`
+    正则校验，长度上限 32；
+  - `keyList` 为空 → 列出 (folderCode, key) 跨 envList；folderCode 是**独立的
     过滤维度**：空时返项目下所有 folder，非空时 SQL 直接限定到该 folder。
 - **envList 必填**：1..32 项，service 端做 trim + 去重 + 空过滤。
 - **未命中 env → JSON null**：上送 envList 中的 env 在该项目下没有 secret
@@ -1508,9 +1519,10 @@ v12 新增 `POST /api/v1/secrets/list`（与 batchCreate 共用 `secrets` 路由
   `MarshalJSON` 兜底），前端按固定下标位访问，不会出现字段缺失。
 - **无命中时返空数组（key 为空）或 1 元素占位（key 非空）**：保证响应 shape
   一致，前端无需做特判。
-- **不走 secret:list 收窄的 SQL 模式**：用两个新 repo 方法
-  `ListSecretsByProjectFolderKey`（单 key 精确）/ `ListSecretsInProjectByEnvs`
-  （key 为空，folderCode 独立过滤），内部走 v7 cascade narrowing 链
+- **不走 secret:list 收窄的 SQL 模式**：用两个 repo 方法
+  `ListSecretsByProjectFolderKey`（keyList 非空时精确查 keys 数组）/
+  `ListSecretsInProjectByEnvs`（keyList 为空，folderCode 独立过滤），
+  内部走 v7 cascade narrowing 链
   `(secret → folder → env → project → org)` 收窄；本端点的 action 用
   `secret:read`（v12 起由 `secret:reveal` 放宽为 `secret:read`）。
   权限语义：持有 `secret:read` 即有资格看到 secret 的明文——SQL
@@ -1521,8 +1533,8 @@ v12 新增 `POST /api/v1/secrets/list`（与 batchCreate 共用 `secrets` 路由
   保持细粒度控制。
 - **整批 1 条 audit**（action=`reveal_batch`、resource_type=`project`、
   resource_id=projectId）：有命中才写，与 `BatchRevealByPath` 一致；payload
-  区分单 key（`{folderCode, key, envList, hits}`）与全量
-  （`{key:"", envList, keyCount, totalHits, items:[{folderCode, key}, ...]}`）
+  区分 keyList 非空（`{folderCode, keys:[...], envList, hits}`）与 keyList 为空
+  （`{keys:[], envList, keyCount, totalHits, items:[{folderCode, key}, ...]}`）
   两种形态。
 
 #### 请求
@@ -1532,12 +1544,22 @@ v12 新增 `POST /api/v1/secrets/list`（与 batchCreate 共用 `secrets` 路由
 {
   "projectId":  "uuid-of-project",
   "folderCode": "ana-svc",
-  "key":        "DATABASE_URL",
+  "keyList":    ["DATABASE_URL"],
   "envList":    ["dev", "test", "sim", "prod"]
 }
 ```
 
-**全量查（key 为空）**：
+**多 key 精确查**：
+```json
+{
+  "projectId":  "uuid-of-project",
+  "folderCode": "ana-svc",
+  "keyList":    ["DATABASE_URL", "REDIS_URL", "API_KEY"],
+  "envList":    ["dev", "test", "sim", "prod"]
+}
+```
+
+**全量查（keyList 为空）**：
 ```json
 {
   "projectId":  "uuid-of-project",
@@ -1548,8 +1570,8 @@ v12 新增 `POST /api/v1/secrets/list`（与 batchCreate 共用 `secrets` 路由
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `projectId` | 是 | project uuid |
-| `folderCode` | key 非空时必填；key 为空时**也是有效过滤条件**(空字符串 = 跨所有 folder) | folder code（跨 env 稳定标识） |
-| `key` | 否 | secret key；空时返所有 key（`^[A-Z][A-Z0-9_]*$` 仅在非空时校验） |
+| `folderCode` | keyList 非空时必填；keyList 为空时**也是有效过滤条件**(空字符串 = 跨所有 folder) | folder code（跨 env 稳定标识） |
+| `keyList` | 否 | secret key 数组；空时返所有 key；非空时 service 端 trim + 去重 + 空过滤 + `^[A-Z][A-Z0-9_]*$` 正则校验，长度 1 ≤ len ≤ 32 |
 | `envList` | 是 | 目标 env code 数组，1 ≤ len ≤ 32，service 端 trim+去重+空过滤 |
 
 #### 响应
@@ -1566,6 +1588,40 @@ v12 新增 `POST /api/v1/secrets/list`（与 batchCreate 共用 `secrets` 路由
       "comment":     "数据库url(取自第一个命中env)",
       "dev":  { "value": "postgres://...", "version": 1, "comment": "...", "updatedAt": "2024-01-01T00:00:00Z" },
       "test": { "value": "postgres://...", "version": 1, "comment": "...", "updatedAt": "2024-01-02T00:00:00Z" },
+      "sim":  null,
+      "prod": null
+    }
+  ]
+}
+```
+
+**多 key 精确查**（`data` 长度 = cleanedKeys 长度，每条对应一个 key，未命中的 key 用占位元素兜底）：
+```json
+{
+  "code": 0,
+  "msg": "ok",
+  "data": [
+    {
+      "projectCode": "p1",
+      "key":         "DATABASE_URL",
+      "dev":  { "value": "postgres://...", "version": 1, "updatedAt": "..." },
+      "test": { "value": "postgres://...", "version": 1, "updatedAt": "..." },
+      "sim":  null,
+      "prod": null
+    },
+    {
+      "projectCode": "p1",
+      "key":         "REDIS_URL",
+      "dev":  { "value": "redis://...", "version": 2, "updatedAt": "..." },
+      "test": null,
+      "sim":  null,
+      "prod": null
+    },
+    {
+      "projectCode": "p1",
+      "key":         "API_KEY",
+      "dev":  null,
+      "test": null,
       "sim":  null,
       "prod": null
     }
@@ -1600,8 +1656,10 @@ v12 新增 `POST /api/v1/secrets/list`（与 batchCreate 共用 `secrets` 路由
 ```
 
 **无命中**：
-- `key` 非空：返 1 元素占位（顶层 `key` 字段有值，env 字段全 `null`）；
-- `key` 为空：返空数组 `[]`。
+- `keyList` 非空：按 cleanedKeys 长度返 N 元素占位数组（顶层 `key` 字段为
+  cleanedKeys 中对应 key，env 字段全 `null`）；保证响应 shape 与请求 keyList
+  长度一致，前端按固定下标位访问不会出现错位。
+- `keyList` 为空：返空数组 `[]`。
 
 > 响应里**不**回显请求参数：`projectId` / `folderCode` 是请求入参，不再放进
 > 响应（避免冗余）；`projectCode` 是从 secret 派生出来的标识，保留供前端展示。
@@ -1613,35 +1671,40 @@ v12 新增 `POST /api/v1/secrets/list`（与 batchCreate 共用 `secrets` 路由
 | 维度 | 决策 | 备注 |
 | --- | --- | --- |
 | 端点路径 | `/api/v1/secrets/list`（**复数** secrets，与 batchCreate 同路由组） | 与单条 `/secret/*` 区分 |
-| key 是否必填 | **可选** | key 空时返项目下所有 (folder, key) |
-| folderCode 语义 | key 非空时必填；**key 空时也是有效过滤条件**(非空限定到该 folder) | 二态共享同一 SQL 兜底分支 |
+| keyList 是否必填 | **可选** | keyList 空时返项目下所有 (folder, key) |
+| folderCode 语义 | keyList 非空时必填；**keyList 空时也是有效过滤条件**(非空限定到该 folder) | 二态共享同一 SQL 兜底分支 |
 | envList 必填 | 是 | 1..32 项；不传 400 |
 | 未命中 env | 序列化为 `null` | `*EnvSecretValue` 指针 + 自定义 `MarshalJSON` |
-| 响应形态 | 永远是数组 | 单 key → 1 元素；全量 → N 元素；统一 shape |
+| 响应形态 | 永远是数组 | keyList 长度=1 → 1 元素；keyList 长度=N → N 元素（含占位）；keyList 为空 → 0..N 元素；统一 shape |
 | 权限 | `secret:read`（v12 起） | v7 cascade narrowing 自动收窄；持有 read 即可看明文（无 read 在 SQL 层被收窄掉，不出现 env 字段）；单点 `/secret/reveal` 仍走 `secret:reveal` 保持细粒度 |
 | Audit | 整批 1 条 | `reveal_batch` / `resource_type=project` / `resource_id=projectId`；无命中不写 |
-| 分页 | 无 | 最多命中 envList 长度条，单 key 模式最多 32 条 |
-| Repo SQL | 新加 `ListSecretsByProjectFolderKey` + `ListSecretsInProjectByEnvs(folderCode?)` | 共用 v7 cascade narrowing；folderCode 用 `$5::text = '' or f.code = $5` 兜底 |
+| 分页 | 无 | 最多命中 envList 长度条，keyList 模式最多 32×32 = 1024 条 |
+| Repo SQL | 复用 `ListSecretsByProjectFolderKey`（接收 `keys []string`）+ `ListSecretsInProjectByEnvs(folderCode?)` | 共用 v7 cascade narrowing；folderCode 用 `$5::text = '' or f.code = $5` 兜底；keys 用 `cardinality($5::text[]) > 0 and s.key = any($5::text[])` 过滤 |
 
 #### 不支持的场景
 
 - 跨 project 查询（每条 `projectId` 限定单 project）。
-- 分页（单 key 最多 32 条，全量模式理论无上限；当前未发现需要分页的使用场景，
-  若项目下 (folder, key) 组合过多可后续按 folderCode 二次收敛）。
+- 分页（keyList 模式最多 32 × 32 = 1024 条，全量模式理论无上限；当前未发现
+  需要分页的使用场景，若项目下 (folder, key) 组合过多可后续按 folderCode
+  二次收敛）。
 - 同 (folder, key) 出现多次的「全量」场景去重（service 端按 (folder, key) 分组，
   每组一个 SecretAcrossEnvs）。
 
 #### 风险与权衡
 
-- **新加两条 SQL**：与 `ListSecretsByProjectFolderKey` 单 key 精确分支 +
-  `ListSecretsInProjectByEnvs` 全量分支。两条 SQL 都复用 v7 cascade narrowing，
-  与 `BatchRevealSecretsByPath` 同链路，权限收窄统一。
+- **复用两条 SQL**：`ListSecretsByProjectFolderKey`（keyList 非空分支，接收
+  `keys []string` 用 `s.key = any($5::text[])` 精确匹配）+
+  `ListSecretsInProjectByEnvs`（keyList 为空分支，folderCode 独立过滤）。
+  两条 SQL 都复用 v7 cascade narrowing，与 `BatchRevealSecretsByPath` 同链路，
+  权限收窄统一。
 - **env code 顺序由 Go map 决定**：`SecretAcrossEnvs.Envs` 是 `map[string]*EnvSecretValue`，
   JSON 序列化时字段顺序随机；前端按 key 访问不受影响，但若依赖字段顺序需
   后续改为有序 slice。
 - **顶层 comment 取自第一个命中 env**：`topComment = secrets[0].Comment` 语义
   不够严谨（不同 env 的 comment 可能不同），但符合"一份 key 一份 comment"的
   实际场景；若需要"全 env 共享 comment"可后续扩展为 per-env comment 字段。
+- **keyList 长度上限 32**：service 端在 trim+去重+空过滤后仍超过 32 → 直接
+  返回业务错误；与 envList 上限对齐，保持接口对称。
 - **回退**：handler / writer / repo 方法集中在
   `internal/http/controller/resource_secret.go` +
   `internal/service/secret_service.go` +
@@ -1747,6 +1810,39 @@ x-request-id
 - `pageData` 用反射把 nil slice 转换为同类型的空 slice,保证 `json.Marshal` 出 `[]`
   而非 `null`(Go 的 `encoding/json` 对 nil slice 输出 `null`)。
 - 不允许再使用 `organizations`、`projects`、`secrets` 等按资源类型命名的列表字段，所有分页列表统一使用 `list`。
+
+创建接口响应规范：
+
+- **单条创建**(产生 1 个实体)直接把实体对象放在 `data` 中，不再用 `created` / `item` 等中间字段包装：
+
+  ```json
+  {
+    "code": 0,
+    "msg": "success",
+    "data": {
+      "id": "...",
+      "code": "...",
+      "name": "..."
+    }
+  }
+  ```
+
+- **批量创建**(产生 N 个实体的列表)直接把数组放在 `data` 中，不再用 `created` / `items` / `results` 等中间字段包装；元素顺序与请求里对应的输入列表(如 `envList`)顺序一致：
+
+  ```json
+  {
+    "code": 0,
+    "msg": "success",
+    "data": [
+      { "id": "...", "code": "...", "name": "..." },
+      { "id": "...", "code": "...", "name": "..." }
+    ]
+  }
+  ```
+
+- 历史接口里出现的 `data.created` / `data.items` 等额外包装层一律视为遗留写法，新接口禁止再引入；已有接口在重构窗口中按本规范对齐。
+- 该规范只适用于「创建语义」端点(`/create`、`/batchCreate` 等)。其他端点继续遵循各自的契约:`/list` 走 `PageResp`(`data.list`);`/delete` 走 `data.deleted = true`;`/get` / `/update` 直接 `data` 是单实体。
+- Go 端实现:`response.OK(c, item)` 传单实体或切片即可,不再用 `gin.H{"created": ...}` 二次包装。客户端 SDK 反序列化时,`data` 字段直接对应实体类型或实体切片。
 
 错误响应：
 

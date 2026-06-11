@@ -248,7 +248,9 @@ v9 起，EnvVault 支持本地 email+password 自助注册/登录，端点定义
 3. 整批在 1 个事务里,任一 env 缺失 / `level=2` 的 sibling parent 缺失 / 目标 code 已
    存在 → 整体回滚。
 4. 缓存同步:每个新建 folder 走 `GetFolderContext` 拿全量上下文后 `UpsertFolder`。
-5. 响应:返回 `{ "created": [Entity, ...] }`,按 `envList` 顺序排列。
+5. 响应:`data` 直接是 `[Entity, ...]`,按 `envList` 顺序排列(创建接口响应规范:批量
+   create 直接把列表放在 `data`,不再用 `created`/`items` 等中间字段包装,详见
+   `design/DESIGN.md` 「创建接口响应规范」)。
 
 ### 错误码
 

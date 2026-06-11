@@ -26,7 +26,8 @@ import (
 //   - `level=2` 时 parentCode 必填,后端在每个 env 下用 parentCode 找同 code 的
 //     level=1 sibling parent folder,挂子 folder 于此。
 //
-// 响应形态:始终 `{ "created": [Entity, ...] }`,按 envList 顺序。
+// 响应形态:`data` 直接是 `[Entity, ...]`,按 envList 顺序(创建接口响应规范:
+// 批量产生列表的 create 直接把列表放在 data 中,不再用 created/items 等中间字段)。
 //
 // 注意:folders 表 schema 同时持有 environment_id 和 parent_id 两个字段,
 // 看似冗余,实际语义不重叠(详见 configs/schema.sql 与 CreateFolder 注释):
@@ -109,7 +110,7 @@ func (ctrl *Controller) createFolderBatch(c *gin.Context, req createFolderReques
 			return rc.UpsertFolder(ctx, item, envId, projectId, parentFolderId, level)
 		})
 	}
-	ctrl.write(c, gin.H{"created": created}, nil)
+	ctrl.write(c, created, nil)
 }
 
 // folderListRequest 在 listRequest 基础上加 includeSubfolders 开关,触发后响应

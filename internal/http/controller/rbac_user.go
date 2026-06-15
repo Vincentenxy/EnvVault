@@ -32,13 +32,13 @@ func (ctrl *Controller) ListRBACUsers(c *gin.Context) {
 	if !ctrl.ensureRBAC(c) {
 		return
 	}
-	var req pageScopeRequest
+	var req userListRequest
 	if !ctrl.bind(c, &req) {
 		return
 	}
 	user := auth.UserFromContext(c)
 	pagination := paginationFromRequest(req.PageRequest)
-	result, err := ctrl.rbac.ListUsers(c.Request.Context(), user, req.ScopeType, req.ScopeId, pagination)
+	result, err := ctrl.rbac.ListUsers(c.Request.Context(), user, req.Keyword, pagination)
 	ctrl.write(c, pageData(result.Items, result.Total, pagination), err)
 }
 

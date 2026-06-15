@@ -299,12 +299,12 @@ List / Search 共享 `listScope` helper,FolderId 优先 → folder,否则 Enviro
 | 方法 | permission code | 额外边界 |
 |---|---|---|
 | `ListPermissions` | — | 系统只读,任何已认证 user 都能调 |
-| `ListRoles` | `rbac:role:read` | — |
+| `ListRoles` | 仅 JWT 已认证(v12) | 无 scope 入参、无分页;返回系统所有未删除 role 全集(对齐 `ListPermissions`) |
 | `GetRole` | `rbac:role:read` | global scope(GetRole 不知 caller 的目标 scope) |
 | `CreateRole` | `rbac:role:manage` | ① caller perm 子集 ② global 仅 platform_admin ③ platform_admin 角色仅 platform_admin caller |
 | `UpdateRole` | 同上 | 同上 + system 角色不可改 |
 | `DeleteRole` | `rbac:role:manage` | global scope,system 角色不可删 |
-| `ListUsers` | `rbac:binding:read` | — |
+| `ListUsers` | `rbac:role:manage`(任意 scope 显式持有) | v12 起不接收 scope 入参;可见范围由 store 层 `caller_manage_scopes` CTE 按 caller binding cascade 收窄(global → users 全集;下级 → caller 自己 ∪ 所管 scope 子树有 binding 的用户) |
 | `SyncUser` | — | 任何已认证 user 都能 sync 自己的 user 行 |
 | `ListRoleBindings` | `rbac:binding:read` | — |
 | `ListUserGrants` | `rbac:binding:read` | global scope |
@@ -463,7 +463,7 @@ where t.is_deleted = false
 ### 7. v7 不做的项(留 todo)
 
 - **Audit 收窄**:`ListAuditRecords` 的 `resource_type` 多态(`organization` / `project` / `environment` / `folder` / `secret` / `env_template` 每种 ancestry 不同),SQL 收窄需要 case-by-case join 资源表,工作量大;本期按"by-id 查具体资源"绕过,不收窄。
-- **RBAC 管理端 list 收窄**:`ListRoles` / `ListRoleBindings` / `ListUsers` / `ListUserGrants` 是 RBAC 自身管理界面,语义和数据 list 不同。
+- **RBAC 管理端 list 收窄**:`ListRoleBindings` / `ListUserGrants` 是 RBAC 自身管理界面,语义和数据 list 不同。(`ListUsers` 已在 v12 收窄:`rbac:role:manage` 入口 + `caller_manage_scopes` cascade;`ListRoles` 同期改为 JWT-only 的全集返回,UI 选授权角色用。)
 - **GlobalSearch 收窄**:已经在 controller 层做了 per-hit allowScope(`search.go:106-155`),工作量不大但也属另一条线索。
 - **`SecretCache` 是否保留**:目前 `Search` 不用,但 `ListSecretCacheRecords` 仍被 warm-up 调用;长期看 cache 只在 startup 期间用,后续可考虑移除。
 

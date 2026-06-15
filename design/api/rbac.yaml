@@ -279,6 +279,7 @@ info:
     | `UpdateRole` | 更新后的 `permissions` 字段 | `(scopeType, scopeId)` |
     | `ListRoleBindings` | `["rbac:binding:read"]` | `(scopeType, scopeId)` |
     | `ListUserGrants` | `["rbac:binding:read"]` | `(global, "")` |
+    | `ListUsers` | `["rbac:role:manage"]`(任意 scope 显式持有) | 无 scope 入参,可见范围由 store 层 `caller_manage_scopes` cascade 收窄 |
 
     ---
 
@@ -419,24 +420,22 @@ paths:
           $ref: "#/components/responses/Unauthorized"
 
   /api/v1/rbac/role/list:
-    post:
+    get:
       tags:
         - RBAC Roles
-      summary: List roles in a scope
+      summary: List all roles (no scope, no pagination)
       description: |
-        Caller must have `rbac:role:read` in the requested scope (via the
-        resource-scope ancestor chain: folder → environment → project → organization → global).
-        `platform_admin` is allowed in any scope; non-platform callers are
-        restricted to scopes where they hold the permission.
+        v12 起改为 `GET`,无请求体、无 query 参数。返回系统中所有未删除的 role
+        (含 system + custom)的全集,按 `is_system desc, code asc` 排序。
+
+        权限闸门仅需 JWT 已认证(对齐 `/api/v1/rbac/permission/list`)。角色定义
+        本身不敏感,任何登录用户可拉全集供"选授权角色"等 UI 场景使用。
+
+        响应体 `data` 字段直接是 `Role` 数组(空集合为 `[]` 而非 `null`),
+        不再嵌套 `items` 或 `pageNum / pageSize / total`。每个 role 的
+        `permissions` 字段由 store 层 join `role_permissions` / `permissions`
+        后填充。
       operationId: listRoles
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              allOf:
-                - $ref: "#/components/schemas/ScopeRequest"
-                - $ref: "#/components/schemas/PageRequest"
       responses:
         "200":
           description: Role list.
@@ -448,16 +447,11 @@ paths:
                   - type: object
                     properties:
                       data:
-                        allOf:
-                          - $ref: "#/components/schemas/PageResp"
-                          - type: object
-                            properties:
-                              list:
-                                type: array
-                                items:
-                                  $ref: "#/components/schemas/Role"
-        "403":
-          $ref: "#/components/responses/Forbidden"
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Role"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /api/v1/rbac/role/info:
     post:
@@ -784,7 +778,27 @@ paths:
     post:
       tags:
         - RBAC Users
-      summary: List users visible in a scope
+      summary: List users visible to the caller (no scope input)
+      description: |
+        v12 起本接口不再接收 scope 入参。可见范围完全由 caller 持有的
+        `rbac:role:manage` binding 决定:
+
+          * caller 必须在**任意 scope** 上显式持有 `rbac:role:manage`(不做
+            `*:manage → *:read` 反向覆盖,因为 gate 本身就是 manage),
+            否则 403。内置角色中持有该权限的是 `platform_admin` /
+            `org_owner` / `project_admin` 三类。
+          * 数据可见范围由 store 层基于 `caller_manage_scopes` CTE 收窄:
+            - caller 在 global 持有(platform_admin)→ `users` 全集
+              (LEFT JOIN 语义,包含从未被授过角色的新用户)。
+            - caller 仅在 organization 持有(org_owner)→ caller 自己 ∪
+              该 org 子树(project / env / folder)下有过未删除 binding 的用户。
+            - caller 仅在 project 持有(project_admin)→ caller 自己 ∪
+              该 project 子树(env / folder)下有过未删除 binding 的用户。
+            - caller 自己始终在结果集中(分支 C 兜底)。
+
+        `keyword`(可选,trim 后):非空时按 OR 模糊匹配
+        `users.name` / `external_user_id` / `email` / `id::text`,
+        任一 `ILIKE '%keyword%'` 命中即返回。
       operationId: listRBACUsers
       requestBody:
         required: true
@@ -792,8 +806,16 @@ paths:
           application/json:
             schema:
               allOf:
-                - $ref: "#/components/schemas/ScopeRequest"
                 - $ref: "#/components/schemas/PageRequest"
+                - type: object
+                  properties:
+                    keyword:
+                      type: string
+                      description: |
+                        可选;非空时按 OR 模糊匹配
+                        `name` / `external_user_id` / `email` / `id::text`
+                        (任一 `ILIKE '%keyword%'`)。
+                      example: alice
       responses:
         "200":
           description: User list.

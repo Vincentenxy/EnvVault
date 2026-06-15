@@ -256,7 +256,7 @@ user-1 -> org_viewer -> organization:O2
 | `org_admin` | 组织内资源管理和 Secret 管理，**不包含** `org:delete` / `org:force_delete` / RBAC 角色管理 |
 | `org_viewer` | `org:read`、`project:read`、`env:read`、`folder:read`、`secret:list`、`secret:search`、`secret:read` |
 | `org_auditor` | 组织内资源只读、`audit:read` |
-| `project_admin` | 项目内环境、Folder、Secret 管理，项目内成员绑定管理 |
+| `project_admin` | 项目内环境、Folder、Secret 管理,项目内成员绑定管理(`rbac:binding:read` + `rbac:binding:manage`),以及 `rbac:role:manage`(供 `/api/v1/rbac/user/list` 等 RBAC 管理接口入口校验) |
 | `project_developer` | 项目内 `secret:list`、`secret:search`、`secret:read`、`secret:reveal`、`secret:create`、`secret:update` |
 | `project_viewer` | 项目内资源只读、Secret 元数据只读 |
 | `project_auditor` | 项目内资源只读、`audit:read` |
@@ -654,7 +654,7 @@ v9 起，EnvVault 提供 4 个本地认证端点，承载 email+password 用户�
 
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
-| POST | `/api/v1/rbac/role/list` | `rbac:role:read` | 查看角色列表 |
+| GET | `/api/v1/rbac/role/list` | 已认证(JWT) | 返回所有未删除的 role 全集(含 system + custom),无 scope / 分页入参,响应 `data` 直接是 `Role[]` |
 | POST | `/api/v1/rbac/role/info` | `rbac:role:read` | 查看角色详情 |
 | POST | `/api/v1/rbac/role/create` | `rbac:role:manage` | 创建自定义角色 |
 | POST | `/api/v1/rbac/role/update` | `rbac:role:manage` | 更新自定义角色 |
@@ -748,20 +748,27 @@ v9 起，EnvVault 提供 4 个本地认证端点，承载 email+password 用户�
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
 | POST | `/api/v1/rbac/user/me` | 已认证 | 查看当前用户直接授权清单 |
-| POST | `/api/v1/rbac/user/list` | `rbac:binding:read` | 查看某作用域可见成员 |
+| POST | `/api/v1/rbac/user/list` | `rbac:role:manage`(在任意 scope 显式持有) | 列出 caller 视野内的用户(授权对象选择器),不再接收 scope 入参 |
 | POST | `/api/v1/rbac/user/grants` | `rbac:binding:read` | 查看某用户被直接授予的角色清单 |
 | POST | `/api/v1/rbac/user/permissions` | `rbac:binding:read` | 查看某用户在某作用域下的有效权限 |
 
-用户列表：
+用户列表(v12 起,不再接收 scope 入参):
 
 ```json
 {
-  "scopeType": "organization",
-  "scopeId": "uuid",
+  "keyword": "alice",
   "pageNum": 1,
   "pageSize": 20
 }
 ```
+
+- `keyword`(可选,trim 后):非空时按 OR 模糊匹配 `users.name` / `external_user_id` / `email` / `id::text`(任一 `ILIKE '%keyword%'` 命中即返回)。
+- 入口要求 caller 在**任意 scope** 显式持有 `rbac:role:manage`(不做 `*:manage → *:read` 反向覆盖,因为 gate 本身就是 manage)。当前内置角色中,该权限由 `platform_admin` / `org_owner` / `project_admin` 三类持有。
+- 数据可见范围由 store 层基于 `caller_manage_scopes` CTE 收窄:
+  - **caller 持有 global `rbac:role:manage`(platform_admin)** → 返回 `users` 表全集(LEFT JOIN 语义,包括从未被授过任何角色的新用户)。
+  - **caller 仅在 organization 持有(org_owner)** → 返回 caller 自己 ∪ 该 org 下所有 project / environment / folder 上有过未删除 binding 的用户。
+  - **caller 仅在 project 持有(project_admin)** → 返回 caller 自己 ∪ 该 project 下所有 environment / folder 上有过未删除 binding 的用户。
+  - caller 自己永远在结果集中(分支 C 兜底),即使他的 binding 不在自己所管 scope 子树下。
 
 用户直接授权清单：
 

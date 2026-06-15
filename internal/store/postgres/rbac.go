@@ -234,35 +234,37 @@ func (s *RBACStore) SyncUser(ctx context.Context, userId, name, email string) (U
 	return user, nil
 }
 
-func (s *RBACStore) ListRoles(ctx context.Context, scopeType, scopeId string, pagination Pagination) (domain.PaginatedResult[Role], error) {
-	scopeType = normalizeScopeType(scopeType)
-	query := s.gormDB.WithContext(ctx).Where("is_deleted = false")
-	if scopeType != "" {
-		query = query.Where("scope_type = ? or is_system = true", scopeType)
+// ListRoles 返回所有未删除的 role(含 system + custom),按
+// is_system desc, code asc 排序;每个 role 的 Permissions 字段由
+// rolePermissionCodes 子查询填充。
+//
+// v12 起不接收 scope / 分页参数 —— 任何已登录用户都拉系统级全集,
+// 由 service 入口(仅 JWT)兜底;ListRoles 在 UI 里是"选授权角色"
+// 这种全集场景,不需要按 scope 收窄。
+func (s *RBACStore) ListRoles(ctx context.Context) ([]domain.Role, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(scopeId) != "" {
-		query = query.Where("is_system = true or org_id::text = ? or project_id::text = ?", scopeId, scopeId)
+	if s == nil || s.gormDB == nil {
+		return nil, errors.New("rbac store is not configured")
 	}
-
-	var items []Role
-	var total int64
-	if err := query.Model(&Role{}).Count(&total).Error; err != nil {
-		return domain.PaginatedResult[Role]{}, err
-	}
-	if err := query.Order("is_system desc, code asc").
-		Limit(pagination.Limit()).
-		Offset(pagination.Offset()).
+	// 用 make 初始化保证空结果 marshal 成 `[]` 而非 `null`,
+	// controller 把 items 直接当作 response.data 返回。
+	items := make([]Role, 0)
+	if err := s.gormDB.WithContext(ctx).
+		Where("is_deleted = false").
+		Order("is_system desc, code asc").
 		Find(&items).Error; err != nil {
-		return domain.PaginatedResult[Role]{}, err
+		return nil, err
 	}
 	for i := range items {
 		permissions, err := s.rolePermissionCodes(ctx, items[i].Id)
 		if err != nil {
-			return domain.PaginatedResult[Role]{}, err
+			return nil, err
 		}
 		items[i].Permissions = permissions
 	}
-	return domain.PaginatedResult[Role]{Items: items, Total: total}, nil
+	return items, nil
 }
 
 func (s *RBACStore) GetRole(ctx context.Context, id, code string) (Role, error) {
@@ -660,29 +662,224 @@ func (s *RBACStore) GetUserById(ctx context.Context, userId string) (User, error
 	return user, nil
 }
 
-func (s *RBACStore) ListUsers(ctx context.Context, scopeType, scopeId string, pagination Pagination) (domain.PaginatedResult[User], error) {
-	var items []User
-	baseQuery := s.gormDB.WithContext(ctx).
-		Table("users u").
-		Joins("join user_role_bindings urb on urb.user_id = u.id").
-		Where("urb.is_deleted = false")
-	if normalizeScopeType(scopeType) != "" {
-		baseQuery = baseQuery.Where("urb.scope_type = ?", normalizeScopeType(scopeType))
+// UserHasPermissionAnywhere 检查 caller 在任意 scope 上是否持有 permissionCode
+// 对应的权限(经由任意未删除、未过期的 active binding 拿到对应 role,
+// role 显式拥有 permissionCode)。
+//
+// 仅做"显式持有"判断,不做 *:manage→*:read 覆盖展开;`/api/v1/rbac/user/list`
+// 用 "rbac:role:manage" 把门,要求 caller 必须显式持有该权限。
+func (s *RBACStore) UserHasPermissionAnywhere(ctx context.Context, userId, permissionCode string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
-	if strings.TrimSpace(scopeId) != "" {
-		baseQuery = baseQuery.Where("urb.scope_id = ?::uuid", scopeId)
+	if s == nil || s.db == nil {
+		return false, errors.New("rbac store is not configured")
 	}
-	var total int64
-	if err := baseQuery.Distinct("u.id").Count(&total).Error; err != nil {
+	if strings.TrimSpace(userId) == "" || strings.TrimSpace(permissionCode) == "" {
+		return false, nil
+	}
+	var ok bool
+	err := s.db.QueryRowContext(ctx, `
+select exists (
+  select 1
+  from user_role_bindings urb
+  join roles r             on r.id = urb.role_id and r.is_deleted = false
+  join role_permissions rp on rp.role_id = r.id
+  join permissions p       on p.id = rp.permission_id
+  where urb.user_id = $1
+    and urb.is_deleted = false
+    and (urb.expires_at is null or urb.expires_at > now())
+    and p.code = $2
+)
+`, userId, permissionCode).Scan(&ok)
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
+// ListUsers 列出 caller 视野内的用户,供 RBAC 管理界面(授权对象选择器等)使用。
+//
+// 可见范围:
+//   - caller 在 global 持有 rbac:role:manage(platform_admin)→ 返回 users 表全集
+//     (LEFT JOIN 语义:包含从未被授过角色的用户)
+//   - caller 仅在 organization/project 等下级 scope 持有 rbac:role:manage
+//     (org_owner / project_admin)→ 返回 (caller 自己) ∪ (在 caller 所管 scope
+//     的级联子树内有过未删除 binding 的用户)
+//
+// 入口已由 service 层校验 caller 持有 rbac:role:manage(否则 403),
+// store 层不再做 gate;但 SQL 内部仍以 caller_manage_scopes CTE 为依据收窄数据,
+// caller 没有任何 manage binding 时分支 A/B 都不命中、只返回 caller 自己(分支 C)。
+//
+// keyword(可选,trim 后):非空时按 OR 模糊匹配
+// name / external_user_id / email / id::text(任一 ILIKE '%keyword%')。
+func (s *RBACStore) ListUsers(ctx context.Context, callerId, keyword string, pagination Pagination) (domain.PaginatedResult[User], error) {
+	if err := ctx.Err(); err != nil {
 		return domain.PaginatedResult[User]{}, err
 	}
-	err := baseQuery.
-		Select("distinct u.id, u.external_user_id, u.name, u.email, u.source, u.is_disabled, u.last_seen_at").
-		Order("u.name asc, u.external_user_id asc").
-		Limit(pagination.Limit()).
-		Offset(pagination.Offset()).
-		Find(&items).Error
-	return domain.PaginatedResult[User]{Items: items, Total: total}, err
+	if s == nil || s.db == nil {
+		return domain.PaginatedResult[User]{}, errors.New("rbac store is not configured")
+	}
+	callerId = strings.TrimSpace(callerId)
+	if callerId == "" {
+		return domain.PaginatedResult[User]{}, nil
+	}
+	keyword = strings.TrimSpace(keyword)
+
+	// 共享 CTE:caller 持有 rbac:role:manage 的所有 (scope_type, scope_id) +
+	// 沿组织树展开下级 scope。最后聚合得到 visible_users。
+	//
+	// 设计选择:不用 WITH RECURSIVE。EnvVault 的 scope 层次是固定 4 层
+	// (organization → project → environment → folder),展开起来只需 4 个
+	// UNION 分支,比 RECURSIVE CTE 更直白,也避开 PG 在多分支 RECURSIVE 上
+	// 的 union vs union all 陷阱(`recursive reference ... must not appear
+	// within its non-recursive term`,SQLSTATE 42P19)。
+	//
+	// 注意:schema check 暂不允许 secret scope binding,所以不展开 secret 层。
+	cte := `
+with
+caller_manage_scopes(scope_type, scope_id) as (
+  select distinct urb.scope_type, urb.scope_id
+  from user_role_bindings urb
+  join roles r             on r.id = urb.role_id and r.is_deleted = false
+  join role_permissions rp on rp.role_id = r.id
+  join permissions p       on p.id = rp.permission_id
+  where urb.user_id = $1
+    and urb.is_deleted = false
+    and (urb.expires_at is null or urb.expires_at > now())
+    and p.code = 'rbac:role:manage'
+),
+visible_scopes(scope_type, scope_id) as (
+  -- L0:caller 直接持有的 scope(global / organization / project / environment / folder)
+  select scope_type, scope_id from caller_manage_scopes
+
+  union
+
+  -- L1:caller 持有 organization → 该 org 下所有 project
+  select 'project'::text, p.id
+  from projects p
+  join caller_manage_scopes cms
+    on cms.scope_type = 'organization' and p.org_id = cms.scope_id
+  where p.is_deleted = false
+
+  union
+
+  -- L2.a:caller 持有 organization → 该 org 下所有 environment(through project)
+  select 'environment'::text, e.id
+  from environments e
+  join projects p on p.id = e.project_id and p.is_deleted = false
+  join caller_manage_scopes cms
+    on cms.scope_type = 'organization' and p.org_id = cms.scope_id
+  where e.is_deleted = false
+
+  union
+
+  -- L2.b:caller 持有 project → 该 project 下所有 environment
+  select 'environment'::text, e.id
+  from environments e
+  join caller_manage_scopes cms
+    on cms.scope_type = 'project' and e.project_id = cms.scope_id
+  where e.is_deleted = false
+
+  union
+
+  -- L3.a:caller 持有 organization → 该 org 下所有 folder(through project / env)
+  select 'folder'::text, f.id
+  from folders f
+  join environments e on e.id = f.environment_id and e.is_deleted = false
+  join projects p     on p.id = e.project_id and p.is_deleted = false
+  join caller_manage_scopes cms
+    on cms.scope_type = 'organization' and p.org_id = cms.scope_id
+  where f.is_deleted = false
+
+  union
+
+  -- L3.b:caller 持有 project → 该 project 下所有 folder(through env)
+  select 'folder'::text, f.id
+  from folders f
+  join environments e on e.id = f.environment_id and e.is_deleted = false
+  join caller_manage_scopes cms
+    on cms.scope_type = 'project' and e.project_id = cms.scope_id
+  where f.is_deleted = false
+
+  union
+
+  -- L3.c:caller 持有 environment → 该 env 下所有 folder
+  select 'folder'::text, f.id
+  from folders f
+  join caller_manage_scopes cms
+    on cms.scope_type = 'environment' and f.environment_id = cms.scope_id
+  where f.is_deleted = false
+),
+has_global as (
+  select 1 from caller_manage_scopes where scope_type = 'global'
+),
+visible_users as (
+  -- A. caller 持有 global rbac:role:manage(platform_admin):users 全集
+  select u.* from users u
+  where exists (select 1 from has_global)
+
+  union
+
+  -- B. caller 仅在下级 scope 有 manage:在 visible_scopes 内有 binding 的用户
+  select u.* from users u
+  where not exists (select 1 from has_global)
+    and exists (
+      select 1 from user_role_bindings urb
+      where urb.user_id = u.id
+        and urb.is_deleted = false
+        and exists (
+          select 1 from visible_scopes vs
+          where (vs.scope_type = 'global' and urb.scope_type = 'global' and urb.scope_id is null)
+             or (urb.scope_type = vs.scope_type and urb.scope_id = vs.scope_id)
+        )
+    )
+
+  union
+
+  -- C. caller 自己永远可见
+  select u.* from users u where u.id = $1
+)
+`
+	// keyword 过滤:空字符串时短路通过(避免 ILIKE 全表扫描),非空时按 OR 模糊匹配。
+	whereKeyword := `($2 = '' or
+   u.name             ilike '%' || $2 || '%' or
+   u.external_user_id ilike '%' || $2 || '%' or
+   u.email            ilike '%' || $2 || '%' or
+   u.id::text         ilike '%' || $2 || '%')`
+
+	var total int64
+	if err := s.db.QueryRowContext(ctx, cte+`
+select count(*) from visible_users u where `+whereKeyword,
+		callerId, keyword,
+	).Scan(&total); err != nil {
+		return domain.PaginatedResult[User]{}, err
+	}
+
+	rows, err := s.db.QueryContext(ctx, cte+`
+select u.id, u.external_user_id, u.name, u.email, u.source, u.is_disabled, u.last_seen_at
+from visible_users u
+where `+whereKeyword+`
+order by u.name asc, u.external_user_id asc
+limit $3 offset $4
+`, callerId, keyword, pagination.Limit(), pagination.Offset())
+	if err != nil {
+		return domain.PaginatedResult[User]{}, err
+	}
+	defer rows.Close()
+
+	items := make([]User, 0)
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.Id, &u.ExternalUserId, &u.Name, &u.Email, &u.Source, &u.IsDisabled, &u.LastSeenAt); err != nil {
+			return domain.PaginatedResult[User]{}, err
+		}
+		items = append(items, u)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.PaginatedResult[User]{}, err
+	}
+	return domain.PaginatedResult[User]{Items: items, Total: total}, nil
 }
 
 func (s *RBACStore) ListUserGrants(ctx context.Context, userId string, pagination Pagination) (domain.PaginatedResult[RoleBinding], error) {
@@ -1267,7 +1464,7 @@ func defaultRoles() []systemRole {
 		{Code: "org_admin", Name: "Organization Admin", ScopeType: "organization", Permissions: []string{"org:read", "org:update", "project:create", "project:read", "project:update", "project:delete", "env:create", "env:read", "env:update", "env:delete", "folder:create", "folder:read", "folder:update", "folder:delete", "secret:list", "secret:search", "secret:read", "secret:reveal", "secret:create", "secret:update", "secret:delete", "audit:read"}},
 		{Code: "org_viewer", Name: "Organization Viewer", ScopeType: "organization", Permissions: resourceRead},
 		{Code: "org_auditor", Name: "Organization Auditor", ScopeType: "organization", Permissions: auditRead},
-		{Code: "project_admin", Name: "Project Admin", ScopeType: "project", Permissions: []string{"project:read", "project:update", "env:create", "env:read", "env:update", "env:delete", "folder:create", "folder:read", "folder:update", "folder:delete", "secret:list", "secret:search", "secret:read", "secret:reveal", "secret:create", "secret:update", "secret:delete", "rbac:binding:read", "rbac:binding:manage", "audit:read"}},
+		{Code: "project_admin", Name: "Project Admin", ScopeType: "project", Permissions: []string{"project:read", "project:update", "env:create", "env:read", "env:update", "env:delete", "folder:create", "folder:read", "folder:update", "folder:delete", "secret:list", "secret:search", "secret:read", "secret:reveal", "secret:create", "secret:update", "secret:delete", "rbac:role:manage", "rbac:binding:read", "rbac:binding:manage", "audit:read"}},
 		{Code: "project_developer", Name: "Project Developer", ScopeType: "project", Permissions: []string{"project:read", "env:read", "folder:read", "secret:list", "secret:search", "secret:read", "secret:reveal", "secret:create", "secret:update"}},
 		{Code: "project_viewer", Name: "Project Viewer", ScopeType: "project", Permissions: []string{"project:read", "env:read", "folder:read", "secret:list", "secret:search", "secret:read"}},
 		{Code: "project_auditor", Name: "Project Auditor", ScopeType: "project", Permissions: []string{"project:read", "env:read", "folder:read", "secret:list", "secret:read", "audit:read"}},

@@ -28,6 +28,21 @@ type pageScopeRequest struct {
 	ScopeId   string `json:"scopeId"`
 }
 
+// userListRequest 是 /api/v1/rbac/user/list 的请求体。
+//
+// 入参语义(v12):接口不再接收 scope 字段(原 pageScopeRequest 中的 scopeType / scopeId
+// 已废弃)。可见范围完全由 caller 在 user_role_bindings 上的 rbac:role:manage 持有
+// 情况决定(由 service / store 层 cascade 计算)。
+//
+// 字段:
+//   - PageRequest:pageNum / pageSize。
+//   - Keyword:可选,trim 后非空时按 OR 模糊匹配 users.name / external_user_id /
+//     email / id::text(任一 ILIKE '%keyword%')。
+type userListRequest struct {
+	PageRequest
+	Keyword string `json:"keyword"`
+}
+
 type roleInfoRequest struct {
 	Id   string `json:"id"`
 	Code string `json:"code"`

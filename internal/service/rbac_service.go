@@ -29,14 +29,21 @@ type RBACService interface {
 	ListPermissions(ctx context.Context) ([]domain.Permission, error)
 
 	// Role
-	ListRoles(ctx context.Context, user auth.UserInfo, scopeType, scopeId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Role], error)
+	// ListRoles 返回系统中所有未删除的角色(含 system 与 custom)。
+	// v12 起入口仅需 JWT 已认证(对齐 ListPermissions),角色定义本身不敏感。
+	ListRoles(ctx context.Context) ([]domain.Role, error)
 	GetRole(ctx context.Context, user auth.UserInfo, id, code string) (domain.Role, error)
 	CreateRole(ctx context.Context, user auth.UserInfo, code, name, description, scopeType, scopeId string, permissions []string, actor string) (domain.Role, error)
 	UpdateRole(ctx context.Context, user auth.UserInfo, id, code, name, description, scopeType, scopeId string, permissions []string, actor string) (domain.Role, error)
 	DeleteRole(ctx context.Context, user auth.UserInfo, id, actor string) error
 
 	// User
-	ListUsers(ctx context.Context, user auth.UserInfo, scopeType, scopeId string, pagination domain.Pagination) (domain.PaginatedResult[domain.User], error)
+	// ListUsers 列出 caller 视野内的用户(供 RBAC 管理界面授权对象选择器使用)。
+	// 接口要求 caller 显式持有 rbac:role:manage(在任意 scope 上),否则 403;
+	// 可见范围由 store 层基于 caller_manage_scopes cascade 收窄(global → users 全集,
+	// 下级 scope → caller 自己 ∪ 所管 scope 子树内有过 binding 的用户)。
+	// keyword(可选):非空时按 OR 模糊匹配 name / external_user_id / email / id::text。
+	ListUsers(ctx context.Context, user auth.UserInfo, keyword string, pagination domain.Pagination) (domain.PaginatedResult[domain.User], error)
 	// SyncUser 由 GetCurrentRBACUser 触发,仅要求 caller 已认证(JWT 校验过),
 	// 不要求特定权限。user 参数用于「caller 是谁」语义对齐。
 	SyncUser(ctx context.Context, user auth.UserInfo, userId, name, email string) (domain.User, error)
@@ -324,11 +331,10 @@ func (s *rbacService) ListPermissions(ctx context.Context) ([]domain.Permission,
 	return s.repo.ListPermissions(ctx)
 }
 
-func (s *rbacService) ListRoles(ctx context.Context, user auth.UserInfo, scopeType, scopeId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Role], error) {
-	if err := s.authorizer.Allow(ctx, user, "rbac:role:read", authzResource(scopeType, scopeId)); err != nil {
-		return domain.PaginatedResult[domain.Role]{}, err
-	}
-	return s.repo.ListRoles(ctx, scopeType, scopeId, pagination)
+func (s *rbacService) ListRoles(ctx context.Context) ([]domain.Role, error) {
+	// v12:无 scope 入参、无分页;权限仅 JWT 已认证(对齐 ListPermissions)。
+	// 角色定义本身不敏感,任何登录用户可拉全集供 UI 选授权角色等场景。
+	return s.repo.ListRoles(ctx)
 }
 
 func (s *rbacService) GetRole(ctx context.Context, user auth.UserInfo, id, code string) (domain.Role, error) {
@@ -389,11 +395,21 @@ func (s *rbacService) DeleteRole(ctx context.Context, user auth.UserInfo, id, ac
 	return s.repo.DeleteRole(ctx, id, actor)
 }
 
-func (s *rbacService) ListUsers(ctx context.Context, user auth.UserInfo, scopeType, scopeId string, pagination domain.Pagination) (domain.PaginatedResult[domain.User], error) {
-	if err := s.authorizer.Allow(ctx, user, "rbac:binding:read", authzResource(scopeType, scopeId)); err != nil {
+func (s *rbacService) ListUsers(ctx context.Context, user auth.UserInfo, keyword string, pagination domain.Pagination) (domain.PaginatedResult[domain.User], error) {
+	// gate:caller 必须在任意 scope 显式持有 rbac:role:manage(platform_admin /
+	// org_owner / project_admin 三类)。不做 *:manage→*:read 反向覆盖。
+	// 具体可见范围由 store 层 CTE 收窄(见 RBACStore.ListUsers)。
+	if strings.TrimSpace(user.UserId) == "" {
+		return domain.PaginatedResult[domain.User]{}, auth.ErrPermissionDenied
+	}
+	hasManage, err := s.repo.UserHasPermissionAnywhere(ctx, user.UserId, "rbac:role:manage")
+	if err != nil {
 		return domain.PaginatedResult[domain.User]{}, err
 	}
-	return s.repo.ListUsers(ctx, scopeType, scopeId, pagination)
+	if !hasManage {
+		return domain.PaginatedResult[domain.User]{}, fmt.Errorf("%w: caller lacks rbac:role:manage in any scope", auth.ErrPermissionDenied)
+	}
+	return s.repo.ListUsers(ctx, user.UserId, keyword, pagination)
 }
 
 func (s *rbacService) SyncUser(ctx context.Context, user auth.UserInfo, userId, name, email string) (domain.User, error) {

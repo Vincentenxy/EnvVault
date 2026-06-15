@@ -1080,7 +1080,7 @@ where t.is_deleted = false
 ### 不在本轮范围
 
 - **Audit 收窄**：`ListAuditRecords` 的 `resource_type` 多态（每种 ancestry 不同），SQL 收窄需 case-by-case join；本期按"by-id 查具体资源"绕过，不收窄。
-- **RBAC 管理端 list 收窄**：`ListRoles` / `ListRoleBindings` / `ListUsers` / `ListUserGrants` 是 RBAC 自身管理界面，语义和数据 list 不同。
+- **RBAC 管理端 list 收窄**：`ListRoleBindings` / `ListUserGrants` 是 RBAC 自身管理界面，语义和数据 list 不同。（`ListUsers` 已在 v12 收窄：`rbac:role:manage` 入口 + `caller_manage_scopes` cascade，详见 `internal/store/postgres/rbac.go` 的 `ListUsers` / `UserHasPermissionAnywhere`；`ListRoles` 同期改为 JWT-only 的全集返回，UI 选授权角色用。）
 - **GlobalSearch 收窄**：已在 controller 层做 per-hit allowScope（`search.go:106-155`），也属另一条线索，留下一轮。
 
 ### 影响范围

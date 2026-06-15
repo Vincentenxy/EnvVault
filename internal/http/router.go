@@ -182,7 +182,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 
 					role := rbac.Group("/role")
 					{
-						role.POST("/list", ctrl.ListRoles)
+						role.GET("/list", ctrl.ListRoles)
 						role.POST("/info", ctrl.GetRole)
 						role.POST("/create", ctrl.CreateRole)
 						role.POST("/update", ctrl.UpdateRole)

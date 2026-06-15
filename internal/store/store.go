@@ -177,14 +177,29 @@ type RBACRepository interface {
 	ListPermissions(ctx context.Context) ([]domain.Permission, error)
 
 	// Role
-	ListRoles(ctx context.Context, scopeType, scopeId string, pagination domain.Pagination) (domain.PaginatedResult[domain.Role], error)
+	// ListRoles 返回所有未删除的 role(含 system + custom),按
+	// is_system desc, code asc 排序;每个 role 的 Permissions 字段由 store
+	// 层 join role_permissions / permissions 后填充。v12 起不分页、不收 scope。
+	ListRoles(ctx context.Context) ([]domain.Role, error)
 	GetRole(ctx context.Context, id, code string) (domain.Role, error)
 	CreateRole(ctx context.Context, code, name, description, scopeType, scopeId string, permissions []string, actor string) (domain.Role, error)
 	UpdateRole(ctx context.Context, id, code, name, description, scopeType, scopeId string, permissions []string, actor string) (domain.Role, error)
 	DeleteRole(ctx context.Context, id, actor string) error
 
 	// User
-	ListUsers(ctx context.Context, scopeType, scopeId string, pagination domain.Pagination) (domain.PaginatedResult[domain.User], error)
+	// ListUsers 列出 caller 视野内的用户(供 RBAC 管理界面授权对象选择器使用)。
+	// service 层入口校验 caller 持有 rbac:role:manage,否则 403;具体可见范围由
+	// store 层基于 caller_manage_scopes CTE 收窄:
+	//   - caller 持有 global rbac:role:manage(platform_admin)→ users 全集;
+	//   - caller 仅在下级 scope(org_owner / project_admin)→ caller 自己 ∪
+	//     在 caller 所管 scope 级联子树内有过 binding 的用户。
+	// keyword(可选,trim 后):非空时按 OR 模糊匹配
+	// name / external_user_id / email / id::text(任一 ILIKE '%keyword%')。
+	ListUsers(ctx context.Context, callerId, keyword string, pagination domain.Pagination) (domain.PaginatedResult[domain.User], error)
+	// UserHasPermissionAnywhere 判定 userId 是否在任意未删除、未过期的 binding
+	// 上通过 role → role_permissions → permissions 显式持有 permissionCode。
+	// 不做 *:manage→*:read 覆盖展开。用于 ListUsers 入口 gate。
+	UserHasPermissionAnywhere(ctx context.Context, userId, permissionCode string) (bool, error)
 	SyncUser(ctx context.Context, userId, name, email string) (domain.User, error)
 
 	// Role binding

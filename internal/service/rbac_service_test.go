@@ -163,11 +163,16 @@ func (s *stubRBACRepo) EnsureBootstrapAdmin(_ context.Context, _, _ string) erro
 func (s *stubRBACRepo) ListPermissions(_ context.Context) ([]domain.Permission, error) {
 	return nil, nil
 }
-func (s *stubRBACRepo) ListRoles(_ context.Context, _, _ string, _ domain.Pagination) (domain.PaginatedResult[domain.Role], error) {
-	return domain.PaginatedResult[domain.Role]{}, nil
+func (s *stubRBACRepo) ListRoles(_ context.Context) ([]domain.Role, error) {
+	return nil, nil
 }
 func (s *stubRBACRepo) ListUsers(_ context.Context, _, _ string, _ domain.Pagination) (domain.PaginatedResult[domain.User], error) {
 	return domain.PaginatedResult[domain.User]{}, nil
+}
+func (s *stubRBACRepo) UserHasPermissionAnywhere(_ context.Context, _, _ string) (bool, error) {
+	// stub:默认返回 true,让 ListUsers gate 在测试里通过。
+	// 如需测 gate 失败路径,加字段或直接换一个 fake。
+	return true, nil
 }
 func (s *stubRBACRepo) SyncUser(_ context.Context, _, _, _ string) (domain.User, error) {
 	return domain.User{}, nil

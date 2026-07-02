@@ -154,6 +154,11 @@ type ResourceRepository interface {
 	// cascade narrowing 用 caller 传入的 action(secret:reveal)。
 	ListSecretsInProjectByEnvs(ctx context.Context, callerUserId, action, projectId, folderCode string, envCodes []string) ([]domain.Secret, [][]byte, error)
 	UpdateSecret(ctx context.Context, id, key, comment, actor string, ciphertext domain.SecretCiphertext) (domain.Secret, error)
+	// BatchUpdateSecrets 在单事务里完成 N 条 UPDATE + 1 条 batch audit,
+	// 全成功 commit;任一条 UPDATE 失败(secret 不存在等)→ 整批 rollback,
+	// 错误透传。每条 UPDATE 单独 RETURNING id,commit 后用 r.GetSecret 拿完整 metadata。
+	// 输入 items 长度应等于 N,顺序与输出 secrets 一致。
+	BatchUpdateSecrets(ctx context.Context, items []BatchUpdateSecretItem) ([]domain.Secret, error)
 	DeleteSecret(ctx context.Context, id, actor string) error
 	ListSecretCacheRecords(ctx context.Context) ([]domain.SecretCacheRecord, error)
 
@@ -229,6 +234,16 @@ type SecretCache interface {
 // 顺序与 BatchCreateSecrets 返回的 []Secret 一一对应。
 type BatchCreateSecretItem struct {
 	FolderId   string
+	Key        string
+	Comment    string
+	Actor      string
+	Ciphertext domain.SecretCiphertext
+}
+
+// BatchUpdateSecretItem 是 ResourceRepository.BatchUpdateSecrets 的输入单元:
+// 一条待更新 secret 的全部信息(id/key/comment/actor + 已加密 ciphertext)。
+type BatchUpdateSecretItem struct {
+	Id         string
 	Key        string
 	Comment    string
 	Actor      string

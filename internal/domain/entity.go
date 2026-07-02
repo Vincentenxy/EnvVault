@@ -107,6 +107,7 @@ type Secret struct {
 	Values          map[string]string `json:"values,omitempty"`
 	Comment         string            `json:"comment,omitempty"`
 	Version         int               `json:"version"`
+	SortOrder       int               `json:"sortOrder,omitempty"`
 	CreatedBy       string            `json:"createdBy"`
 	CreatedByLabel  string            `json:"createdByLabel"`
 	UpdatedBy       string            `json:"updatedBy"`

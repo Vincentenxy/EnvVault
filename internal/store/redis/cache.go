@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	goredis "github.com/go-redis/redis/v8"
+	goredis "github.com/redis/go-redis/v9"
 
 	"envVault/internal/config"
 	secretcrypto "envVault/internal/crypto"
@@ -460,7 +460,7 @@ func (c *Cache) scanType(ctx context.Context, t resourceType, cb func(map[string
 		return nil
 	}
 	pipe := c.client.Pipeline()
-	cmds := make([]*goredis.StringStringMapCmd, len(ids))
+	cmds := make([]*goredis.MapStringStringCmd, len(ids))
 	for i, id := range ids {
 		cmds[i] = pipe.HGetAll(ctx, c.typeKey(t, id))
 	}
@@ -718,7 +718,7 @@ func (c *Cache) searchType(ctx context.Context, t resourceType, keywordLower str
 
 	// Pipeline 一次性拉所有 hash,1 次 round-trip
 	pipe := c.client.Pipeline()
-	cmds := make([]*goredis.StringStringMapCmd, len(ids))
+	cmds := make([]*goredis.MapStringStringCmd, len(ids))
 	for i, id := range ids {
 		cmds[i] = pipe.HGetAll(ctx, c.typeKey(t, id))
 	}

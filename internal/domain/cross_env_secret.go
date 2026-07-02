@@ -12,6 +12,8 @@ type EnvSecretValue struct {
 	Value     string    `json:"value"`
 	Version   int       `json:"version"`
 	Comment   string    `json:"comment,omitempty"`
+	Id        string    `json:"id"`
+	SortOrder int       `json:"sortOrder"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 

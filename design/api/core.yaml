@@ -1092,6 +1092,128 @@ paths:
               schema:
                 $ref: "#/components/schemas/Response"
 
+  /api/v1/folder/batchUpdate:
+    post:
+      tags: [Folders]
+      summary: Batch update folders (name and comment)
+      description: |
+        Batch-updates `name` and `comment` for multiple folders sharing the same
+        `code`. This is useful when the same logical folder (e.g. "globals")
+        exists across multiple environments and you want to rename it in one call.
+
+        **Constraints**:
+          - `idList` must contain at least 1 and at most 100 folder IDs.
+          - All folders in `idList` must share the same `code` (enforced server-side).
+          - `code` itself is **not** modifiable — it is only used for consistency
+            validation. If provided, all folders must have this code; if omitted,
+            the server derives the expected code from the first folder.
+          - Only `name` and `comment` are updated (same as single-folder update).
+          - Each folder requires `folder:update` permission (checked individually).
+
+        **Cache**: after a successful update, the Redis tree cache is refreshed
+        for each updated folder.
+
+        **Error codes**:
+          - `-1`: `idList` empty or missing
+          - `1002`: invalid UUID in `idList`, or `idList` exceeds 100 items
+          - `1404`: any folder in `idList` not found
+          - `1403`: caller lacks `folder:update` on any folder
+          - `-1`: code mismatch among folders in `idList`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchUpdateFolderRequest"
+            examples:
+              renameGlobals:
+                summary: "Rename 'globals' folder across 3 envs"
+                value:
+                  idList:
+                    - "22222222-2222-2222-2222-222222222222"
+                    - "22222222-2222-2222-2222-222222222223"
+                    - "22222222-2222-2222-2222-222222222224"
+                  code: "globals"
+                  name: "Global Config"
+                  comment: "Updated global configuration folder"
+      responses:
+        "200":
+          description: |
+            Returns the updated folder entities in the same order as `idList`.
+            Each entity includes `id`, `code`, `name`, `comment`, `environmentId`,
+            `parentId`, `level`, `createdBy`, `createdAt`, `updatedBy`, `updatedAt`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Response"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Entity"
+              examples:
+                success:
+                  summary: "3 folders updated"
+                  value:
+                    code: 0
+                    msg: success
+                    data:
+                      - id: "22222222-2222-2222-2222-222222222222"
+                        code: globals
+                        name: Global Config
+                        comment: Updated global configuration folder
+                        environmentId: "33333333-3333-3333-3333-333333333331"
+                        parentId: ""
+                        level: 1
+                        createdBy: "00000000-0000-0000-0000-000000000001"
+                        createdAt: "2025-06-01T10:00:00Z"
+                        updatedBy: "00000000-0000-0000-0000-000000000001"
+                        updatedAt: "2025-06-15T12:00:00Z"
+                      - id: "22222222-2222-2222-2222-222222222223"
+                        code: globals
+                        name: Global Config
+                        comment: Updated global configuration folder
+                        environmentId: "33333333-3333-3333-3333-333333333332"
+                        parentId: ""
+                        level: 1
+                        createdBy: "00000000-0000-0000-0000-000000000001"
+                        createdAt: "2025-06-01T10:00:00Z"
+                        updatedBy: "00000000-0000-0000-0000-000000000001"
+                        updatedAt: "2025-06-15T12:00:00Z"
+                      - id: "22222222-2222-2222-2222-222222222224"
+                        code: globals
+                        name: Global Config
+                        comment: Updated global configuration folder
+                        environmentId: "33333333-3333-3333-3333-333333333333"
+                        parentId: ""
+                        level: 1
+                        createdBy: "00000000-0000-0000-0000-000000000001"
+                        createdAt: "2025-06-01T10:00:00Z"
+                        updatedBy: "00000000-0000-0000-0000-000000000001"
+                        updatedAt: "2025-06-15T12:00:00Z"
+        "400":
+          description: "Invalid request (empty idList, invalid UUID, idList > 100, code mismatch)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "Caller lacks `folder:update` on one or more folders."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
+        "404":
+          description: "One or more folders in `idList` not found."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
+
   /api/v1/secret/list:
     post:
       tags: [Secrets]
@@ -2741,7 +2863,7 @@ components:
     EnvSecretValue:
       type: object
       description: Per-env secret value within a `SecretAcrossEnvs` group.
-      required: [folderId, value, version, updatedAt]
+      required: [folderId, value, version, id, sortOrder, updatedAt]
       properties:
         folderId:
           type: string
@@ -2754,6 +2876,13 @@ components:
           type: integer
         comment:
           type: string
+        id:
+          type: string
+          format: uuid
+          description: The secret id.
+        sortOrder:
+          type: integer
+          description: Environment sort order for consistent ordering.
         updatedAt:
           type: string
           format: date-time
@@ -3237,6 +3366,42 @@ components:
             server-side; if the caller has no `folder:read` grants under
             the project, `data.folderList` will be empty.
           example: "11111111-1111-1111-1111-111111111111"
+
+    BatchUpdateFolderRequest:
+      type: object
+      description: |
+        Request body for `POST /api/v1/folder/batchUpdate`. Batch-updates
+        `name` and `comment` for multiple folders sharing the same `code`.
+      required: [idList, name]
+      properties:
+        idList:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: |
+            Folder IDs to update. All must share the same `code`. At least 1,
+            at most 100. Duplicates are de-duplicated server-side.
+          items:
+            type: string
+            format: uuid
+          example:
+            - "22222222-2222-2222-2222-222222222222"
+            - "22222222-2222-2222-2222-222222222223"
+        code:
+          type: string
+          description: |
+            Optional consistency check. If provided, all folders in `idList`
+            must have this code. If omitted, the server derives the expected
+            code from the first folder. The `code` itself is never modified.
+          example: globals
+        name:
+          type: string
+          description: New name for all folders in `idList`.
+          example: Global Config
+        comment:
+          type: string
+          description: New comment for all folders in `idList`.
+          example: Updated global configuration folder
 
     ProjectFolderTree:
       type: object

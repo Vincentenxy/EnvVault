@@ -1123,6 +1123,9 @@ func (r *recordingRepo) UpdateSecret(context.Context, string, string, string, st
 func (r *recordingRepo) DeleteSecret(context.Context, string, string) error {
 	panic("not implemented")
 }
+func (r *recordingRepo) BatchUpdateSecrets(_ context.Context, items []store.BatchUpdateSecretItem) ([]domain.Secret, error) {
+	panic("not implemented")
+}
 func (r *recordingRepo) ListSecretCacheRecords(context.Context) ([]domain.SecretCacheRecord, error) {
 	panic("not implemented")
 }

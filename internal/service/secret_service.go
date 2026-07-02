@@ -64,6 +64,16 @@ type SecretService interface {
 	//   - 其他 err:走通用 err.Error() 描述
 	BatchCreate(ctx context.Context, user auth.UserInfo, req BatchCreateRequest, actor string) error
 
+	// BatchUpdate 批量更新 secret。接收 secretList,每条 item 含 (id, key, value, comment)。
+	// 服务端逐条做 secret:update 权限 check + 加密,单事务 N 条 UPDATE + 1 条
+	// batch audit,任一阶段失败整批 rollback。
+	//
+	// 业务错误以 sentinel 形式返出(controller 统一翻译为 HTTP 200 + body code=-1):
+	//   - auth.ErrPermissionDenied:任一 secret 缺 secret:update
+	//   - domain.ErrNotFound:任一 secret 不存在
+	//   - 其他 err:走通用 err.Error() 描述
+	BatchUpdate(ctx context.Context, user auth.UserInfo, req BatchUpdateRequest, actor string) error
+
 	List(ctx context.Context, user auth.UserInfo, filter domain.ListFilter, pagination domain.Pagination) (domain.PaginatedResult[domain.Secret], error)
 	// Search returns secret hits in scope-defined shape:
 	//   - filter.ProjectId != "" → items 元素为 *domain.SecretGroup(按 folder,key 聚合,
@@ -115,6 +125,24 @@ type BatchCreateEnvTarget struct {
 	EnvCode  string
 	FolderId string
 	Value    string
+}
+
+// BatchUpdateRequest 是 SecretService.BatchUpdate 的入参。
+type BatchUpdateRequest struct {
+	SecretList []BatchUpdateSecretSpec
+}
+
+// BatchUpdateSecretSpec 单条 secret 的批量更新规格:
+//
+//	Id      string  // secret id
+//	Key     string
+//	Value   string
+//	Comment string
+type BatchUpdateSecretSpec struct {
+	Id      string
+	Key     string
+	Value   string
+	Comment string
 }
 
 // secretServiceKeyPattern 与 controller 端 secretKeyPattern 同源;service 入口做防御性二次校验,
@@ -565,6 +593,8 @@ func (s *secretService) ListAcrossEnvs(
 			Value:     plaintext,
 			Version:   secret.Version,
 			Comment:   secret.Comment,
+			Id:        secret.Id,
+			SortOrder: secret.SortOrder,
 			UpdatedAt: secret.UpdatedAt,
 		}
 	}
@@ -737,6 +767,89 @@ func (s *secretService) BatchCreate(ctx context.Context, user auth.UserInfo, req
 	// 5. 同步 cache:targets 顺序与 created 顺序一致,逐对 upsert。
 	for i, t := range targets {
 		s.cacheUpsert(ctx, created[i], t.ciphertext)
+	}
+	return nil
+}
+
+// BatchUpdate 编排流程:
+//
+//  1. 空 user.UserId → auth.ErrPermissionDenied(controller 翻译为权限不足)
+//  2. 入参防御性二次校验(secretList 非空、每条 id 非空、每条 key 合法)
+//  3. 对每条 target 做 secret:update 权限 check(走 v7 cascade narrowing)。
+//     任一权限不足 → 整批拒绝,不写库。
+//  4. 对每条 target 加密 value;
+//  5. 调 repo.BatchUpdateSecrets 单事务批量 UPDATE + 1 条 batch audit;
+//     secret 不存在由 translatePgErr 翻译为 domain.ErrNotFound 透传;
+//  6. commit 后逐条 cacheUpsert(同 Update);
+//
+// 所有错误一律以 err 形式返出(controller 统一翻译为 HTTP 200 + body code=-1 +
+// msg 描述);成功时只返 nil。
+func (s *secretService) BatchUpdate(ctx context.Context, user auth.UserInfo, req BatchUpdateRequest, actor string) error {
+	if strings.TrimSpace(user.UserId) == "" {
+		return auth.ErrPermissionDenied
+	}
+	// 1. 入参防御性二次校验(controller 已做,这里兜底直调 service 的场景)。
+	if len(req.SecretList) == 0 {
+		return errors.New("secretList 不能为空")
+	}
+	for i, item := range req.SecretList {
+		if strings.TrimSpace(item.Id) == "" {
+			return fmt.Errorf("secretList[%d].id 不能为空", i)
+		}
+		if !secretServiceKeyPattern.MatchString(item.Key) {
+			return fmt.Errorf("secretList[%d].key 格式错误,必须匹配 ^[A-Z][A-Z0-9_]*$", i)
+		}
+	}
+
+	// 2. 展开为有序的 (id, key, value, comment) target 列表,同时加密 value。
+	type target struct {
+		id         string
+		key        string
+		comment    string
+		ciphertext domain.SecretCiphertext
+	}
+	targets := make([]target, 0, len(req.SecretList))
+	for _, item := range req.SecretList {
+		ct, err := s.encrypt(ctx, item.Value)
+		if err != nil {
+			return err
+		}
+		targets = append(targets, target{
+			id:         item.Id,
+			key:        item.Key,
+			comment:    item.Comment,
+			ciphertext: ct,
+		})
+	}
+
+	// 3. 权限 check:对每个 target secret 单独 secret:update 判定。
+	// 任一缺失即整批拒绝(严控,避免半写库)。
+	for _, t := range targets {
+		if err := s.authorizer.Allow(ctx, user, "secret:update", secretSecretScope(t.id)); err != nil {
+			return fmt.Errorf("对 secret %s 没有 secret:update 权限: %w", t.id, err)
+		}
+	}
+
+	// 4. 构造 store 输入,调 repo.BatchUpdateSecrets。
+	items := make([]store.BatchUpdateSecretItem, 0, len(targets))
+	for _, t := range targets {
+		items = append(items, store.BatchUpdateSecretItem{
+			Id:         t.id,
+			Key:        t.key,
+			Comment:    t.comment,
+			Actor:      actor,
+			Ciphertext: t.ciphertext,
+		})
+	}
+	updated, err := s.repo.BatchUpdateSecrets(ctx, items)
+	if err != nil {
+		// 透传 ErrNotFound / 其他 err;translatePgErr 已做 unique violation → ErrConflict。
+		return err
+	}
+
+	// 5. 同步 cache:targets 顺序与 updated 顺序一致,逐对 upsert。
+	for i, t := range targets {
+		s.cacheUpsert(ctx, updated[i], t.ciphertext)
 	}
 	return nil
 }

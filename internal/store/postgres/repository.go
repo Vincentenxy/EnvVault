@@ -1669,7 +1669,7 @@ func (r *Repository) ListSecretsByProjectFolderKey(
 		{scopeType: "organization", column: "o.id"},
 	})
 	query := cte + fmt.Sprintf(`
-select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.value_ciphertext, s.comment, s.version,
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, e.sort_order, s.folder_id, f.code, s.key, s.value_ciphertext, s.comment, s.version,
        s.created_by, s.updated_by,
        s.created_at, s.updated_at
 from secrets s
@@ -1709,7 +1709,7 @@ order by e.code asc, s.key asc
 			payload []byte
 		)
 		if err := rows.Scan(
-			&secret.Id, &secret.OrgId, &secret.OrgCode, &secret.ProjectId, &secret.ProjectCode, &secret.EnvironmentId, &secret.EnvironmentCode, &secret.FolderId, &secret.FolderCode, &secret.Key, &payload, &secret.Comment, &secret.Version,
+			&secret.Id, &secret.OrgId, &secret.OrgCode, &secret.ProjectId, &secret.ProjectCode, &secret.EnvironmentId, &secret.EnvironmentCode, &secret.SortOrder, &secret.FolderId, &secret.FolderCode, &secret.Key, &payload, &secret.Comment, &secret.Version,
 			&secret.CreatedBy, &secret.UpdatedBy,
 			&secret.CreatedAt, &secret.UpdatedAt,
 		); err != nil {
@@ -1753,7 +1753,7 @@ func (r *Repository) ListSecretsInProjectByEnvs(
 		{scopeType: "organization", column: "o.id"},
 	})
 	query := cte + fmt.Sprintf(`
-select s.id, o.id, o.code, p.id, p.code, e.id, e.code, s.folder_id, f.code, s.key, s.value_ciphertext, s.comment, s.version,
+select s.id, o.id, o.code, p.id, p.code, e.id, e.code, e.sort_order, s.folder_id, f.code, s.key, s.value_ciphertext, s.comment, s.version,
        s.created_by, s.updated_by,
        s.created_at, s.updated_at
 from secrets s
@@ -1791,7 +1791,7 @@ order by e.code asc, f.code asc, s.key asc
 			payload []byte
 		)
 		if err := rows.Scan(
-			&secret.Id, &secret.OrgId, &secret.OrgCode, &secret.ProjectId, &secret.ProjectCode, &secret.EnvironmentId, &secret.EnvironmentCode, &secret.FolderId, &secret.FolderCode, &secret.Key, &payload, &secret.Comment, &secret.Version,
+			&secret.Id, &secret.OrgId, &secret.OrgCode, &secret.ProjectId, &secret.ProjectCode, &secret.EnvironmentId, &secret.EnvironmentCode, &secret.SortOrder, &secret.FolderId, &secret.FolderCode, &secret.Key, &payload, &secret.Comment, &secret.Version,
 			&secret.CreatedBy, &secret.UpdatedBy,
 			&secret.CreatedAt, &secret.UpdatedAt,
 		); err != nil {
@@ -1855,6 +1855,86 @@ order by s.key asc
 		items = append(items, record)
 	}
 	return items, rows.Err()
+}
+
+// BatchUpdateSecrets 单事务批量更新 secret + 1 条 batch audit。
+// N 条 UPDATE,每条 RETURNING id;任一条 UPDATE 影响 0 行(secret 不存在/已软删)→
+// rollback 整批并返 ErrNotFound。全部 UPDATE 成功后,1 条
+// audit_records(action="update_batch", resource_type="secret",
+// encrypted_value=jsonb([{secretId, key}, ...]))。
+// commit 后用 r.GetSecret 拉每条的完整 metadata(带 path / 4 级 codes)。
+func (r *Repository) BatchUpdateSecrets(ctx context.Context, items []store.BatchUpdateSecretItem) ([]Secret, error) {
+	if len(items) == 0 {
+		return []Secret{}, nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	// 预序列化 ciphertext。任一条 serialize 失败 → 整批 abort。
+	type pending struct {
+		item    store.BatchUpdateSecretItem
+		payload []byte
+	}
+	pendings := make([]pending, 0, len(items))
+	for _, it := range items {
+		payload, err := json.Marshal(it.Ciphertext)
+		if err != nil {
+			return nil, err
+		}
+		pendings = append(pendings, pending{item: it, payload: payload})
+	}
+
+	auditEntries := make([]map[string]any, 0, len(pendings))
+	updatedIds := make([]string, 0, len(pendings))
+
+	for _, p := range pendings {
+		var secretId string
+		err := tx.QueryRowContext(ctx, `
+update secrets
+set key = $2, value_ciphertext = $3, comment = $4, version = version + 1, updated_by = $5, updated_at = now()
+where id = $1 and is_deleted = false
+returning id
+`, p.item.Id, p.item.Key, string(p.payload), p.item.Comment, p.item.Actor).Scan(&secretId)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("secret %s: %w", p.item.Id, ErrNotFound)
+		}
+		if err != nil {
+			return nil, translatePgErr(err)
+		}
+		updatedIds = append(updatedIds, secretId)
+		auditEntries = append(auditEntries, map[string]any{
+			"secretId": secretId,
+			"key":      p.item.Key,
+		})
+	}
+
+	// 1 条 batch audit。
+	auditPayload, err := json.Marshal(auditEntries)
+	if err != nil {
+		return nil, fmt.Errorf("marshal batch update audit: %w", err)
+	}
+	if err := recordAuditTx(ctx, tx, items[0].Actor, "secret", "batch", "update_batch", auditPayload); err != nil {
+		return nil, fmt.Errorf("record update_batch audit: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	// commit 后拉每条完整 metadata。
+	out := make([]Secret, 0, len(updatedIds))
+	for _, id := range updatedIds {
+		sec, err := r.GetSecret(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("post-commit GetSecret(%s): %w", id, err)
+		}
+		out = append(out, sec)
+	}
+	return out, nil
 }
 
 func (r *Repository) DeleteSecret(ctx context.Context, id, actor string) error {

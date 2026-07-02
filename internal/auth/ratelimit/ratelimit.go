@@ -26,7 +26,7 @@ import (
 	"strconv"
 	"time"
 
-	goredis "github.com/go-redis/redis/v8"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 // ErrRateLimited 当 ip 触发频控时返回。
@@ -179,7 +179,7 @@ type redisAdapter struct {
 }
 
 func (a *redisAdapter) ZAdd(ctx context.Context, key string, score float64, member string) error {
-	return a.client.ZAdd(ctx, key, &goredis.Z{Score: score, Member: member}).Err()
+	return a.client.ZAdd(ctx, key, goredis.Z{Score: score, Member: member}).Err()
 }
 
 func (a *redisAdapter) ZRemRangeByScore(ctx context.Context, key, min, max string) error {

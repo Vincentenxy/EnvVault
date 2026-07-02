@@ -1,5 +1,16 @@
 # EnvVault 后续设计待办
 
+## 已完成：依赖升级（2026-07-02）
+
+- [x] `github.com/gin-gonic/gin` v1.9.1 → v1.12.0
+- [x] `github.com/golang-jwt/jwt/v4` → `github.com/golang-jwt/jwt/v5` v5.3.1
+- [x] `github.com/go-redis/redis/v8` → `github.com/redis/go-redis/v9` v9.21.0
+- [x] `github.com/spf13/viper` v1.18.2 → v1.21.0
+- [x] `gorm.io/gorm` v1.31.1 → v1.31.2
+- [x] 所有间接依赖同步更新到兼容版本
+- [x] `go build ./...` 通过
+- [x] `go test ./...` 全部通过
+
 状态：本文件中的业务路径 `code` 设计已按清库重建方式落地到 `configs/schema.sql`、核心 CRUD 接口、Redis Secret 缓存和 `design/api/core.yaml`。后续如果已有生产数据，需要另写迁移脚本，本次不包含历史数据迁移。
 
 v3 增量：环境归项目所有（`environments.project_id`），新增 `environment_templates` org 层只读模板汇总，删除 `project_environments` 关联表，代码与 schema 已按清库重建方式落地（v2 草稿"Org 共享 env"与"Org 共享 env 权限设计"两节已标记为 superseded）。

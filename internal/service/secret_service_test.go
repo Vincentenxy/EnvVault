@@ -1157,6 +1157,10 @@ func (r *recordingRepo) CreateTopLevelFoldersInEnvs(context.Context, string, str
 	panic("not implemented")
 }
 
+func (r *recordingRepo) GetSecretsKeys(_ context.Context, ids []string) ([]string, error) {
+	return ids, nil
+}
+
 // =====================================================================
 // v11: SecretService.BatchCreate 测试
 // =====================================================================

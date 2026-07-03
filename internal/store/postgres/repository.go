@@ -1290,6 +1290,41 @@ where s.id = $1 and s.is_deleted = false
 	return secret, nil
 }
 
+func (r *Repository) GetSecretsKeys(ctx context.Context, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := r.db.QueryContext(ctx, `
+select s.id, s.key
+from secrets s
+where s.id = any($1::uuid[]) and s.is_deleted = false
+`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	keyMap := make(map[string]string, len(ids))
+	for rows.Next() {
+		var id, key string
+		if err := rows.Scan(&id, &key); err != nil {
+			return nil, err
+		}
+		keyMap[id] = key
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if k, ok := keyMap[id]; ok {
+			result = append(result, k)
+		}
+	}
+	return result, nil
+}
+
 func (r *Repository) GetSecretByKey(ctx context.Context, folderId, key string) (Secret, error) {
 	var secret Secret
 	err := r.db.QueryRowContext(ctx, `

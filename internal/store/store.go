@@ -121,6 +121,10 @@ type ResourceRepository interface {
 	// 输入 items 长度应等于 N,顺序与输出 secrets 一致。
 	BatchCreateSecrets(ctx context.Context, items []BatchCreateSecretItem) ([]domain.Secret, error)
 	GetSecret(ctx context.Context, id string) (domain.Secret, error)
+	// GetSecretsKeys 批量查询 secret 的 key,按输入 ids 顺序返回。
+	// 如果某个 id 不存在或已软删,则不在返回结果中。
+	// 调用方应通过 len(result) == len(ids) 判断是否存在缺失。
+	GetSecretsKeys(ctx context.Context, ids []string) ([]string, error)
 	GetSecretByKey(ctx context.Context, folderId, key string) (domain.Secret, error)
 	GetSecretByPath(ctx context.Context, orgCode, projectCode, envCode, folderCode, key string) (domain.Secret, error)
 	GetSecretCiphertext(ctx context.Context, id string) (domain.Secret, domain.SecretCiphertext, error)

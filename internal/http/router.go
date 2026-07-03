@@ -161,6 +161,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 				secrets := protected.Group("/secrets")
 				{
 					secrets.POST("/batchCreate", ctrl.BatchCreateSecret)
+					secrets.POST("/batchUpdate", ctrl.BatchUpdateSecret)
 					secrets.POST("/list", ctrl.ListSecretsAcrossEnvs)
 				}
 

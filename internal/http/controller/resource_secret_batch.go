@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -191,4 +192,133 @@ func checkFolderIdUniqueness(itemIdx int, envs []service.BatchCreateEnvTarget) e
 		}
 	}
 	return nil
+}
+
+// =============================================================================
+// 批量更新 Secret 接口
+//
+// 端点: POST /api/v1/secrets/batchUpdate
+//
+// 请求体:
+//
+//	{
+//	    "values": [
+//	        { "id": "uuid-1", "value": "new-value-1" },
+//	        { "id": "uuid-2", "value": "new-value-2" }
+//	    ],
+//	    "key": "DATABASE_URL",
+//	    "comment": "updated comment"
+//	}
+//
+// 逻辑:
+//  1. values 至少 1 条,最多 100 条
+//  2. 每条 id 必填且为合法 UUID
+//  3. key 必填且匹配 ^[A-Z][A-Z0-9_]*$
+//  4. 所有 id 共享同一个 key 和 comment
+//  5. 权限校验:对每条 secret 校验 secret:update 权限
+//  6. 加密 value 后调 repo.BatchUpdateSecrets 单事务批量 UPDATE + 1 条 batch audit
+//  7. 任一失败整批回滚
+//
+// 响应: HTTP 200 + body code=0 成功 / code=-1 失败
+// =============================================================================
+
+// batchUpdateValueItem 单条 secret 的批量更新值规格。
+type batchUpdateValueItem struct {
+	Id    string `json:"id"`
+	Value string `json:"value"`
+}
+
+// batchUpdateSecretRequest 接收 batchUpdate 端点入参。
+type batchUpdateSecretRequest struct {
+	Values  []batchUpdateValueItem `json:"values"`
+	Key     string                 `json:"key"`
+	Comment string                 `json:"comment,omitempty"`
+}
+
+// BatchUpdateSecret 批量更新 secret。
+//
+// 与 batchCreate 共享相同的失败出口风格:HTTP 200 + body code=-1 + msg 描述。
+func (ctrl *Controller) BatchUpdateSecret(c *gin.Context) {
+	var req batchUpdateSecretRequest
+	if !ctrl.bind(c, &req) {
+		return
+	}
+
+	// 校验 values
+	if len(req.Values) == 0 {
+		response.FailWithMsg(c, "values 不能为空")
+		return
+	}
+	if len(req.Values) > 100 {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "values max length is 100")
+		return
+	}
+	if strings.TrimSpace(req.Key) == "" {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "key 不能为空")
+		return
+	}
+	if !secretKeyPattern.MatchString(req.Key) {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest,
+			"key 格式错误,必须匹配 ^[A-Z][A-Z0-9_]*$")
+		return
+	}
+	for i, item := range req.Values {
+		if strings.TrimSpace(item.Id) == "" {
+			response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest,
+				fmt.Sprintf("values[%d].id 不能为空", i))
+			return
+		}
+		if !uuidPattern.MatchString(item.Id) {
+			response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest,
+				fmt.Sprintf("values[%d].id 格式错误,必须为 UUID", i))
+			return
+		}
+	}
+
+	ctrl.log(c, "BatchUpdateSecret", logging.F("items", len(req.Values)))
+
+	domainReq, err := batchUpdateSecretRequestToDomain(req)
+	if err != nil {
+		writeBatchUpdateError(c, "入参校验", err)
+		return
+	}
+
+	user := auth.UserFromContext(c)
+	if err := ctrl.secret.BatchUpdateByIDs(c.Request.Context(), user, domainReq, ctrl.actor(c)); err != nil {
+		writeBatchUpdateError(c, "更新失败", err)
+		return
+	}
+	response.OKWithCode(c, response.CodeSuccess, "success", nil)
+}
+
+// writeBatchUpdateError 统一失败出口:HTTP 200 + body code=-1 + msg 拼接。
+// 与 writeBatchCreateError 行为一致。
+func writeBatchUpdateError(c *gin.Context, prefix string, err error) {
+	logging.Warn(c.Request.Context(), "writeBatchUpdate", "request failed", logging.F("error", err))
+	msg := prefix + "，" + err.Error()
+	switch {
+	case errors.Is(err, auth.ErrPermissionDenied):
+		msg = prefix + "，权限不足"
+	case errors.Is(err, domain.ErrNotFound):
+		msg = prefix + "，secret 不存在"
+	case errors.Is(err, domain.ErrConflict):
+		msg = prefix + "，secret 冲突"
+	}
+	response.OKWithCode(c, response.CodeFailure, msg, nil)
+}
+
+// batchUpdateSecretRequestToDomain 把 HTTP DTO 翻译成 service.BatchUpdateByIDsRequest。
+func batchUpdateSecretRequestToDomain(req batchUpdateSecretRequest) (service.BatchUpdateByIDsRequest, error) {
+	values := make([]service.BatchUpdateByIDsValueSpec, 0, len(req.Values))
+	for _, item := range req.Values {
+		values = append(values, service.BatchUpdateByIDsValueSpec{
+			Id:    item.Id,
+			Value: item.Value,
+		})
+	}
+	return service.BatchUpdateByIDsRequest{
+		Values:  values,
+		Key:     req.Key,
+		Comment: req.Comment,
+	}, nil
 }

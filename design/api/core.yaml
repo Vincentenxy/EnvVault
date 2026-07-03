@@ -1573,6 +1573,55 @@ paths:
               schema:
                 $ref: "#/components/schemas/Response"
 
+  /api/v1/secrets/batchUpdate:
+    post:
+      tags: [Secrets]
+      summary: Batch update secrets by id (shared key and comment)
+      description: |
+        Updates N secrets in a single transaction. All secrets in `values`
+        share the same `key` and `comment`. Each entry in `values` specifies
+        the secret `id` and its new `value`. The system updates all secrets
+        atomically in one transaction (all-or-nothing) with **one** batch
+        audit record.
+
+        Use case: rotating the value of the same logical key (e.g.
+        `DATABASE_URL`) across multiple secret instances in one request,
+        instead of N serial `/secret/update` calls.
+
+        **Constraints**:
+          - `values` must contain 1–100 items.
+          - Each item's `id` is required and must be a valid UUID.
+          - `key` is required and must match `^[A-Z][A-Z0-9_]*$`.
+          - All secrets share the same `key` and `comment`.
+          - Each item requires `secret:update` permission on the target
+            secret (checked individually; any denial aborts the whole batch).
+          - The value is encrypted server-side before persisting.
+          - The whole batch runs in one transaction; any failure rolls back
+            all changes.
+
+        **Error handling**: all responses return HTTP 200 with business code
+        in the body (same convention as `batchCreate`):
+          - `0` — success; `data` is `null`.
+          - `-1` — business failure (permission denied, secret not found,
+            conflict, or internal error).
+          - `1002` — invalid request (empty `values`, invalid UUID,
+            invalid key format, `values` > 100 items).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SecretBatchUpdateRequest"
+      responses:
+        "200":
+          description: |
+            Batch update response. **All responses** return HTTP 200; the
+            body code discriminates. The `data` field is always `null`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Response"
+
   /api/v1/secrets/list:
     post:
       tags: [Secrets]
@@ -2781,6 +2830,51 @@ components:
           type: string
           description: The plaintext value of the secret.
           example: postgres://dev.local/db
+
+    SecretBatchUpdateRequest:
+      type: object
+      description: |
+        Batch update request. All secrets in `values` share the same `key`
+        and `comment`. Each entry in `values` specifies the secret `id` and
+        its new `value`. The system updates all secrets in a single
+        transaction (all-or-nothing) with **one** batch audit record.
+      required: [values, key]
+      properties:
+        values:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: |
+            List of (id, value) pairs. Each `id` must be a valid UUID of an
+            existing secret. All entries share the same `key` and `comment`
+            from the top-level fields.
+          items:
+            $ref: "#/components/schemas/SecretBatchUpdateValueItem"
+        key:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]*$"
+          description: |
+            The new key for **all** secrets in `values`. Must match
+            `^[A-Z][A-Z0-9_]*$`.
+          example: DATABASE_URL
+        comment:
+          type: string
+          description: |
+            Optional new comment for **all** secrets in `values`.
+
+    SecretBatchUpdateValueItem:
+      type: object
+      required: [id, value]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The id of the secret to update.
+          example: f47ac10b-58cc-4372-a567-0e02b2c3d479
+        value:
+          type: string
+          description: The new plaintext value of the secret.
+          example: postgres://prod.local/db
 
     SecretListAcrossEnvsRequest:
       type: object

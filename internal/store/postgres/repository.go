@@ -1941,18 +1941,22 @@ returning id
 			return nil, translatePgErr(err)
 		}
 		updatedIds = append(updatedIds, secretId)
+		// 每条 secret 独立 audit(与 UpdateSecret 一致)。
+		if err := recordAuditTx(ctx, tx, p.item.Actor, "secret", secretId, "update", p.payload); err != nil {
+			return nil, fmt.Errorf("record update audit for secret %s: %w", secretId, err)
+		}
 		auditEntries = append(auditEntries, map[string]any{
 			"secretId": secretId,
 			"key":      p.item.Key,
 		})
 	}
 
-	// 1 条 batch audit。
+	// 1 条 batch audit 汇总。
 	auditPayload, err := json.Marshal(auditEntries)
 	if err != nil {
 		return nil, fmt.Errorf("marshal batch update audit: %w", err)
 	}
-	if err := recordAuditTx(ctx, tx, items[0].Actor, "secret", "batch", "update_batch", auditPayload); err != nil {
+	if err := recordAuditTx(ctx, tx, items[0].Actor, "secret", updatedIds[0], "update_batch", auditPayload); err != nil {
 		return nil, fmt.Errorf("record update_batch audit: %w", err)
 	}
 

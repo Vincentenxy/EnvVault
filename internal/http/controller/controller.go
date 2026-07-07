@@ -28,6 +28,7 @@ type Dependencies struct {
 	RBAC       service.RBACService
 	Tree       service.TreeService
 	Auth       service.AuthService
+	PAT        service.AccessTokenService
 	Authorizer auth.Authorizer
 	Cache      *redis.Cache
 	Database   interface {
@@ -43,6 +44,7 @@ type Controller struct {
 	rbac       service.RBACService
 	tree       service.TreeService
 	auth       service.AuthService
+	pat        service.AccessTokenService
 	authorizer auth.Authorizer
 	cache      *redis.Cache
 	database   interface {
@@ -58,6 +60,7 @@ func New(deps Dependencies) *Controller {
 		rbac:       deps.RBAC,
 		tree:       deps.Tree,
 		auth:       deps.Auth,
+		pat:        deps.PAT,
 		authorizer: deps.Authorizer,
 		cache:      deps.Cache,
 		database:   deps.Database,

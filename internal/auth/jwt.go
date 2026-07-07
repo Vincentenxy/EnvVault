@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
@@ -38,6 +39,8 @@ var (
 // 字段语义:
 //   - UserId:EnvVault 用户 ID(对应 users.id,也是 RBAC authorizer 的输入)
 //   - Name:用户显示名
+//   - StaffUserId:公司统一 JWT 中的 staffuserid,映射到 users.external_user_id
+//   - StaffEmail:公司统一 JWT 中的 staffemail,映射到 users.email
 //   - JWT / Cookie:保留字段,现版本未使用(给未来「内嵌前一个 token」之类场景)
 //   - TokensValidAfterAt:登录时刻的 tokens_valid_after 快照(unix 秒)。
 //     middleware 比对 cache.Get(userId) 与本字段,若 cache 更新 → 401。
@@ -45,6 +48,8 @@ var (
 type Claims struct {
 	UserId             string `json:"userId,omitempty"`
 	Name               string `json:"name,omitempty"`
+	StaffUserId        string `json:"staffuserid,omitempty"`
+	StaffEmail         string `json:"staffemail,omitempty"`
 	JWT                string `json:"jwt,omitempty"`
 	Cookie             string `json:"cookie,omitempty"`
 	TokensValidAfterAt int64  `json:"tva,omitempty"`
@@ -74,6 +79,10 @@ type JWTConfig struct {
 	// TokensCache 进程内 userId → tokensValidAfter 缓存。
 	// nil 时跳过强制登出校验(降级为「无 revocation 机制」,开发态可用)。
 	TokensCache *TokensCache
+	// UserResolver 公司统一 JWT 用户解析回调。
+	// 当 JWT 包含 staffuserid 时调用:通过 staffuserid 查找或自动创建用户,
+	// 返回内部 userId 和显示名。nil 时走原逻辑(直接用 claims.UserId)。
+	UserResolver func(ctx context.Context, staffUserId string, claims *Claims) (userId, name string, err error)
 }
 
 func UserFromContext(c *gin.Context) UserInfo {
@@ -114,10 +123,38 @@ func JWTMiddleware(cfg JWTConfig) gin.HandlerFunc {
 			abort(c, http.StatusUnauthorized, jwt.ErrTokenInvalidClaims)
 			return
 		}
-		if !idutil.IsUUID(claims.UserId) {
-			logging.Warn(c.Request.Context(), "JWTMiddleware", "invalid jwt userId", logging.F("user_id", claims.UserId))
-			abort(c, http.StatusUnauthorized, ErrInvalidUserID)
-			return
+
+		// 公司统一 JWT 分支:包含 staffuserid → 通过 UserResolver 定位/创建用户
+		if claims.StaffUserId != "" && cfg.UserResolver != nil {
+			resolvedId, resolvedName, resolveErr := cfg.UserResolver(c.Request.Context(), claims.StaffUserId, claims)
+			if resolveErr != nil {
+				logging.Error(c.Request.Context(), "JWTMiddleware", "user resolver failed",
+					logging.F("staffuserid", claims.StaffUserId), logging.F("error", resolveErr))
+				abort(c, http.StatusUnauthorized, errors.New("user resolution failed"))
+				return
+			}
+			if !idutil.IsUUID(resolvedId) {
+				logging.Error(c.Request.Context(), "JWTMiddleware", "resolved userId is not a valid UUID",
+					logging.F("staffuserid", claims.StaffUserId), logging.F("resolved_id", resolvedId))
+				abort(c, http.StatusUnauthorized, ErrInvalidUserID)
+				return
+			}
+			// 用解析出的内部用户信息覆盖 Claims
+			claims.UserId = resolvedId
+			if resolvedName != "" {
+				claims.Name = resolvedName
+			}
+			logging.Info(c.Request.Context(), "JWTMiddleware", "company jwt user resolved",
+				logging.F("staffuserid", claims.StaffUserId),
+				logging.F("user_id", claims.UserId),
+				logging.F("name", claims.Name))
+		} else {
+			// 内部 JWT 分支:直接用 claims.UserId
+			if !idutil.IsUUID(claims.UserId) {
+				logging.Warn(c.Request.Context(), "JWTMiddleware", "invalid jwt userId", logging.F("user_id", claims.UserId))
+				abort(c, http.StatusUnauthorized, ErrInvalidUserID)
+				return
+			}
 		}
 
 		// v9: 强制登出校验。cache 未配置时降级放行;cache miss 时 loader 拉 DB,

@@ -11,14 +11,23 @@ auth:
   # 如果通过环境变量传入，可以使用 \n 表示换行。
   public_key: |-
     -----BEGIN PUBLIC KEY-----
-    MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtNEtLpF84e3n3tGMbsJV
-    70UxYvvmAIovOocHkjOSWrRd2J0lhgA1O6oPB1BOhxZC0AUI2Fko0B95wKq2DPwp
-    bCl0ZYPiN1DH+LJMKj6lMgc/gstHOM2I4Pu0S+Kn6Yqe1L14wgtzN70NLJu5FHTP
-    RXP9iLghjQpRPC7xXFK6uyE8eaMu4s7Qr2Jh9g15qBiBz1dZ86Yh3HiZWxes6exk
-    YdA89SIIWaUneJ8xj31g/xHzUbUCBEo6/CY1Mef1mNzIDtzt8bYLrvsgjrkQm8wS
-    S/uEGa+TTTBeOSf70FUP3obo9oV3S1Ff+tYWfQZm/Oer4gMl6ql3+RJiAm7SpQE2
-    jwIDAQAB
+    MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqyaNcMcq/PL94alSk4+6
+    fPt2ivzz7bCjwRopJM8P/rQvZpV8h7i9xrEdVlF0LgkH1a/990OnxJW3vMTT76JR
+    aHX+UwAAWeSEQfuVIbPB92l1+YyfhHCsaoLHl1fI/PIRRar5c9XG7ntb4SBQQcXS
+    qr/T5HW570dZ+v6LgIjHILX8BCt+sh6P84OTo1/tqJRSWsPsuFXm3nP22/GXqemj
+    88JOrlLuzg824f/tBqQJcEJkP4e6BAggNVYBVZTVw0xQ0aykCdRlWgeFK58tQohT
+    8inaGDOodHw51TA/H8bGdH/P1jK1gHyBtZJXbhwz9fTbdxaRNnoz2wI1HPrAyEeC
+    NQIDAQAB
     -----END PUBLIC KEY-----
+#    -----BEGIN PUBLIC KEY-----
+#    MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtNEtLpF84e3n3tGMbsJV
+#    70UxYvvmAIovOocHkjOSWrRd2J0lhgA1O6oPB1BOhxZC0AUI2Fko0B95wKq2DPwp
+#    bCl0ZYPiN1DH+LJMKj6lMgc/gstHOM2I4Pu0S+Kn6Yqe1L14wgtzN70NLJu5FHTP
+#    RXP9iLghjQpRPC7xXFK6uyE8eaMu4s7Qr2Jh9g15qBiBz1dZ86Yh3HiZWxes6exk
+#    YdA89SIIWaUneJ8xj31g/xHzUbUCBEo6/CY1Mef1mNzIDtzt8bYLrvsgjrkQm8wS
+#    S/uEGa+TTTBeOSf70FUP3obo9oV3S1Ff+tYWfQZm/Oer4gMl6ql3+RJiAm7SpQE2
+#    jwIDAQAB
+#    -----END PUBLIC KEY-----
   # 仅用于本地测试。开启后会注册 POST /api/v1/auth/dev/token，用下面的私钥签发测试 JWT。
   dev_token_enabled: true
   dev_private_key: |-

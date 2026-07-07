@@ -10,6 +10,7 @@ import (
 	"envVault/internal/http/controller"
 	"envVault/internal/logging"
 	"envVault/internal/service"
+	"envVault/internal/store"
 	"envVault/internal/store/postgres"
 	"envVault/internal/store/redis"
 )
@@ -21,10 +22,16 @@ type Dependencies struct {
 	RBAC        service.RBACService
 	Tree        service.TreeService
 	Auth        service.AuthService
+	PAT         service.AccessTokenService
+	PATStore    store.AccessTokenRepository
 	TokensCache *auth.TokensCache
 	Authorizer  auth.Authorizer
 	Cache       *redis.Cache
-	Database    interface {
+	UserCache   *postgres.UserCache
+	// UserResolver 公司统一 JWT 用户解析回调(通过 staffuserid 查找/创建用户)。
+	// nil 时 JWT 中间件走原逻辑(直接用 claims.UserId)。
+	UserResolver func(ctx context.Context, staffUserId string, claims *auth.Claims) (userId, name string, err error)
+	Database     interface {
 		PingContext(ctx context.Context) error
 	}
 }
@@ -51,6 +58,7 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 		RBAC:       deps.RBAC,
 		Tree:       deps.Tree,
 		Auth:       deps.Auth,
+		PAT:        deps.PAT,
 		Authorizer: deps.Authorizer,
 		Cache:      deps.Cache,
 	})
@@ -79,10 +87,22 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 			protected := v1.Group("")
 			{
 				if deps.Config.Auth.Enabled {
-					protected.Use(auth.JWTMiddleware(auth.JWTConfig{
-						PublicKey:   deps.Config.Auth.PublicKey,
-						TokensCache: deps.TokensCache,
-					}))
+					// 构建 PAT 配置(可选:若 PATStore 未配置,中间件会降级拒绝 PAT 请求)
+					patCfg := auth.PATConfig{
+						ValidatePAT: deps.PATStore.ValidatePAT,
+					}
+					if deps.UserCache != nil {
+						uc := deps.UserCache
+						patCfg.UserNameLoader = func(ctx context.Context, userId string) string {
+							return uc.Label(userId)
+						}
+					}
+					jwtCfg := auth.JWTConfig{
+						PublicKey:    deps.Config.Auth.PublicKey,
+						TokensCache:  deps.TokensCache,
+						UserResolver: deps.UserResolver,
+					}
+					protected.Use(auth.CombinedAuthMiddleware(patCfg, jwtCfg))
 				} else {
 					protected.Use(auth.StaticUserMiddleware(auth.UserInfo{
 						UserId: deps.Config.Auth.DevUserId,
@@ -215,6 +235,14 @@ func LoadApiRoutes(r *gin.Engine, deps Dependencies) {
 				tree := protected.Group("/tree")
 				{
 					tree.POST("/get", ctrl.GetResourceTree)
+				}
+
+				// Personal Access Token (PAT) 管理
+				accessToken := protected.Group("/accessToken")
+				{
+					accessToken.POST("/create", ctrl.CreatePAT)
+					accessToken.POST("/list", ctrl.ListPATs)
+					accessToken.POST("/delete", ctrl.DeletePAT)
 				}
 			}
 		}

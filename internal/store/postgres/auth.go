@@ -11,6 +11,7 @@ import (
 	"envVault/internal/domain"
 	uuidgen "envVault/internal/id"
 	"envVault/internal/store"
+
 	"gorm.io/gorm"
 )
 
@@ -443,6 +444,73 @@ returning id
 		return "", translatePgErr(err)
 	}
 	return storedId, nil
+}
+
+// EnsureJWTUser 通过 company JWT 的 staffuserid 查找或自动创建用户。
+//
+// 流程:
+//  1. 按 external_user_id = staffUserId 查找用户
+//  2. 找到 → 更新 last_seen_at,返回 (id, name)
+//  3. 未找到 → 创建新用户(source='jwt'),返回 (newId, name)
+//
+// 用于对接公司统一 JWT:staffuserid 映射到 users.external_user_id。
+func (s *AuthStore) EnsureJWTUser(ctx context.Context, staffUserId, name, email string) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+	if s == nil || s.db == nil {
+		return "", "", errors.New("auth store is not configured")
+	}
+	staffUserId = strings.TrimSpace(staffUserId)
+	if staffUserId == "" {
+		return "", "", errors.New("staffUserId is required")
+	}
+	name = strings.TrimSpace(name)
+	email = strings.TrimSpace(strings.ToLower(email))
+
+	// 1) 尝试查找已有用户
+	var userId, userName string
+	err := s.db.QueryRowContext(ctx, `
+select id, name from users
+where external_user_id = $1 and is_disabled = false
+`, staffUserId).Scan(&userId, &userName)
+	if err == nil {
+		// 找到了,更新 last_seen_at
+		_, _ = s.db.ExecContext(ctx, `update users set last_seen_at = now() where id = $1`, userId)
+		if userName == "" {
+			userName = name
+		}
+		return userId, userName, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", "", err
+	}
+
+	// 2) 未找到,创建新用户
+	newId, err := uuidgen.NewUUID()
+	if err != nil {
+		return "", "", err
+	}
+	// name 为空时降级用 staffUserId 作为显示名
+	displayName := name
+	if displayName == "" {
+		displayName = staffUserId
+	}
+	// email 为空时留空串(users.email 允许空串)
+	if email == "" {
+		email = ""
+	}
+	err = s.db.QueryRowContext(ctx, `
+insert into users (id, external_user_id, name, email, source, last_seen_at)
+values ($1, $2, $3, $4, 'jwt', now())
+returning id, name
+`, newId, staffUserId, displayName, email).Scan(&userId, &userName)
+	if err != nil {
+		return "", "", fmt.Errorf("insert jwt user: %w", err)
+	}
+
+	s.cacheUserLabel(userId, userName)
+	return userId, userName, nil
 }
 
 // Compile-time guard:确保 AuthStore 满足 store.AuthRepository。

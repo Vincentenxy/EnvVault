@@ -190,16 +190,30 @@ type AuditRecord struct {
 
 // ListFilter 是 ListSecrets / SearchSecrets 的过滤条件。
 //
-// OrgId 不在此处:"按 org 列全部 secret" 等同于安全事件级别的危险操作,
-// 不应该通过一个普通 list 接口暴露;由专门的"审计导出"接口另说。
+// OrgId 不在此处:“按 org 列全部 secret” 等同于安全事件级别的危险操作,
+// 不应该通过一个普通 list 接口暴露;由专门的“审计导出”接口另说。
 //
-// ProjectId 允许作为"仅按 project 收窄"的兜底粒度:当 caller 不指 folder
+// ProjectId 允许作为“仅按 project 收窄”的兆底粒度:当 caller 不指 folder
 // 也不指 env、但又不想全量扫时,projectId 就是最粗的合法 scope。
 // List / Search 内部的优先级(folder > env > project)由 service 层负责收敛,
-// 这里只承载原始字段,不做"忽略谁"这种语义判断。
+// 这里只承载原始字段,不做“忽略谁”这种语义判断。
 type ListFilter struct {
 	EnvironmentId string
 	FolderId      string
 	ProjectId     string
 	Keyword       string
+}
+
+// AccessToken 是 Personal Access Token (PAT) 的领域模型。
+//
+// TokenHash 存储 SHA256(tokenPlain),TokenPrefix 存储前 16 字符供列表展示。
+// 明文 token 仅在创建时返回一次,此后不可再取。
+type AccessToken struct {
+	Id          string     `json:"id"`
+	UserId      string     `json:"userId"`
+	Name        string     `json:"name"`
+	TokenPrefix string     `json:"tokenPrefix"`
+	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
+	LastUsedAt  *time.Time `json:"lastUsedAt,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
 }

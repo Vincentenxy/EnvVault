@@ -305,3 +305,19 @@ type AuthRepository interface {
 	// 给 ratelimit 用;返回的次数含本次(若调用方先 Record 再 Count)。
 	CountRecentFailedByIP(ctx context.Context, ip string, window time.Duration) (int, error)
 }
+
+// AccessTokenRepository 持久化 Personal Access Token (PAT)。
+//
+// token 明文仅在创建时返回一次,之后只存 SHA256 hash。
+// 软删除通过 deleted_at 标记,硬删除不做(保留审计轨迹)。
+type AccessTokenRepository interface {
+	// CreateToken 存储 access token 记录。tokenHash 已 SHA256,外部不可逆推明文。
+	CreateToken(ctx context.Context, userId, name, tokenHash, tokenPrefix string, expiresAt *time.Time) (domain.AccessToken, error)
+	// ListTokensByUser 列出指定用户的所有未删除 token(不返回 hash)。
+	ListTokensByUser(ctx context.Context, userId string) ([]domain.AccessToken, error)
+	// SoftDeleteToken 软删除。只能删除自己的 token;userId 不匹配时返 ErrNotFound。
+	SoftDeleteToken(ctx context.Context, tokenId, userId string) error
+	// ValidatePAT 按 tokenHash 查找未删除且未过期的 token,验证通过返回关联 userId。
+	// token 不存在 / 已删除 / 已过期均返 ErrNotFound。
+	ValidatePAT(ctx context.Context, tokenHash string) (userId string, err error)
+}

@@ -1,4 +1,5 @@
 -- Drop statements (in reverse dependency order)
+drop table if exists access_tokens;
 drop table if exists role_binding_audit_records;
 drop table if exists user_role_bindings;
 drop table if exists role_permissions;
@@ -380,3 +381,24 @@ create index if not exists role_binding_audit_records_target_idx
 
 create index if not exists role_binding_audit_records_scope_idx
     on role_binding_audit_records (scope_type, scope_id, created_at desc);
+
+-- Personal Access Tokens (类似 GitLab PAT)
+create table if not exists access_tokens (
+    id uuid primary key,
+    user_id uuid not null references users(id),
+    name text not null,
+    token_hash text not null,
+    token_prefix text not null,
+    expires_at timestamptz,
+    last_used_at timestamptz,
+    created_at timestamptz not null default now(),
+    deleted_at timestamptz
+);
+
+create unique index if not exists access_tokens_token_hash_uidx
+    on access_tokens (token_hash)
+    where deleted_at is null;
+
+create index if not exists access_tokens_user_id_idx
+    on access_tokens (user_id)
+    where deleted_at is null;

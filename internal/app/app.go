@@ -49,6 +49,7 @@ func Run() error {
 	repository := postgres.NewRepository(db, userCache)
 	rbacStore := postgres.NewRBACStore(db, gormDB, userCache)
 	authStore := postgres.NewAuthStore(db, gormDB, userCache)
+	patStore := postgres.NewPATStore(db)
 	if err := rbacStore.EnsureSystemData(ctx); err != nil {
 		return err
 	}
@@ -132,6 +133,7 @@ func Run() error {
 		TokenTTL:       cfg.Auth.TokenTTL,
 		PasswordMinLen: cfg.Auth.PasswordMinLength,
 	})
+	patSvc := service.NewAccessTokenService(patStore)
 
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Config:      cfg,
@@ -141,9 +143,15 @@ func Run() error {
 		RBAC:        rbacSvc,
 		Tree:        treeSvc,
 		Auth:        authSvc,
+		PAT:         patSvc,
+		PATStore:    patStore,
 		TokensCache: tokensCache,
 		Authorizer:  authorizer,
 		Cache:       cache,
+		UserCache:   userCache,
+		UserResolver: func(ctx context.Context, staffUserId string, claims *auth.Claims) (string, string, error) {
+			return authStore.EnsureJWTUser(ctx, staffUserId, claims.Name, claims.StaffEmail)
+		},
 	})
 
 	server := &http.Server{

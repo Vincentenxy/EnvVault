@@ -199,7 +199,9 @@ func checkFolderIdUniqueness(itemIdx int, envs []service.BatchCreateEnvTarget) e
 //
 // 端点: POST /api/v1/secrets/batchUpdate
 //
-// 请求体:
+// 支持两种模式:
+//
+// 模式 1: values 非空（完整更新）
 //
 //	{
 //	    "values": [
@@ -210,14 +212,20 @@ func checkFolderIdUniqueness(itemIdx int, envs []service.BatchCreateEnvTarget) e
 //	    "comment": "updated comment"
 //	}
 //
+// 模式 2: values 为空（仅更新 comment）
+//
+//	{
+//	    "values": [],
+//	    "key": "DATABASE_URL",
+//	    "comment": "updated comment"
+//	}
+//
 // 逻辑:
-//  1. values 至少 1 条,最多 100 条
-//  2. 每条 id 必填且为合法 UUID
-//  3. key 必填且匹配 ^[A-Z][A-Z0-9_]*$
-//  4. 所有 id 共享同一个 key 和 comment
-//  5. 权限校验:对每条 secret 校验 secret:update 权限
-//  6. 加密 value 后调 repo.BatchUpdateSecrets 单事务批量 UPDATE + 1 条 batch audit
-//  7. 任一失败整批回滚
+//  1. key 必填且匹配 ^[A-Z][A-Z0-9_]*$
+//  2. values 和 comment 不能同时为空
+//  3. values 非空时: 最多 100 条, 每条 id 为合法 UUID, 所有 id 共享同一 key
+//  4. values 为空时: 按 key 查询所有同名 secret，仅更新 comment（跨环境/跨 folder）
+//  5. 单事务执行，任一失败整批回滚
 //
 // 响应: HTTP 200 + body code=0 成功 / code=-1 失败
 // =============================================================================
@@ -237,6 +245,10 @@ type batchUpdateSecretRequest struct {
 
 // BatchUpdateSecret 批量更新 secret。
 //
+// 支持两种模式:
+//  1. values 非空: 更新指定 secret 的 key + value + comment
+//  2. values 为空: 仅更新 comment（按 key 查询所有同名 secret）
+//
 // 与 batchCreate 共享相同的失败出口风格:HTTP 200 + body code=-1 + msg 描述。
 func (ctrl *Controller) BatchUpdateSecret(c *gin.Context) {
 	var req batchUpdateSecretRequest
@@ -244,15 +256,7 @@ func (ctrl *Controller) BatchUpdateSecret(c *gin.Context) {
 		return
 	}
 
-	// 校验 values
-	if len(req.Values) == 0 {
-		response.FailWithMsg(c, "values 不能为空")
-		return
-	}
-	if len(req.Values) > 100 {
-		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "values max length is 100")
-		return
-	}
+	// key 必填
 	if strings.TrimSpace(req.Key) == "" {
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "key 不能为空")
 		return
@@ -260,6 +264,12 @@ func (ctrl *Controller) BatchUpdateSecret(c *gin.Context) {
 	if !secretKeyPattern.MatchString(req.Key) {
 		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest,
 			"key 格式错误,必须匹配 ^[A-Z][A-Z0-9_]*$")
+		return
+	}
+
+	// values 非空时校验每条
+	if len(req.Values) > 100 {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest, "values max length is 100")
 		return
 	}
 	for i, item := range req.Values {
@@ -275,7 +285,14 @@ func (ctrl *Controller) BatchUpdateSecret(c *gin.Context) {
 		}
 	}
 
-	ctrl.log(c, "BatchUpdateSecret", logging.F("items", len(req.Values)))
+	// values 为空时，comment 必须有内容
+	if len(req.Values) == 0 && strings.TrimSpace(req.Comment) == "" {
+		response.Fail(c, http.StatusBadRequest, response.CodeInvalidRequest,
+			"values 和 comment 不能同时为空")
+		return
+	}
+
+	ctrl.log(c, "BatchUpdateSecret", logging.F("items", len(req.Values)), logging.F("comment_only", len(req.Values) == 0))
 
 	domainReq, err := batchUpdateSecretRequestToDomain(req)
 	if err != nil {

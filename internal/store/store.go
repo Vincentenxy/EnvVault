@@ -125,6 +125,9 @@ type ResourceRepository interface {
 	// 如果某个 id 不存在或已软删,则不在返回结果中。
 	// 调用方应通过 len(result) == len(ids) 判断是否存在缺失。
 	GetSecretsKeys(ctx context.Context, ids []string) ([]string, error)
+	// GetSecretIdsByKey 按 key 查询所有同名 secret 的 id（跨环境/跨 folder）。
+	// 用于 comment-only 批量更新场景。
+	GetSecretIdsByKey(ctx context.Context, key string) ([]string, error)
 	GetSecretByKey(ctx context.Context, folderId, key string) (domain.Secret, error)
 	GetSecretByPath(ctx context.Context, orgCode, projectCode, envCode, folderCode, key string) (domain.Secret, error)
 	GetSecretCiphertext(ctx context.Context, id string) (domain.Secret, domain.SecretCiphertext, error)
@@ -163,6 +166,9 @@ type ResourceRepository interface {
 	// 错误透传。每条 UPDATE 单独 RETURNING id,commit 后用 r.GetSecret 拿完整 metadata。
 	// 输入 items 长度应等于 N,顺序与输出 secrets 一致。
 	BatchUpdateSecrets(ctx context.Context, items []BatchUpdateSecretItem) ([]domain.Secret, error)
+	// BatchUpdateCommentByIds 仅更新 comment（不触碰 value_ciphertext）。
+	// 单事务内 N 条 UPDATE + 1 条 batch audit。
+	BatchUpdateCommentByIds(ctx context.Context, ids []string, comment, actor string) error
 	DeleteSecret(ctx context.Context, id, actor string) error
 	ListSecretCacheRecords(ctx context.Context) ([]domain.SecretCacheRecord, error)
 

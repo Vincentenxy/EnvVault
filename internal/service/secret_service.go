@@ -157,6 +157,7 @@ type BatchUpdateSecretSpec struct {
 
 // BatchUpdateByIDsRequest 是 SecretService.BatchUpdateByIDs 的入参。
 // values 中的每个 id 对应一条 secret,所有 id 共享同一个 key 和 comment。
+// 当 values 为空时，仅更新 comment（按 key 查询所有同名 secret）。
 type BatchUpdateByIDsRequest struct {
 	Values  []BatchUpdateByIDsValueSpec
 	Key     string
@@ -898,15 +899,28 @@ func (s *secretService) BatchUpdateByIDs(ctx context.Context, user auth.UserInfo
 	if strings.TrimSpace(user.UserId) == "" {
 		return auth.ErrPermissionDenied
 	}
-	// 1. 入参防御性二次校验(controller 已做,这里兜底直调 service 的场景)。
-	if len(req.Values) == 0 {
-		return errors.New("values 不能为空")
-	}
-	if len(req.Values) > 32 {
-		return errors.New("values 最多 32 条")
-	}
+	// 1. 入参防御性二次校验。
 	if strings.TrimSpace(req.Key) == "" {
 		return errors.New("key 不能为空")
+	}
+
+	// 2. 分支：values 为空 → comment-only 更新。
+	if len(req.Values) == 0 {
+		// 按 key 查询所有同名 secret 的 id。
+		ids, err := s.repo.GetSecretIdsByKey(ctx, req.Key)
+		if err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return fmt.Errorf("未找到 key=%q 的 secret", req.Key)
+		}
+		// 调用 repo 仅更新 comment。
+		return s.repo.BatchUpdateCommentByIds(ctx, ids, req.Comment, actor)
+	}
+
+	// 3. values 非空 → 完整更新（key + value + comment）。
+	if len(req.Values) > 32 {
+		return errors.New("values 最多 32 条")
 	}
 	// 校验 id 不重复
 	seen := make(map[string]struct{}, len(req.Values))

@@ -1161,6 +1161,20 @@ func (r *recordingRepo) GetSecretsKeys(_ context.Context, ids []string) ([]strin
 	return ids, nil
 }
 
+func (r *recordingRepo) GetSecretIdsByKey(_ context.Context, key string) ([]string, error) {
+	// 返回 4 个 mock id，模拟 dev/test/sim/prod 4 个环境
+	return []string{
+		"00000000-0000-0000-0000-000000000001",
+		"00000000-0000-0000-0000-000000000002",
+		"00000000-0000-0000-0000-000000000003",
+		"00000000-0000-0000-0000-000000000004",
+	}, nil
+}
+
+func (r *recordingRepo) BatchUpdateCommentByIds(_ context.Context, ids []string, comment, actor string) error {
+	return nil
+}
+
 // =====================================================================
 // v11: SecretService.BatchCreate 测试
 // =====================================================================

@@ -1325,6 +1325,32 @@ where s.id = any($1::uuid[]) and s.is_deleted = false
 	return result, nil
 }
 
+// GetSecretIdsByKey 按 key 查询所有同名 secret 的 id（跨环境/跨 folder）。
+func (r *Repository) GetSecretIdsByKey(ctx context.Context, key string) ([]string, error) {
+	if key == "" {
+		return nil, nil
+	}
+	rows, err := r.db.QueryContext(ctx, `
+select id from secrets
+where key = $1 and is_deleted = false
+order by created_at
+`, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (r *Repository) GetSecretByKey(ctx context.Context, folderId, key string) (Secret, error) {
 	var secret Secret
 	err := r.db.QueryRowContext(ctx, `
@@ -1974,6 +2000,57 @@ returning id
 		out = append(out, sec)
 	}
 	return out, nil
+}
+
+// BatchUpdateCommentByIds 仅更新 comment（不触碰 value_ciphertext）。
+// 单事务内 N 条 UPDATE + 1 条 batch audit，任一失败整批回滚。
+func (r *Repository) BatchUpdateCommentByIds(ctx context.Context, ids []string, comment, actor string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	auditEntries := make([]map[string]any, 0, len(ids))
+
+	for _, id := range ids {
+		var secretId, key string
+		err := tx.QueryRowContext(ctx, `
+update secrets
+set comment = $2, updated_by = $3, updated_at = now()
+where id = $1 and is_deleted = false
+returning id, key
+`, id, comment, actor).Scan(&secretId, &key)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("secret %s: %w", id, ErrNotFound)
+		}
+		if err != nil {
+			return translatePgErr(err)
+		}
+		// 每条 secret 独立 audit。
+		if err := recordAuditTx(ctx, tx, actor, "secret", secretId, "update_comment", nil); err != nil {
+			return fmt.Errorf("record update_comment audit for secret %s: %w", secretId, err)
+		}
+		auditEntries = append(auditEntries, map[string]any{
+			"secretId": secretId,
+			"key":      key,
+		})
+	}
+
+	// 1 条 batch audit 汇总。
+	auditPayload, err := json.Marshal(auditEntries)
+	if err != nil {
+		return fmt.Errorf("marshal batch update_comment audit: %w", err)
+	}
+	if err := recordAuditTx(ctx, tx, actor, "secret", ids[0], "update_comment_batch", auditPayload); err != nil {
+		return fmt.Errorf("record update_comment_batch audit: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 func (r *Repository) DeleteSecret(ctx context.Context, id, actor string) error {
